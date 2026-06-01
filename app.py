@@ -1,6 +1,7 @@
 import streamlit as st
 import re
 import time
+import os
 from io import BytesIO
 from docx import Document
 from docx.shared import Pt
@@ -10,7 +11,28 @@ from gemini_backend import GeminiWriterBackend
 # PAGE SETUP
 # ==========================================
 st.set_page_config(layout="wide", page_title="WriterBlock Studio")
+APP_PASSWORD = os.getenv("WRITERSBLOCK_APP_PASSWORD", "change-this-password")
 
+def require_password():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if st.session_state.authenticated:
+        return True
+
+    st.title("🔐 WritersBlock Studio Access")
+    password = st.text_input("Enter access password", type="password")
+
+    if st.button("Enter"):
+        if password == APP_PASSWORD:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+
+    st.stop()
+
+require_password()
 st.markdown(
     """
     <style>
