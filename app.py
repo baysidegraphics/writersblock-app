@@ -244,15 +244,24 @@ elif can_navigate_to_revision:
 else:
     st.sidebar.button("🔒 6. Revision Engine (Locked)", key="nav_revision_locked", disabled=True, use_container_width=True)
 
+if st.session_state.project_stage == "Checkpoint & Export":
+    st.sidebar.button("🔵 7. Checkpoint & Export (Active)", key="nav_checkpoint_active", use_container_width=True)
+elif can_navigate_to_guardrail:
+    if st.sidebar.button("⚪ 7. View Checkpoint & Export", key="nav_checkpoint", use_container_width=True):
+        st.session_state.project_stage = "Isolation Guardrail"
+        st.rerun()
+else:
+    st.sidebar.button("🔒 7. Checkpoint & Export (Locked)", key="nav_checkpoint_locked", disabled=True, use_container_width=True)
+    
 
 if st.session_state.project_stage == "Rewrite Engine":
-    st.sidebar.button("🔵 7. Rewrite Engine (Active)", key="nav_rewrite_active", use_container_width=True)
+    st.sidebar.button("🔵 8. Rewrite Engine (Active)", key="nav_rewrite_active", use_container_width=True)
 elif can_navigate_to_rewrite:
-    if st.sidebar.button("⚪ 7. View Rewrite Engine", key="nav_rewrite", use_container_width=True):
+    if st.sidebar.button("⚪ 8. View Rewrite Engine", key="nav_rewrite", use_container_width=True):
         st.session_state.project_stage = "Rewrite Engine"
         st.rerun()
 else:
-    st.sidebar.button("🔒 7. Rewrite Engine (Locked)", key="nav_rewrite_locked", disabled=True, use_container_width=True)
+    st.sidebar.button("🔒 8. Rewrite Engine (Locked)", key="nav_rewrite_locked", disabled=True, use_container_width=True)
 
 st.sidebar.markdown("---")
 
