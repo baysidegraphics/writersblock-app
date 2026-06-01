@@ -478,7 +478,12 @@ STRICT OUTPUT RULES:
 
             return response_text
 
-        except Exception as e:
+               except Exception as e:
+            error_text = str(e)
+
+            if "429" in error_text or "RESOURCE_EXHAUSTED" in error_text or "quota" in error_text.lower():
+                return "⚠️ Gemini quota limit reached. Rewrite could not be completed right now. Wait for the daily reset or enable billing, then try again."
+
             return self._fallback_rewrite_text(
                 source_text=source_text,
                 rewrite_mode=rewrite_mode,
