@@ -67,12 +67,11 @@ def show_usage_counter():
     )
 
     st.sidebar.markdown("---")
-    st.sidebar.subheader("Usage Counter")
-    st.sidebar.metric("Requests This Session", st.session_state.usage_requests)
-    st.sidebar.metric("Estimated Input Tokens", st.session_state.usage_input_tokens)
-    st.sidebar.metric("Estimated Output Tokens", st.session_state.usage_output_tokens)
-    st.sidebar.metric("Estimated Total Tokens", total_tokens)
-
+    st.sidebar.markdown("### Usage")
+    st.sidebar.caption(f"Requests: {st.session_state.usage_requests}")
+    st.sidebar.caption(f"Input est.: {st.session_state.usage_input_tokens}")
+    st.sidebar.caption(f"Output est.: {st.session_state.usage_output_tokens}")
+    st.sidebar.caption(f"Total est.: {total_tokens}")
 
 init_usage_counter()
 show_usage_counter()
