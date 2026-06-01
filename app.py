@@ -975,8 +975,11 @@ elif st.session_state.project_stage == "Rewrite Engine":
                         tone_style=st.session_state.tone_style,
                         author_style=st.session_state.author_style,
                     )
-                st.rerun()
-
+        track_usage(
+            input_text=f"{edited_source_text} {rewrite_mode} {scene_choice} {custom_rewrite_instruction} {st.session_state.tone_style} {st.session_state.author_style}",
+            output_text=str(st.session_state.rewritten_manuscript)
+        )
+        st.rerun()            
         st.subheader("✍️ Rewritten Output")
 
         st.text_area(
