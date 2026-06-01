@@ -246,13 +246,13 @@ else:
 
 
 if st.session_state.project_stage == "Rewrite Engine":
-    st.sidebar.button("🔵 8. Rewrite Engine (Active)", key="nav_rewrite_active", use_container_width=True)
+    st.sidebar.button("🔵 7. Rewrite Engine (Active)", key="nav_rewrite_active", use_container_width=True)
 elif can_navigate_to_rewrite:
-    if st.sidebar.button("⚪ 8. View Rewrite Engine", key="nav_rewrite", use_container_width=True):
+    if st.sidebar.button("⚪ 7. View Rewrite Engine", key="nav_rewrite", use_container_width=True):
         st.session_state.project_stage = "Rewrite Engine"
         st.rerun()
 else:
-    st.sidebar.button("🔒 8. Rewrite Engine (Locked)", key="nav_rewrite_locked", disabled=True, use_container_width=True)
+    st.sidebar.button("🔒 7. Rewrite Engine (Locked)", key="nav_rewrite_locked", disabled=True, use_container_width=True)
 
 st.sidebar.markdown("---")
 
