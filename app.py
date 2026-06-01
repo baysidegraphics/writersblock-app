@@ -963,9 +963,9 @@ elif st.session_state.project_stage == "Rewrite Engine":
 
     if st.button("Run Rewrite Engine 🛠️", key="run_rewrite_engine", type="primary", use_container_width=True):
         if not edited_source_text.strip():
-            st.error("No source text selected for rewrite.")
-    else:
-        with st.spinner("Running rewrite engine..."):
+         st.error("No source text selected for rewrite.")
+        else:
+         with st.spinner("Running rewrite engine..."):
             rewritten_result = st.session_state.backend.run_rewrite_engine(
                 source_text=edited_source_text,
                 rewrite_mode=rewrite_mode,
@@ -975,10 +975,10 @@ elif st.session_state.project_stage == "Rewrite Engine":
                 author_style=st.session_state.author_style,
             )
 
-            st.session_state.rewritten_manuscript = rewritten_result
-            st.session_state.rewrite_applied_message = ""
+        st.session_state.rewritten_manuscript = rewritten_result
+        st.session_state.rewrite_applied_message = ""
+        st.rerun()
 
-                st.rerun()   
         st.subheader("✍️ Rewritten Output")
 
         st.text_area(
