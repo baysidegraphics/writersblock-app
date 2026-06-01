@@ -33,6 +33,49 @@ def require_password():
     st.stop()
 
 require_password()
+# =====================================
+# SESSION USAGE COUNTER
+# =====================================
+
+def init_usage_counter():
+    if "usage_requests" not in st.session_state:
+        st.session_state.usage_requests = 0
+
+    if "usage_input_tokens" not in st.session_state:
+        st.session_state.usage_input_tokens = 0
+
+    if "usage_output_tokens" not in st.session_state:
+        st.session_state.usage_output_tokens = 0
+
+
+def estimate_tokens(text):
+    if not text:
+        return 0
+    return max(1, len(str(text)) // 4)
+
+
+def track_usage(input_text="", output_text=""):
+    st.session_state.usage_requests += 1
+    st.session_state.usage_input_tokens += estimate_tokens(input_text)
+    st.session_state.usage_output_tokens += estimate_tokens(output_text)
+
+
+def show_usage_counter():
+    total_tokens = (
+        st.session_state.usage_input_tokens
+        + st.session_state.usage_output_tokens
+    )
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Usage Counter")
+    st.sidebar.metric("Requests This Session", st.session_state.usage_requests)
+    st.sidebar.metric("Estimated Input Tokens", st.session_state.usage_input_tokens)
+    st.sidebar.metric("Estimated Output Tokens", st.session_state.usage_output_tokens)
+    st.sidebar.metric("Estimated Total Tokens", total_tokens)
+
+
+init_usage_counter()
+show_usage_counter()
 st.markdown(
     """
     <style>
@@ -354,6 +397,10 @@ if st.session_state.project_stage == "Intake":
                     format_type=st.session_state.format_type,
                     tone_style=st.session_state.tone_style,
                     author_style=st.session_state.author_style,
+                )
+                track_usage(
+                    input_text=f"{st.session_state.story_seed} {st.session_state.format_type} {st.session_state.tone_style} {st.session_state.author_style}",
+                    output_text=str(st.session_state.sandbox_slates)
                 )
                 st.session_state.chosen_option = None
                 st.session_state.chosen_option_text = None
