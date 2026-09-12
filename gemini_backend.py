@@ -1,5 +1,6 @@
 import os
 import re
+import json
 from pathlib import Path
 from google import genai
 from google.genai import types
@@ -57,6 +58,15 @@ Core Input Seed: {story_seed}
 Format Target: {format_type}
 Tone/Aesthetic Base: {tone_style}
 {author_context}
+Audio Short Story Rule:
+If Format Target is "Audio Short Story — 15–30 min", shape all three sandbox options as narration-ready short audio fiction designed for a 15–30 minute listening experience.
+Keep the structure simple, the cast limited, scene changes clear, pacing smooth, and the ending complete.
+Avoid overcomplicated timelines, dense exposition, or visual-only storytelling that would be confusing when heard aloud.
+
+Children’s Picture Book Standard:
+If Format Target is "Children's Picture Book (32-Page Layout)", shape all sandbox options as a concise children’s picture book intended for a 32-page, 8.5 x 8.5 square planning layout.
+Keep the story visually driven, child-friendly, and suitable for approximately 500–800 finished story words.
+Plan for strong page-turn moments and illustration opportunities, but do not embed page-layout metadata or illustration prompts in the story itself.
 
 Generate exactly 3 unique narrative direction slates matching these distinct structural strategies:
 
@@ -147,6 +157,15 @@ SEED: {story_seed}
 FORMAT: {format_type}
 TONE: {tone_style}
 
+Audio Short Story Rule:
+If FORMAT is "Audio Short Story — 15–30 min", construct the outline as a narration-ready short audio story designed for a 15–30 minute listening experience.
+Use clear linear scene beats, limited cast, smooth pacing, simple transitions, and a complete ending.
+Do not create a complex multi-thread novel outline or screenplay-style visual-only structure.
+Children’s Picture Book Standard:
+If FORMAT is "Children's Picture Book (32-Page Layout)", construct exactly 4 structural story beats for a concise 32-page children’s picture book.
+Treat each structural beat as approximately 4 two-page spreads / 8 pages of story progression.
+Keep the total finished story suitable for approximately 500–800 words, with clear visual action and purposeful page-turn moments.
+Do not include illustration-placement metadata here; the dedicated layout-draft stage will assign text/image positions after the manuscript is finished.
 For each Scene Beat, output strictly using this bracketed data format:
 
 [BEAT 1]
@@ -229,7 +248,16 @@ Repeat this structure precisely for [BEAT 2], [BEAT 3], and [BEAT 4].
         prompt = f"""
 You are the Node 5 Recursive Drafting Engine.
 Transform this scene beat into highly polished, production-ready narrative content:
-
+Audio Short Story Rule:
+If format_type is "Audio Short Story — 15–30 min", write narration-ready prose designed to be heard aloud.
+Use smooth sentence rhythm, clear transitions, limited character confusion, natural pauses, and complete short-story pacing.
+Do not use screenplay formatting, shot directions, bracketed labels, narrator labels, production notes, or sound effect instructions.
+Children’s Picture Book Standard:
+If format_type is "Children's Picture Book (32-Page Layout)", write only polished child-friendly story prose for this structural beat.
+Keep the full manuscript concise enough to finish at approximately 500–800 words across all four beats.
+Use concrete visual action, read-aloud rhythm, simple transitions, and natural page-turn opportunities.
+Do not output page numbers, spread labels, illustration notes, image-placement notes, or illustration prompts.
+The dedicated Children’s Picture Book Layout Draft stage will divide the finished manuscript into 32 pages / 16 spreads and assign layout templates afterward.
 {current_beat_text}
 
 LORE BOOK MEMORY:
@@ -319,6 +347,163 @@ Do not use markdown code blocks.
 
         return f"{cleaned_story}\n\n=== LORE UPDATE ===\n{lore_part}".strip()
 
+    def generate_picture_book_layout(
+        self,
+        manuscript_text,
+        project_title="",
+        tone_style="",
+        author_style="",
+    ):
+        """Build a creator-editable 32-page / 16-spread picture-book planning layout."""
+        author_context = (
+            f"Author style reference: {author_style}."
+            if author_style
+            else "Use clear professional children's publishing language."
+        )
+
+        prompt = f"""
+You are the Children's Picture Book Layout Planner for WritersBlock Studios.
+
+PROJECT TITLE: {project_title or "Untitled Children's Picture Book"}
+TONE: {tone_style}
+{author_context}
+
+SOURCE MANUSCRIPT:
+{manuscript_text}
+
+TASK:
+Convert the supplied finished manuscript into exactly 16 sequential two-page spreads representing a 32-page, 8.5 x 8.5 square CHILDREN'S PICTURE BOOK PRODUCTION LAYOUT DRAFT.
+This is NOT a print-ready file. It is a planning handoff for the author, illustrator, designer, or publisher.
+
+ALLOWED LAYOUT TEMPLATES — use only one of these exact values for each spread:
+1. Full Illustration — Text Top
+2. Full Illustration — Text Bottom
+3. Text Left — Illustration Right
+4. Illustration Left — Text Right
+5. Two-Page Illustration — Text Overlay
+6. Spot Illustration — Open Text Area
+
+RULES:
+- Preserve the actual story, characters, chronology, ending, and wording as closely as practical.
+- Do not invent a different story.
+- Divide the manuscript for strong picture-book pacing and page turns.
+- Keep story text concise enough to work visually with illustration.
+- Create a specific illustration direction for every spread.
+- Use page-turn notes only where a reveal, surprise, joke, emotional beat, or transition benefits from the turn.
+- Cover/title/copyright/back-cover production can be added later; these 16 spreads are the editable 32-page story-layout working draft.
+- Return JSON only. No markdown and no commentary.
+
+RETURN EXACTLY THIS JSON SHAPE:
+{{
+  "spreads": [
+    {{
+      "spread_number": 1,
+      "pages": "1-2",
+      "template": "Full Illustration — Text Bottom",
+      "story_text": "...",
+      "illustration_direction": "...",
+      "page_turn_note": "..."
+    }}
+  ]
+}}
+
+Return exactly 16 spread objects numbered 1 through 16, covering pages 1-2 through 31-32.
+""".strip()
+
+        try:
+            if not self.client:
+                raise ValueError("Gemini API key is missing. Add Google Studio API Key.txt beside app.py.")
+
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.35,
+                    response_mime_type="application/json",
+                ),
+            )
+
+            response_text = response.text.strip() if response and response.text else ""
+            if not response_text:
+                raise ValueError("Gemini returned an empty picture-book layout response.")
+
+            data = json.loads(response_text)
+            spreads = data.get("spreads") if isinstance(data, dict) else None
+            if not isinstance(spreads, list) or len(spreads) != 16:
+                raise ValueError("Gemini did not return exactly 16 picture-book spreads.")
+
+            allowed_templates = {
+                "Full Illustration — Text Top",
+                "Full Illustration — Text Bottom",
+                "Text Left — Illustration Right",
+                "Illustration Left — Text Right",
+                "Two-Page Illustration — Text Overlay",
+                "Spot Illustration — Open Text Area",
+            }
+
+            cleaned = []
+            for idx, spread in enumerate(spreads, start=1):
+                if not isinstance(spread, dict):
+                    raise ValueError(f"Spread {idx} is not a valid object.")
+                template = str(spread.get("template") or "").strip()
+                if template not in allowed_templates:
+                    template = "Full Illustration — Text Bottom"
+                cleaned.append({
+                    "spread_number": idx,
+                    "pages": f"{idx * 2 - 1}-{idx * 2}",
+                    "template": template,
+                    "story_text": str(spread.get("story_text") or "").strip(),
+                    "illustration_direction": str(spread.get("illustration_direction") or "").strip(),
+                    "page_turn_note": str(spread.get("page_turn_note") or "").strip(),
+                })
+
+            return {"spreads": cleaned}
+
+        except Exception as e:
+            paragraphs = [
+                p.strip()
+                for p in re.split(r"\n\s*\n", str(manuscript_text or ""))
+                if p.strip()
+            ]
+            if not paragraphs:
+                paragraphs = [str(manuscript_text or "").strip()]
+
+            chunks = [[] for _ in range(16)]
+            for idx, paragraph in enumerate(paragraphs):
+                target = min(15, int(idx * 16 / max(1, len(paragraphs))))
+                chunks[target].append(paragraph)
+
+            templates = [
+                "Full Illustration — Text Bottom",
+                "Text Left — Illustration Right",
+                "Illustration Left — Text Right",
+                "Two-Page Illustration — Text Overlay",
+                "Spot Illustration — Open Text Area",
+                "Full Illustration — Text Top",
+            ]
+
+            fallback_spreads = []
+            for idx in range(16):
+                story_text = "\n\n".join(chunks[idx]).strip()
+                fallback_spreads.append({
+                    "spread_number": idx + 1,
+                    "pages": f"{idx * 2 + 1}-{idx * 2 + 2}",
+                    "template": templates[idx % len(templates)],
+                    "story_text": story_text,
+                    "illustration_direction": (
+                        "Add an illustration that directly supports the action, setting, characters, "
+                        "and emotional beat described in this spread."
+                    ),
+                    "page_turn_note": "",
+                })
+
+            return {
+                "spreads": fallback_spreads,
+                "is_fallback": True,
+                "error_message": str(e),
+            }
+
+
     def run_revision_pass(self, manuscript_text, revision_mode, tone_style, author_style=""):
         """
         Node 7: Final Revision & Polish Engine.
@@ -396,12 +581,14 @@ Manual Review Notes:
         rewrite_mode,
         scene_choice,
         custom_instruction,
-        tone_style,
+        target_length="Keep Current Length",
+        custom_target_word_count=None,
+        tone_style="",
         author_style="",
     ):
         """
         Node 8: Rewrite & Expansion Engine.
-        Rewrites selected manuscript text according to a chosen rewrite mode and manual notes.
+        Rewrites only the selected live manuscript text.
         """
         author_context = (
             f"Author style target: {author_style}"
@@ -409,47 +596,112 @@ Manual Review Notes:
             else "Use clean professional prose standards."
         )
 
-        manual_notes = custom_instruction.strip() if custom_instruction else "No extra manual notes provided."
+        manual_notes = custom_instruction.strip() if custom_instruction else ""
+
+        if target_length == "Custom Word Count" and custom_target_word_count:
+            length_instruction = f"Target final length: approximately {int(custom_target_word_count)} words."
+        elif target_length == "Expand to 1,500 Words":
+            length_instruction = "Target final length: approximately 1,500 words. Expand the manuscript substantially."
+        elif target_length == "Expand to 2,500 Words":
+            length_instruction = "Target final length: approximately 2,500 words. Expand the manuscript substantially."
+        elif target_length == "Expand to 5,000 Words":
+            length_instruction = "Target final length: approximately 5,000 words. Expand the manuscript substantially."
+        elif target_length == "Shorten for Video / Script Adaptation":
+            length_instruction = (
+                "Shorten and compress the manuscript for later video or screenplay adaptation. "
+                "Preserve the full story arc, major events, characters, and ending."
+            )
+        else:
+            length_instruction = "Keep approximately the current length unless the rewrite direction requires a change."
+
+        if rewrite_mode == "Direct Story Change / Obey My Instructions Exactly":
+            mode_rules = """
+DIRECT STORY CHANGE MODE:
+- The Specific Rewrite Direction is mandatory and overrides any conflicting event in the selected manuscript text.
+- Do not treat the direction as a suggestion, theme, metaphor, or optional guidance.
+- Do not invent an alternate resolution.
+- Do not keep any old scene event that contradicts the requested change.
+- Preserve existing character names, especially Elias if present.
+- Rewrite the selected location so the requested events happen in the exact story order given by the user.
+- If the instruction says Elias is sucked into the safe, Elias must be sucked into the safe.
+- If the instruction says the safe door slams shut, the safe door must slam shut.
+- If the instruction says a later patron enters and the safe begins clicking again, that cyclical ending must appear.
+- You may improve wording and flow only around those fixed facts.
+"""
+            temperature = 0.2
+
+        elif rewrite_mode == "Polish Only / Do Not Change Story":
+            mode_rules = """
+POLISH ONLY MODE:
+- Do not change the plot.
+- Do not add new events.
+- Do not remove events.
+- Do not rename characters.
+- Improve grammar, clarity, rhythm, sentence flow, and prose quality only.
+"""
+            temperature = 0.35
+
+        else:
+            mode_rules = """
+CREATIVE REWRITE MODE:
+- Improve the selected text creatively while preserving continuity.
+- You may strengthen pacing, tension, tone, imagery, atmosphere, and emotional impact.
+- Do not rename existing characters.
+- Do not replace the current story with a different story.
+- Keep the rewrite grounded in the selected manuscript text.
+- If a target length is selected, expand or compress the manuscript toward that target while preserving the core story.
+"""
+            temperature = 0.75
 
         prompt = f"""
 You are Node 8: Rewrite & Expansion Engine for WriterBlock Studio.
 
-TASK:
-Rewrite the selected manuscript text. Do NOT simply repeat it.
-The new version must visibly improve and change the original while preserving the story facts.
+You must rewrite ONLY the selected live manuscript text provided below.
+Do not use or reference any saved versions, earlier drafts, database history, or outside storylines.
 
-Scene Target:
+Rewrite Mode:
+{rewrite_mode}
+
+Rewrite Location:
 {scene_choice}
+
+Target Length:
+{target_length}
+
+Length Instruction:
+{length_instruction}
 
 Tone Target:
 {tone_style}
 
 {author_context}
 
-Rewrite Mode:
-{rewrite_mode}
+Specific Rewrite Direction - Optional:
+{manual_notes if manual_notes else "No specific direction provided."}
 
-CREATOR FREE-FORM REWRITE INSTRUCTIONS — HIGHEST PRIORITY:
-{manual_notes}
+Mode Rules:
+{mode_rules}
 
-SOURCE TEXT TO REWRITE:
+Selected Live Manuscript Text:
 {source_text}
 
-MANDATORY CREATOR-CONTROL RULES:
-- The creator's free-form rewrite instructions override the dropdown rewrite mode.
-- The dropdown rewrite mode is only a helper, not a restriction.
-- If the creator describes a specific plot change, ending, twist, death, reveal, object behavior, or character action, you MUST include that exact story logic.
-- Do not force the rewrite into a preset structure.
-- Do not ignore unusual or informal wording in the creator notes; translate it into polished prose.
-- Do not summarize the creator notes; apply them directly to the scene.
-- If creator notes conflict with the source text, follow the creator notes.
+Strict Output Rules:
+- Return only the rewritten manuscript text.
+- YouTube Shorts Test Mode: do not exceed 400 words under any rewrite or expansion setting.
+- Do not include labels, notes, explanations, markdown, summaries, or instruction text.
+- Do not include STORY INTENT, REQUIRED CHANGE, OUTPUT RULE, or similar labels.
+- Do not write a different story.
+- Do not rename existing characters.
+- Do not mention the rewrite mode.
+- Do not mention the target length.
+- If the selected text contains Elias, the rewritten text must keep Elias.
+- If Direct Story Change mode is selected, the user's Specific Rewrite Direction is the controlling plot and must be followed exactly.
+- If the selected manuscript contradicts the user's Specific Rewrite Direction, replace the contradiction with the user's requested event.
+- If the user gives a specific rewrite direction, apply it inside the rewritten prose as finished story action.
+- If target length requests expansion, expand with atmosphere, description, suspense, interiority, and continuity — not unrelated new plotlines.
+- If target length requests shortening, compress without losing the main story arc.
 
-STRICT OUTPUT RULES:
-- Return only the rewritten creative text.
-- Do not include analysis, notes, explanations, headers, labels, markdown, or code blocks.
-- Do not include "Scene Title:", "Objective:", "Beat:", or outline formatting.
-- Keep it in polished story prose unless the original is clearly screenplay dialogue.
-- Do not return text identical to the source.
+Rewritten Manuscript Text:
 """
 
         try:
@@ -460,10 +712,14 @@ STRICT OUTPUT RULES:
                 model=self.model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.85,
+                    temperature=temperature,
                     system_instruction=(
-                        "You are a rewriting engine. Always transform the input. "
-                        "Never echo the source unchanged. Return only rewritten creative prose."
+                        "You are a controlled rewriting engine. Rewrite only the supplied selected text. "
+                        "Never echo instructions. Never introduce unrelated characters or storylines. "
+                        "In Direct Story Change mode, the user's instruction is mandatory plot law. "
+                        "Replace conflicting old events with the user's requested events. "
+                        "Respect target length instructions while preserving the current story. "
+                        "Return only polished manuscript prose."
                     ),
                 ),
             )
@@ -473,24 +729,16 @@ STRICT OUTPUT RULES:
             if not response_text:
                 raise ValueError("Gemini returned an empty rewrite response.")
 
-            if response_text.strip() == str(source_text).strip():
+            if response_text.strip() == str(source_text).strip() and rewrite_mode != "Polish Only / Do Not Change Story":
                 raise ValueError("Gemini returned unchanged text.")
 
             return response_text
 
         except Exception as e:
-            error_text = str(e)
-
-            if "429" in error_text or "RESOURCE_EXHAUSTED" in error_text or "quota" in error_text.lower():
-                return "⚠️ Gemini quota limit reached. Rewrite could not be completed right now. Wait for the daily reset or enable billing, then try again."
-
-            return self._fallback_rewrite_text(
-                source_text=source_text,
-                rewrite_mode=rewrite_mode,
-                scene_choice=scene_choice,
-                custom_instruction=manual_notes,
-                tone_style=tone_style,
-                error=e,
+            return (
+                "Rewrite engine fallback output.\n\n"
+                f"Backend error: {e}\n\n"
+                "The rewrite request was received, but the AI backend did not return usable text."
             )
 
     def _fallback_rewrite_text(self, source_text, rewrite_mode, scene_choice, custom_instruction, tone_style, error):
@@ -562,12 +810,12 @@ STRICT OUTPUT RULES:
         # Specific common ending requested during testing: Elias life-clock / safe cycle restart.
         if ("elias" in notes_lower and ("life clock" in notes_lower or "life" in notes_lower) and ("click" in notes_lower or "tick" in notes_lower)):
             return (
-                f"{cleaned_source}\n\n"
-                "The ticking was no longer a warning from inside the safe. It was Elias himself, measured out in sharp little intervals, each click shaving another second from whatever time remained in him. "
-                "When the sound finally stopped, so did he. Elias folded to the floor without a cry, as if the last hidden spring in his body had simply been released.\n\n"
-                "Much later, the bell above the shop door gave a soft, ordinary jingle. An old gentleman stepped inside, brushing the evening damp from his coat and waiting for a greeting that never came. The counter stood empty. The room held its breath. "
-                "Then his eyes found the iron safe. Curiosity drew him toward it with the same quiet hunger that had once drawn Elias.\n\n"
-                "He leaned closer. Somewhere inside the black metal, patient and precise, the clicking began again."
+                "At midnight, the clicking stopped. Not faded. Not slowed. Stopped. The silence struck the shop harder than the sound ever had, and Elias Vance stood before the iron safe with the terrible understanding that the rhythm had not belonged to the mechanism at all. It had been his own life, counted down in cold little clicks.\n\n"
+                "Age showed on him then. It showed in the tremor of his hands, in the gray sag of his face, in the tired bend of his shoulders as he stepped closer. The safe gave a low internal groan. Its door, sealed against every tool and every prayer he had thrown at it, opened by itself. A black emptiness waited inside.\n\n"
+                "Elias leaned forward, cautious and breathless, and the darkness took him. One instant he was reaching toward the open mouth of the safe; the next he was yanked inside with brutal force. The door slammed shut behind him with a gunshot crack that shook the glass counters and sent dust trembling from the shelves.\n\n"
+                "A few days later, the bell above the shop door gave its ordinary little jangle. An old gentleman entered carrying a broken clock against his chest. No one came from behind the counter. No one called from the back room. Elias Vance was gone.\n\n"
+                "The patron noticed the iron safe sitting in the center of the shop floor where it had remained since Elias bought the store. Curious, he approached it. He touched the cold surface, ran his fingers along the seam, and bent closer to examine the impossible door.\n\n"
+                "From deep inside the black iron, the clicking began again."
             )
 
         return (
