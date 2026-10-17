@@ -57,6 +57,12 @@ PROJECT_STATE_KEYS = (
     "project_stage",
     "export_view",
     "format_type",
+    "active_format_id",
+    "quill_format_name",
+    "quill_format_instructions",
+    "format_template_values",
+    "active_format_development_context",
+    "quill_template_context",
     "dialogue_style",
     "project_scope",
     "series_name",
@@ -103,6 +109,9 @@ PREPARED_CONTEXT_KEYS = (
     "dialogue_development_packet",
     "effective_format_type",
     "final_output_instruction",
+    "format_development_context",
+    "quill_format_instructions",
+    "quill_template_context",
 )
 
 

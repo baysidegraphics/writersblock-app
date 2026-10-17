@@ -24,6 +24,10 @@ import time
 import os
 import sys
 import json
+import html
+import urllib.request
+import urllib.error
+import urllib.parse
 from pathlib import Path
 import hashlib
 import zipfile
@@ -38,6 +42,13 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from gemini_backend import GeminiWriterBackend
 from supabase import create_client
+from quill import render_quill_for_current_stage
+from template_registry import (
+    FORMAT_OPTIONS as WBS_FORMAT_OPTIONS,
+    get_template as get_wbs_format_template,
+    get_quill_instructions as get_wbs_quill_instructions,
+    get_format_display_name as get_wbs_format_display_name,
+)
 
 # ==========================================
 # WRITERSBLOCK MODEL INTEGRATION
@@ -73,6 +84,124 @@ SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ==========================================
+# AFFITOR AFFILIATE LEAD ATTRIBUTION
+# ==========================================
+# The public WritersBlock website passes the first-party Affitor click ID into
+# the Streamlit app as ?affitor_click_id=... . Keep it in session state across
+# Streamlit reruns, then bind it to the stable WritersBlock user ID after signup.
+AFFITOR_LEAD_ENDPOINT = "https://api.affitor.com/api/v1/track/lead"
+
+
+def _clean_affitor_click_id(value):
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else ""
+    clean = str(value or "").strip()
+    if not clean or len(clean) > 200:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9._:-]+", clean):
+        return ""
+    return clean
+
+
+def capture_affitor_click_id():
+    """Capture the referral ID handed off from writersblockstudios.com."""
+    try:
+        incoming = st.query_params.get("affitor_click_id", "")
+    except Exception:
+        incoming = ""
+
+    click_id = _clean_affitor_click_id(incoming)
+    if click_id:
+        st.session_state["affitor_click_id"] = click_id
+
+    return _clean_affitor_click_id(st.session_state.get("affitor_click_id", ""))
+
+
+def build_affitor_purchase_url(base_url):
+    """Attach the Affitor click ID to Stripe Payment Links for webhook attribution."""
+    click_id = capture_affitor_click_id()
+    if not click_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", click_id):
+        return base_url
+
+    try:
+        parts = urllib.parse.urlsplit(base_url)
+        query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
+        query["client_reference_id"] = click_id
+        return urllib.parse.urlunsplit((
+            parts.scheme,
+            parts.netloc,
+            parts.path,
+            urllib.parse.urlencode(query),
+            parts.fragment,
+        ))
+    except Exception:
+        return base_url
+
+
+def _get_affitor_api_key():
+    """Read the private Affitor token only from server-side secrets/environment."""
+    try:
+        secret_value = st.secrets.get("AFFITOR_API_KEY", "")
+    except Exception:
+        secret_value = ""
+    return str(secret_value or os.getenv("AFFITOR_API_KEY", "") or "").strip()
+
+
+def track_affitor_lead(user_row, email):
+    """Best-effort server-side lead attribution; never blocks WBS access."""
+    if not isinstance(user_row, dict):
+        return False
+
+    customer_key = str(user_row.get("id") or "").strip()
+    click_id = capture_affitor_click_id()
+    clean_email = str(email or user_row.get("email") or "").strip().lower()
+    api_key = _get_affitor_api_key()
+
+    if not customer_key or not click_id or not api_key:
+        return False
+
+    tracking_key = f"{click_id}:{customer_key}"
+    if st.session_state.get("affitor_lead_tracked_key") == tracking_key:
+        return True
+
+    payload = {
+        "click_id": click_id,
+        "customer_key": customer_key,
+        "email": clean_email,
+    }
+
+    request = urllib.request.Request(
+        AFFITOR_LEAD_ENDPOINT,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            raw_body = response.read().decode("utf-8", errors="replace")
+
+        response_data = json.loads(raw_body) if raw_body.strip() else {}
+        if 200 <= status < 300 and response_data.get("success") is not False:
+            st.session_state["affitor_lead_tracked_key"] = tracking_key
+            return True
+
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+        print(f"Affitor lead tracking skipped: {exc}")
+    except Exception as exc:
+        print(f"Affitor lead tracking skipped: {exc}")
+
+    return False
+
+
+# Capture once on entry; Streamlit session state preserves it during reruns.
+capture_affitor_click_id()
 def get_current_user_id():
     licensed_user_row = st.session_state.get("licensed_user_row") or {}
     demo_user_row = st.session_state.get("demo_user_row") or {}
@@ -157,6 +286,8 @@ def get_project_session_snapshot():
         "series_reference_ids",
         "series_canon_notes",
         "series_selection_signature",
+        "active_format_id",
+        "format_template_values",
         "format_type",
         "dialogue_style",
         "audiobook_length",
@@ -185,6 +316,9 @@ def get_project_session_snapshot():
         "rewrite_preview_id",
         "rewrite_target_length",
         "revision_report",
+        "project_integrity_report",
+        "project_integrity_source_signature",
+        "project_integrity_status",
         "export_view",
         "final_output_format",
         "final_output_text",
@@ -928,6 +1062,70 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+# WBS_PROJECT_INTEGRITY_UI_STYLING_2026_10_04
+st.markdown(
+    """
+    <style>
+    .st-key-run_project_integrity_final_review button {
+        background-color: #ff4b4b !important;
+        border-color: #ff4b4b !important;
+        color: #ffffff !important;
+        font-weight: 700 !important;
+    }
+    .st-key-run_project_integrity_final_review button:hover {
+        background-color: #ff4b4b !important;
+        border-color: #ff4b4b !important;
+        color: #ffffff !important;
+    }
+    .wbs-integrity-report {
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 10px;
+        padding: 16px 18px;
+        margin-top: 8px;
+        margin-bottom: 8px;
+    }
+    .wbs-integrity-report .wbs-ir-section {
+        margin-top: 14px;
+    }
+    .wbs-integrity-report .wbs-ir-section:first-child {
+        margin-top: 0;
+    }
+    .wbs-integrity-report .wbs-ir-heading {
+        color: #ffffff;
+        font-size: 0.98rem;
+        font-weight: 800;
+        letter-spacing: 0.02em;
+        margin-bottom: 8px;
+    }
+    .wbs-integrity-report .wbs-ir-status {
+        color: #ffffff;
+        font-size: 1rem;
+        font-weight: 800;
+        margin-bottom: 12px;
+    }
+    .wbs-integrity-report .wbs-ir-p,
+    .wbs-integrity-report .wbs-ir-bullet,
+    .wbs-integrity-report .wbs-ir-number {
+        color: #f5f7fb;
+        font-size: 0.96rem;
+        line-height: 1.58;
+        margin-bottom: 6px;
+        white-space: pre-wrap;
+    }
+    .wbs-integrity-report .wbs-ir-bullet {
+        padding-left: 14px;
+        text-indent: -12px;
+    }
+    .wbs-integrity-report .wbs-ir-number {
+        padding-left: 2px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ==========================================
 # BACKEND INITIALIZATION
 # ==========================================
@@ -1002,6 +1200,286 @@ if st.session_state.get("format_type") == "Audio Short Story — 15–30 min":
 
 if st.session_state.get("format_type") == "Children's Storybook (32-Page Writing Layout)":
     st.session_state.format_type = "Children's Picture Book (32-Page Layout)"
+
+# ==========================================
+# WRITERSBLOCK FORMAT TEMPLATE ROUTING
+# ==========================================
+# `active_format_id` is the authoritative template selection. `format_type` is
+# retained as a compatibility value for the existing writing engine until each
+# dedicated format page is connected in the next integration stage.
+WBS_LEGACY_FORMAT_BY_TEMPLATE_ID = {
+    "short_story": "Short Story",
+    "novel_prose_novella": "Novel / Prose",
+    "screenplay": "Screenplay Outline",
+    "stage_play": "Stage Play / Dramatic Script",
+    "youtube_shorts": "YouTube Shorts",
+    "audiobook": "Audio Book",
+    "childrens_picture_book": "Children's Picture Book (32-Page Layout)",
+    "full_novel_blueprint": "Full Novel Blueprint",
+    "podcast_script": "Podcast Script",
+}
+
+WBS_TEMPLATE_ID_BY_LEGACY_FORMAT = {
+    "Short Story": "short_story",
+    "Novel / Prose": "novel_prose_novella",
+    "Novella": "novel_prose_novella",
+    "Screenplay Outline": "screenplay",
+    "Stage Play / Dramatic Script": "stage_play",
+    "Audio Book": "audiobook",
+    "Children's Picture Book (32-Page Layout)": "childrens_picture_book",
+    "Full Novel Blueprint": "full_novel_blueprint",
+    "YouTube Shorts": "youtube_shorts",
+    "Podcast Script": "podcast_script",
+}
+
+WBS_FORMAT_IDS = [format_id for format_id, _label in WBS_FORMAT_OPTIONS]
+
+if "active_format_id" not in st.session_state:
+    st.session_state.active_format_id = WBS_TEMPLATE_ID_BY_LEGACY_FORMAT.get(
+        str(st.session_state.get("format_type") or "Novel / Prose"),
+        "novel_prose_novella",
+    )
+
+if st.session_state.get("active_format_id") not in WBS_FORMAT_IDS:
+    st.session_state.active_format_id = "novel_prose_novella"
+    st.session_state.format_template_values = {}
+
+# Make the active template and its Quill rules available to the shared Quill
+# panel on every stage. These values are refreshed again by the top selector.
+st.session_state.active_format_template = get_wbs_format_template(
+    st.session_state.active_format_id
+)
+st.session_state.quill_format_instructions = get_wbs_quill_instructions(
+    st.session_state.active_format_id
+)
+st.session_state.quill_format_name = get_wbs_format_display_name(
+    st.session_state.active_format_id
+)
+
+if "format_template_values" not in st.session_state or not isinstance(
+    st.session_state.get("format_template_values"), dict
+):
+    st.session_state.format_template_values = {}
+
+
+def get_active_format_template_values():
+    format_id = str(st.session_state.get("active_format_id") or "novel_prose_novella")
+    all_values = st.session_state.get("format_template_values") or {}
+    values = all_values.get(format_id) or {}
+    return values if isinstance(values, dict) else {}
+
+
+def set_active_format_template_value(field_key, value):
+    format_id = str(st.session_state.get("active_format_id") or "novel_prose_novella")
+    all_values = dict(st.session_state.get("format_template_values") or {})
+    values = dict(all_values.get(format_id) or {})
+    values[str(field_key)] = value
+    all_values[format_id] = values
+    st.session_state.format_template_values = all_values
+
+
+def get_active_concept_ui():
+    template = st.session_state.get("active_format_template") or {}
+    ui = template.get("concept_ui") or {}
+    return ui if isinstance(ui, dict) else {}
+
+
+def format_field_should_render(field, values):
+    """Return True when a format field's optional conditional rule is satisfied."""
+    condition = field.get("show_if") if isinstance(field, dict) else None
+    if not isinstance(condition, dict) or not condition:
+        return True
+    for condition_key, allowed_values in condition.items():
+        current = values.get(condition_key)
+        if not isinstance(allowed_values, (list, tuple, set)):
+            allowed_values = [allowed_values]
+        if current not in allowed_values:
+            return False
+    return True
+
+
+def get_active_format_development_context():
+    template = st.session_state.get("active_format_template") or {}
+    values = get_active_format_template_values()
+    if not values:
+        return ""
+
+    labels = {
+        str(field.get("key")): str(field.get("label") or field.get("key"))
+        for field in (template.get("concept_fields") or [])
+        if isinstance(field, dict)
+    }
+    lines = [
+        "ACTIVE WRITING FORMAT DEVELOPMENT REQUIREMENTS",
+        f"Writing Format: {template.get('display_name') or st.session_state.get('quill_format_name') or ''}",
+    ]
+    for key, value in values.items():
+        if value is None or str(value).strip() == "":
+            continue
+        lines.append(f"{labels.get(str(key), str(key))}: {value}")
+    return "\n".join(lines).strip()
+
+
+def refresh_quill_template_context():
+    """Publish every active center-panel direction to Quill and the model bridge."""
+    template = st.session_state.get("active_format_template") or {}
+    values = get_active_format_template_values()
+    st.session_state.active_format_development_context = get_active_format_development_context()
+    st.session_state.quill_template_context = {
+        "active_format_id": str(st.session_state.get("active_format_id") or ""),
+        "writing_format": str(template.get("display_name") or st.session_state.get("quill_format_name") or ""),
+        "format_instructions": str(st.session_state.get("quill_format_instructions") or ""),
+        "development_fields": dict(values),
+        "project_title": str(st.session_state.get("project_title") or ""),
+        "project_scope": str(st.session_state.get("project_scope") or ""),
+        "series_name": str(st.session_state.get("series_name") or ""),
+        "series_number": st.session_state.get("series_book_number"),
+        "dialogue_style": str(st.session_state.get("dialogue_style") or ""),
+        "tone_style": str(st.session_state.get("tone_style") or ""),
+        "production_influence": str(values.get("production_influence_custom") or values.get("production_influence") or ""),
+        "visual_style": str(values.get("visual_style") or ""),
+        "narration_type": str(values.get("narration_type") or ""),
+        "episode_format": str(values.get("episode_format") or ""),
+    }
+    return st.session_state.quill_template_context
+
+
+def render_active_format_development_fields():
+    template = st.session_state.get("active_format_template") or {}
+    fields = [f for f in (template.get("concept_fields") or []) if isinstance(f, dict)]
+    if not fields:
+        return
+
+    # These are already supplied by common WritersBlock controls elsewhere on Step 1.
+    shared_keys = {
+        "project_title", "dialogue_style",
+        "story_premise", "premise", "logline", "story_idea", "objective",
+        "core_premise",
+    }
+    values = get_active_format_template_values()
+    render_fields = [
+        f for f in fields
+        if str(f.get("key")) not in shared_keys and format_field_should_render(f, values)
+    ]
+    if not render_fields:
+        return
+
+    setup_name = str(template.get("display_name") or st.session_state.get("quill_format_name") or "Format").strip()
+    st.markdown(f"### {setup_name} Development Setup")
+    st.caption(str(template.get("description") or ""))
+
+    # Keep the form compact: two controlled columns inside the middle panel.
+    for i in range(0, len(render_fields), 2):
+        row = render_fields[i:i + 2]
+        cols = st.columns(2, gap="medium")
+        for col, field in zip(cols, row):
+            key = str(field.get("key") or "").strip()
+            if not key:
+                continue
+            label = str(field.get("label") or key)
+            help_text = str(field.get("help") or "") or None
+            widget_key = f"format_field_{st.session_state.active_format_id}_{key}"
+            existing = values.get(key, "")
+
+            with col:
+                if field.get("type") == "select":
+                    options = list(field.get("options") or [])
+                    if (("genre" in key.lower() or "genre" in label.lower())
+                            and "Spiritual" not in options):
+                        options.append("Spiritual")
+                    if key == "production_influence":
+                        custom_option = "Custom Influence / Other"
+                        if custom_option not in options:
+                            options.append(custom_option)
+                    if not options:
+                        continue
+                    index = options.index(existing) if existing in options else 0
+                    value = st.selectbox(
+                        label, options, index=index, key=widget_key, help=help_text
+                    )
+                elif field.get("type") == "date":
+                    try:
+                        existing_date = datetime.strptime(str(existing), "%Y-%m-%d").date() if existing else datetime.now().date()
+                    except Exception:
+                        existing_date = datetime.now().date()
+                    selected_date = st.date_input(
+                        label, value=existing_date, key=widget_key, help=help_text
+                    )
+                    value = selected_date.isoformat() if selected_date else ""
+                elif field.get("type") == "textarea":
+                    value = st.text_area(
+                        label, value=str(existing or ""), height=95, key=widget_key, help=help_text
+                    )
+                else:
+                    value = st.text_input(
+                        label, value=str(existing or ""), key=widget_key, help=help_text
+                    )
+                set_active_format_template_value(key, value)
+
+                # Production Influence is mutually exclusive: either choose a preset
+                # OR choose Custom Influence / Other and enter a custom reference.
+                if key == "production_influence":
+                    custom_key = "production_influence_custom"
+                    custom_option = "Custom Influence / Other"
+                    if value == custom_option:
+                        custom_widget_key = f"format_field_{st.session_state.active_format_id}_{custom_key}"
+                        custom_existing = values.get(custom_key, "")
+                        custom_value = st.text_input(
+                            "Custom Influence",
+                            value=str(custom_existing or ""),
+                            key=custom_widget_key,
+                            help=(
+                                "Enter an author, director, playwright, filmmaker, or creative style "
+                                "not listed above."
+                            ),
+                            placeholder="Enter the influence you want WritersBlock to use",
+                        )
+                        set_active_format_template_value(custom_key, custom_value)
+                        st.session_state.author_style = str(custom_value or "").strip()
+                    else:
+                        # A preset choice always wins and removes any stale custom value.
+                        set_active_format_template_value(custom_key, "")
+                        st.session_state.author_style = str(value or "").strip()
+                elif key == "visual_style":
+                    st.session_state.author_style = str(value or "")
+                elif key == "narration_type":
+                    st.session_state.author_style = f"Narration Type: {value}" if value else ""
+
+    refresh_quill_template_context()
+
+
+def render_format_template_save_reminder():
+    """Bottom-of-template reminder and save action for Concept Development."""
+    st.markdown("---")
+    with st.container(border=True):
+        st.markdown("**💾 Remember to Save Project before leaving Concept Development.**")
+
+        if st.session_state.get("demo_mode"):
+            st.caption("Project saving is available in the full Writer Edition.")
+            if st.button(
+                "💾 Save Project 🔒",
+                key=f"template_save_project_trial_{st.session_state.get('active_format_id', 'format')}",
+                use_container_width=True,
+                type="secondary",
+            ):
+                full_version_only_notice("Saved Projects")
+            return
+
+        if st.button(
+            "💾 Save Project",
+            key=f"template_save_project_{st.session_state.get('active_format_id', 'format')}",
+            use_container_width=True,
+            type="secondary",
+        ):
+            ensure_project_title_loaded()
+            if not get_project_title():
+                st.warning("Name this project before saving.")
+                return
+            save_result = save_current_project_session_to_supabase()
+            if save_result:
+                st.success("Project saved.")
+
+
 
 if "dialogue_style" not in st.session_state:
     st.session_state.dialogue_style = "Story-Driven / Automatic"
@@ -1122,6 +1600,15 @@ if "final_output_preview_id" not in st.session_state:
 
 if "final_output_saved_signature" not in st.session_state:
     st.session_state.final_output_saved_signature = ""
+
+if "project_integrity_report" not in st.session_state:
+    st.session_state.project_integrity_report = ""
+
+if "project_integrity_source_signature" not in st.session_state:
+    st.session_state.project_integrity_source_signature = ""
+
+if "project_integrity_status" not in st.session_state:
+    st.session_state.project_integrity_status = ""
 
 if "show_saved_version_manager" not in st.session_state:
     st.session_state.show_saved_version_manager = False
@@ -1679,6 +2166,172 @@ def get_effective_format_type():
 
 
 
+PROJECT_INTEGRITY_REVIEW_FORMATS = {
+    "Novel / Prose",
+    "Short Story",
+    "Novella",
+    "Screenplay Outline",
+    "Stage Play / Dramatic Script",
+    "Audio Book",
+    "Full Novel Blueprint",
+}
+
+
+def project_integrity_review_applies(format_type=None):
+    selected = str(format_type or st.session_state.get("format_type") or "").strip()
+    return selected in PROJECT_INTEGRITY_REVIEW_FORMATS
+
+
+def render_project_integrity_report_html(report_text):
+    report_text = str(report_text or "").strip()
+    if not report_text:
+        return ""
+
+    section_titles = {
+        "PROJECT INTEGRITY SUMMARY",
+        "CRITICAL WARNINGS",
+        "CONTINUITY / CHARACTER / TIMELINE",
+        "REPETITION / POV / TENSE",
+        "CHAPTER / SECTION / STRUCTURE INTEGRITY",
+        "PLACEHOLDERS / MISSING / DUPLICATE CONTENT",
+        "UNRESOLVED STORY ELEMENTS",
+        "FORMAT COMPLIANCE",
+        "RECOMMENDED WRITER CHECKS",
+    }
+
+    chunks = ["<div class='wbs-integrity-report'>"]
+    for raw_line in report_text.splitlines():
+        line = str(raw_line or "").rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+        safe = html.escape(stripped)
+        upper = stripped.upper()
+        if upper.startswith("OVERALL STATUS:"):
+            chunks.append(f"<div class='wbs-ir-status'>{safe}</div>")
+        elif upper in section_titles:
+            chunks.append(f"<div class='wbs-ir-section'><div class='wbs-ir-heading'>{safe}</div></div>")
+        elif stripped.startswith("- "):
+            chunks.append(f"<div class='wbs-ir-bullet'>• {html.escape(stripped[2:].strip())}</div>")
+        elif re.match(r"^\d+\.\s", stripped):
+            chunks.append(f"<div class='wbs-ir-number'>{safe}</div>")
+        else:
+            chunks.append(f"<div class='wbs-ir-p'>{safe}</div>")
+    chunks.append("</div>")
+    return "\n".join(chunks)
+
+
+def run_project_integrity_final_review(manuscript_text):
+    """Read-only whole-project quality-control review. Never rewrites manuscript text."""
+    manuscript_text = str(manuscript_text or "").strip()
+    if not manuscript_text:
+        raise ValueError("No manuscript is available for Project Integrity review.")
+
+    backend = st.session_state.get("backend")
+    client = getattr(backend, "client", None)
+    model_name = getattr(backend, "model_name", None)
+    if client is None or not model_name:
+        raise RuntimeError("The WritersBlock AI review service is unavailable.")
+
+    project_type = str(st.session_state.get("format_type") or "Novel / Prose")
+    project_title = get_project_title_for_display()
+    format_context = get_active_format_development_context()
+    series_context = build_series_context_text(
+        max_total_chars=30000,
+        per_source_chars=10000,
+    )
+
+    prompt = f"""
+You are the WritersBlock Studios PROJECT INTEGRITY / FINAL REVIEW quality-control system.
+
+This is a READ-ONLY audit. DO NOT rewrite, edit, polish, replace, summarize, or continue the manuscript.
+Do not silently fix anything. The writer controls all changes.
+
+PROJECT:
+Title: {project_title}
+Writing Format: {project_type}
+
+FORMAT / DEVELOPMENT REQUIREMENTS:
+{format_context or "No additional format-development requirements were supplied."}
+
+SERIES / CONTINUITY REFERENCE:
+{series_context or "This project has no selected series-continuity reference package."}
+
+AUDIT THE COMPLETE MANUSCRIPT FOR:
+1. Project integrity and continuity across the entire work.
+2. Character names, identities, relationships, ages, roles, and descriptive contradictions.
+3. Timeline, dates, sequence of events, travel/time logic, and historical-period consistency.
+4. Location, object, world-rule, terminology, and factual continuity inside the manuscript.
+5. Repetition: duplicated passages, repeated scenes, repeated explanations, or accidental restatement.
+6. POV and tense drift, including unexplained changes between sections or chapters.
+7. Unresolved placeholders, TODO/TBD notes, bracketed drafting notes, incomplete sentences, or obvious generation artifacts.
+8. Missing, duplicated, misordered, or obviously incomplete chapters/scenes/sections when the format uses them.
+9. Chapter/section numbering and heading consistency when headings are present.
+10. Unresolved story threads, setups, promises, character actions, mysteries, or references that appear accidentally abandoned.
+11. Internal contradictions between early and late portions of the manuscript.
+12. Output-format compliance for the selected writing format at the manuscript-content level. Do not judge typography that is applied later by Final Output.
+13. Any issue likely to embarrass the writer or damage continuity in a final manuscript.
+
+IMPORTANT REVIEW RULES:
+- Distinguish an actual contradiction from an intentional mystery, reveal, unreliable narrator, flashback, or deliberate stylistic choice.
+- Do not invent problems merely to fill the report.
+- Cite the chapter/scene/section or a short identifying phrase whenever possible.
+- Do not quote long passages.
+- If an item is uncertain, label it "VERIFY" rather than presenting it as a definite error.
+- Recommendations must describe what the writer should inspect or consider. Do not rewrite the text.
+- First-person dialogue inside quotation marks is normal in third-person narration and is NOT, by itself, a POV violation.
+- When evaluating POV compliance, judge the narrative prose outside character dialogue and direct quotations.
+- If the project requirements call for first-person POV but the manuscript uses third-person narration with normal first-person dialogue, report it as a narrative POV mismatch rather than a dialogue problem.
+
+RETURN EXACTLY THIS REPORT STRUCTURE:
+OVERALL STATUS: PASS
+or
+OVERALL STATUS: WARNINGS
+
+PROJECT INTEGRITY SUMMARY
+[2-6 concise sentences]
+
+CRITICAL WARNINGS
+- [items, or "None found."]
+
+CONTINUITY / CHARACTER / TIMELINE
+- [items, or "No material issues found."]
+
+REPETITION / POV / TENSE
+- [items, or "No material issues found."]
+
+CHAPTER / SECTION / STRUCTURE INTEGRITY
+- [items, or "No material issues found."]
+
+PLACEHOLDERS / MISSING / DUPLICATE CONTENT
+- [items, or "No material issues found."]
+
+UNRESOLVED STORY ELEMENTS
+- [items, or "No material issues found."]
+
+FORMAT COMPLIANCE
+- [items, or "No material issues found."]
+
+RECOMMENDED WRITER CHECKS
+- [prioritized recommendations, or "No changes recommended before Final Output."]
+
+Use PASS only when no material warning is found. Use WARNINGS when one or more items should be reviewed by the writer.
+
+--- BEGIN MANUSCRIPT ---
+{manuscript_text}
+--- END MANUSCRIPT ---
+""".strip()
+
+    response = client.models.generate_content(
+        model=model_name,
+        contents=prompt,
+    )
+    report = str(getattr(response, "text", "") or "").strip()
+    if not report:
+        raise RuntimeError("The Project Integrity review returned no report.")
+    return report
+
+
 FINAL_OUTPUT_FORMAT_OPTIONS = [
     "Novel / Prose",
     "Short Story",
@@ -1688,6 +2341,8 @@ FINAL_OUTPUT_FORMAT_OPTIONS = [
     "Audio Book",
     PICTURE_BOOK_FORMAT,
     "Full Novel Blueprint",
+    "YouTube Shorts",
+    "Podcast Script",
 ]
 
 FINAL_OUTPUT_DISPLAY_LABELS = {
@@ -1699,6 +2354,8 @@ FINAL_OUTPUT_DISPLAY_LABELS = {
     "Audio Book": "Audiobook Theatre Production Script",
     PICTURE_BOOK_FORMAT: "Children's Picture Book",
     "Full Novel Blueprint": "Full Novel Blueprint",
+    "YouTube Shorts": "YouTube Shorts Script",
+    "Podcast Script": "Podcast Script",
 }
 
 
@@ -1777,6 +2434,33 @@ Return only the adapted 500-800 word picture-book story."""
         return f"""{common}
 Convert the source into a professional Full Novel Blueprint rather than finished prose.
 Use clear section headings for PREMISE, PRINCIPAL CHARACTERS, CENTRAL CONFLICT, STORY ARCHITECTURE, MAJOR TURNING POINTS, CHAPTER / SCENE PROGRESSION, CHARACTER ARCS, CONTINUITY FACTS, and ENDING RESOLUTION where applicable. Preserve the source story exactly; organize it as a development blueprint rather than rewriting the story into new prose."""
+
+    if target_format == "YouTube Shorts":
+        return f"""{common}
+Convert the source into a finished YouTube Shorts script.
+REQUIRED SHORT-FORM VIDEO FORM:
+- Assume vertical 9:16 presentation unless the project explicitly says otherwise.
+- Open with an immediate hook.
+- Keep the script focused on one core idea.
+- Use concise narration/dialogue sized to the selected duration.
+- Organize the script into clear visual beats or shot moments.
+- Keep exposition minimal and move quickly.
+- Include a strong final beat or call to action when appropriate.
+- Preserve the source concept and essential message; do not expand it into long-form prose or screenplay structure.
+Return only the finished YouTube Shorts script."""
+
+    if target_format == "Podcast Script":
+        return f"""{common}
+Convert the source into a finished Podcast Script.
+REQUIRED PODCAST FORM:
+- Preserve the project's selected episode style, audience, duration, host structure, and publication context.
+- Use clear spoken-language pacing suitable for listening.
+- Organize the script into a strong opening, logical segments, transitions, and a clear close.
+- Distinguish HOST, CO-HOST, GUEST, NARRATOR, or other speaker roles only when the project requires them.
+- Keep sentences natural to say aloud; avoid visual-only instructions unless converted into spoken context.
+- Include intro/outro, sponsor/CTA, or segment cues only when supported by the project setup.
+- Do not convert the episode into prose fiction, screenplay, or stage-play formatting.
+Return only the finished Podcast Script."""
 
     return common
 
@@ -2179,6 +2863,96 @@ def build_final_output_docx_bytes(title, output_text, target_format):
         doc.save(buf)
         return buf.getvalue()
 
+    # ------------------------------------------------------------------
+    # YOUTUBE SHORTS: compact production-script layout.
+    # ------------------------------------------------------------------
+    if target_format == "YouTube Shorts":
+        doc = Document()
+        section = doc.sections[0]
+        section.page_width = Inches(8.5)
+        section.page_height = Inches(11)
+        section.top_margin = Inches(0.75)
+        section.bottom_margin = Inches(0.75)
+        section.left_margin = Inches(0.85)
+        section.right_margin = Inches(0.85)
+        _set_style_font(doc.styles["Normal"], "Arial", 11)
+
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(str(title or "Untitled Project"))
+        _set_run_font(r, "Arial", 14, bold=True)
+
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run("YOUTUBE SHORTS SCRIPT")
+        _set_run_font(r, "Arial", 11, bold=True)
+
+        for raw in str(output_text or "").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(4)
+            p.paragraph_format.line_spacing = 1.0
+            if re.match(r"^(HOOK|BEAT|SHOT|SCENE|VISUAL|NARRATION|DIALOGUE|CTA|END)\b", line, re.I):
+                r = p.add_run(line)
+                _set_run_font(r, "Arial", 11, bold=True)
+            else:
+                r = p.add_run(line)
+                _set_run_font(r, "Arial", 11)
+
+        buf = BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
+
+    # ------------------------------------------------------------------
+    # PODCAST: spoken-script layout.
+    # ------------------------------------------------------------------
+    if target_format == "Podcast Script":
+        doc = Document()
+        section = doc.sections[0]
+        section.page_width = Inches(8.5)
+        section.page_height = Inches(11)
+        section.top_margin = Inches(0.85)
+        section.bottom_margin = Inches(0.85)
+        section.left_margin = Inches(0.9)
+        section.right_margin = Inches(0.9)
+        _set_style_font(doc.styles["Normal"], "Arial", 11)
+
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(str(title or "Untitled Project"))
+        _set_run_font(r, "Arial", 14, bold=True)
+
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run("PODCAST SCRIPT")
+        _set_run_font(r, "Arial", 11, bold=True)
+
+        speaker_pat = re.compile(r"^[A-Z][A-Z0-9 .,'’()&/\-]{1,45}:$")
+        heading_pat = re.compile(r"^(INTRO|OPEN|SEGMENT|BREAK|OUTRO|CLOSE|CTA|SPONSOR|AD)\b", re.I)
+
+        for raw in str(output_text or "").splitlines():
+            line = raw.strip()
+            if not line:
+                doc.add_paragraph("")
+                continue
+
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(4)
+            p.paragraph_format.line_spacing = 1.05
+
+            if speaker_pat.match(line) or heading_pat.match(line):
+                r = p.add_run(line)
+                _set_run_font(r, "Arial", 11, bold=True)
+            else:
+                r = p.add_run(line)
+                _set_run_font(r, "Arial", 11)
+
+        buf = BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
+
     # Fallback professional document.
     doc = Document()
     section = doc.sections[0]
@@ -2408,6 +3182,28 @@ def get_project_title_for_display():
     return title if title else "Untitled Project"
 
 
+def get_series_item_label(format_id=None):
+    """Return the series-unit noun that matches the active writing template."""
+    selected = str(format_id or st.session_state.get("active_format_id") or "").strip()
+    return {
+        "novel_prose_novella": "Book",
+        "short_story": "Story",
+        "screenplay": "Script",
+        "stage_play": "Play",
+        "youtube_shorts": "Short",
+        "audiobook": "Volume",
+        "childrens_picture_book": "Book",
+        "full_novel_blueprint": "Book",
+        "podcast_script": "Episode",
+    }.get(selected, "Series Item")
+
+
+def get_series_item_display(format_id=None, number=None):
+    label = get_series_item_label(format_id)
+    resolved_number = int(number or st.session_state.get("series_book_number", 1) or 1)
+    return f"{label} {resolved_number}"
+
+
 def rename_current_project_everywhere(new_title):
     """
     Rename the active project without calling Gemini.
@@ -2552,6 +3348,9 @@ def render_project_title_banner(stage_key):
     with st.container(border=True):
         st.markdown("### 📘 CURRENT PROJECT")
         st.markdown(f"## {current_title}")
+
+        if st.session_state.get("project_stage") != "Intake":
+            render_quill_for_current_stage(st_module=st, show_prelude=True)
 
         if st.session_state.get("demo_mode"):
             st.caption(
@@ -2906,7 +3705,7 @@ def get_series_reference_candidates():
         metadata = metadata_by_project.get(project_id, {})
         book_number = int(metadata.get("series_book_number") or 0)
         series_name = str(metadata.get("series_name") or "").strip()
-        prefix = f"{series_name} — Book {book_number} — " if series_name and book_number else ""
+        prefix = f"{series_name} — Series #{book_number} — " if series_name and book_number else ""
         version_number = int(version.get("version_number") or 1)
         created_at = str(version.get("created_at") or "")
 
@@ -2974,7 +3773,7 @@ def get_series_reference_candidates():
         book_number = int(metadata.get("series_book_number") or snapshot.get("series_book_number") or 0)
         series_name = str(metadata.get("series_name") or snapshot.get("series_name") or "").strip()
         series_key = str(metadata.get("series_key") or snapshot.get("series_key") or "")
-        prefix = f"{series_name} — Book {book_number} — " if series_name and book_number else ""
+        prefix = f"{series_name} — Series #{book_number} — " if series_name and book_number else ""
 
         candidates.append({
             "id": f"session:{saved_row.get('id')}",
@@ -3058,7 +3857,7 @@ def build_series_context_text(max_total_chars=60000, per_source_chars=25000):
     parts = [
         "SERIES CONTINUITY PACKAGE",
         f"Series Name: {series_name}",
-        f"Current Book Number: {book_number}",
+        f"Current Series Number: {book_number}",
         f"Continuity Mode: {st.session_state.get('series_continuity_mode', 'Strict')}",
         f"Continuity Rule: {get_series_continuity_instruction()}",
     ]
@@ -3123,6 +3922,10 @@ Do not truncate the source merely because later stages contain target word-count
 {imported_source}
 --- END EXISTING DRAFT SOURCE ---
 """.strip()
+
+    format_context = get_active_format_development_context()
+    if format_context:
+        plot_line = f"{plot_line}\n\n{format_context}".strip()
 
     series_context = build_series_context_text(
         max_total_chars=14000,
@@ -3298,6 +4101,8 @@ def start_or_resume_trial(email: str):
         return None, "Enter a valid email address."
 
     existing = get_user_by_email(clean_email)
+    if is_evaluation_account(existing):
+        return None, "This email is reserved for a private evaluation; use Licensed User Email when activated."
     now = datetime.now(timezone.utc)
 
     if existing:
@@ -3360,10 +4165,68 @@ def get_licensed_user_by_email(email: str):
     return get_user_by_email(email)
 
 
+# Private evaluation: uses the existing licensed-email screen and Supabase user record.
+# No separate login screen, payment, or ordinary free-trial activation.
+EVALUATION_EMAIL = "michael@michaelbecker.org"
+
+
+def is_evaluation_account(user_row):
+    return bool(
+        isinstance(user_row, dict)
+        and str(user_row.get("email") or "").strip().lower() == EVALUATION_EMAIL
+        and str(user_row.get("company") or "").strip().lower() == "evaluation"
+    )
+
+
+def is_evaluation_access_valid(user_row):
+    if not is_evaluation_account(user_row):
+        return False, "Evaluation account not found."
+    if str(user_row.get("access_status") or "").strip().lower() != "active":
+        return False, "Evaluation access has not been activated."
+    if not user_row.get("is_active", False):
+        return False, "Evaluation access is inactive."
+    if not user_row.get("email_verified", False):
+        return False, "Evaluation access is not authorized."
+    expires_at = user_row.get("demo_expires_at")
+    if not expires_at:
+        return False, "Evaluation expiration has not been set."
+    try:
+        expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+        if expiry.tzinfo is None:
+            return False, "Evaluation expiration must include a timezone."
+    except (TypeError, ValueError):
+        return False, "Evaluation expiration is invalid."
+    if datetime.now(timezone.utc) >= expiry:
+        return False, "Evaluation access has expired."
+    return True, ""
+
+
+def enforce_evaluation_session():
+    """Check Supabase each rerun so expiry/revocation also closes an open session."""
+    row = st.session_state.get("licensed_user_row") or {}
+    if not is_evaluation_account(row):
+        return
+    try:
+        fresh = get_user_by_email(EVALUATION_EMAIL)
+        ok, reason = is_evaluation_access_valid(fresh)
+    except Exception:
+        ok, reason, fresh = False, "Evaluation access could not be verified.", None
+    if not ok:
+        st.session_state.licensed_mode = False
+        st.session_state.licensed_user_row = None
+        st.session_state.licensed_email = ""
+        st.session_state.access_success_message = ""
+        st.error(reason)
+        st.stop()
+    st.session_state.licensed_user_row = fresh
+
+
 def is_license_access_valid(user_row: dict):
     """Validate a one-time Writer Edition license without subscription or plan-tier fields."""
     if not user_row:
         return False, "Licensed email not found."
+    if is_evaluation_account(user_row):
+        return is_evaluation_access_valid(user_row)
 
     if "email_verified" in user_row and not user_row.get("email_verified", False):
         return False, "Licensed email is not verified."
@@ -3411,20 +4274,39 @@ def is_demo_access_valid(user_row: dict):
 
     return True, ""
 
+# Revalidate evaluation access before the rest of the app processes this rerun.
+enforce_evaluation_session()
+
 # ==========================================
-# TITLE
+# WBS PROGRAM / ADD-ON STATE
 # ==========================================
-st.title("📝 WritersBlock Studios")
-if st.session_state.get("licensed_mode"):
-    st.caption("Writer Edition — story, script, and manuscript development")
-elif st.session_state.get("demo_mode"):
-    st.caption("Writer Edition — 7-Day Limited Free Trial | Concept → Manuscript Review")
-else:
-    st.caption(
-        "Writer Edition — story, script, and manuscript development | "
-        "7-Day Limited Free Trial available"
-    )
-st.markdown("---")
+if "wbs_active_program" not in st.session_state:
+    st.session_state.wbs_active_program = "writer_studios"
+
+# ==========================================
+# WBS PROGRAM NAVIGATION — writing-only deployment
+st.session_state.wbs_active_program = "writer_studios"
+
+# ==========================================
+# WRITER FORMAT TEMPLATE STATE
+# ==========================================
+# Keep the active template and Quill rules available to the whole application.
+# The visible Writing Format selector is rendered inside the Step 1 middle panel.
+current_format_id = str(
+    st.session_state.get("active_format_id") or "novel_prose_novella"
+)
+if current_format_id not in WBS_FORMAT_IDS:
+    current_format_id = "novel_prose_novella"
+
+st.session_state.active_format_id = current_format_id
+st.session_state.active_format_template = get_wbs_format_template(current_format_id)
+st.session_state.quill_format_instructions = get_wbs_quill_instructions(current_format_id)
+st.session_state.quill_format_name = get_wbs_format_display_name(current_format_id)
+st.session_state.format_type = WBS_LEGACY_FORMAT_BY_TEMPLATE_ID.get(
+    current_format_id,
+    "Novel / Prose",
+)
+refresh_quill_template_context()
 
 # =====================================
 # SIDEBAR STATUS / NAVIGATION / ACCESS
@@ -3438,9 +4320,10 @@ with st.sidebar.expander("License / Trial", expanded=False):
             PURCHASE_URL.startswith("https://buy.stripe.com/")
             or PURCHASE_URL.startswith("https://checkout.stripe.com/")
         ):
+            purchase_url = build_affitor_purchase_url(PURCHASE_URL)
             st.markdown(
                 f"""
-                <a href="{PURCHASE_URL}" target="_blank" style="text-decoration:none;">
+                <a href="{purchase_url}" target="_blank" style="text-decoration:none;">
                     <div style="
                         border:1px solid rgba(255,255,255,0.28);
                         border-radius:9px;
@@ -3547,6 +4430,7 @@ with st.sidebar.expander("License / Trial", expanded=False):
                 user_row, msg = start_or_resume_trial(email)
 
                 if user_row:
+                    track_affitor_lead(user_row, email)
                     st.session_state.demo_access_code = ""
                     st.session_state.demo_email = email
                     st.session_state.demo_user_row = user_row
@@ -3571,6 +4455,7 @@ with st.sidebar.expander("License / Trial", expanded=False):
                 ok, msg = is_license_access_valid(user_row)
 
                 if ok:
+                    track_affitor_lead(user_row, email)
                     st.session_state.licensed_user_row = user_row
                     st.session_state.licensed_mode = True
                     st.session_state.demo_mode = False
@@ -3585,6 +4470,7 @@ with st.sidebar.expander("License / Trial", expanded=False):
 
 st.sidebar.markdown("---")
 
+# Video Director is intentionally excluded from the public writing edition.
 with st.sidebar.container(border=True):
     st.markdown("**📊 Project Status**")
 
@@ -3601,11 +4487,13 @@ with st.sidebar.container(border=True):
     if st.session_state.get("project_scope") == "Book in a Series":
         st.write(
             f"Series: {st.session_state.get('series_name') or 'Unnamed Series'} "
-            f"— Book {int(st.session_state.get('series_book_number', 1) or 1)}"
+            f"— {get_series_item_display()}"
         )
 
     st.write(f"Manuscript Version: {st.session_state.manuscript_version}")
     st.write(f"Current Manuscript Words: {count_words(st.session_state.current_draft_output)}")
+
+st.sidebar.markdown("---")
 
 with st.sidebar.expander("Saved Projects / Versions", expanded=False):
     if st.session_state.get("demo_mode"):
@@ -3833,6 +4721,11 @@ with st.sidebar.container(border=True):
 
     if active_project_title:
         st.write(active_project_title)
+        if st.session_state.get("project_scope") == "Book in a Series":
+            st.caption(
+                f"{st.session_state.get('series_name') or 'Unnamed Series'} — "
+                f"{get_series_item_display()}"
+            )
         if active_status in {"DRAFT", "FINAL"} and active_project_version > 0:
             st.caption(f"{active_status} V{active_project_version}")
             if active_saved_at:
@@ -3902,7 +4795,12 @@ if st.sidebar.button("⚠️ Start New Project", key="global_reset", use_contain
     st.session_state.imported_source_name = ""
     st.session_state.imported_source_word_count = 0
     st.session_state.pop("concept_existing_draft_upload", None)
+    st.session_state.active_format_id = "novel_prose_novella"
     st.session_state.format_type = "Novel / Prose"
+    st.session_state.active_format_template = get_wbs_format_template("novel_prose_novella")
+    st.session_state.quill_format_instructions = get_wbs_quill_instructions("novel_prose_novella")
+    st.session_state.quill_format_name = get_wbs_format_display_name("novel_prose_novella")
+    st.session_state.pop("wbs_format_template_selector", None)
     st.session_state.dialogue_style = "Story-Driven / Automatic"
     st.session_state.audiobook_length = "30 Minutes"
     st.session_state.audiobook_target_word_count = 4000
@@ -3936,6 +4834,9 @@ if st.sidebar.button("⚠️ Start New Project", key="global_reset", use_contain
     st.session_state.final_output_source_signature = ""
     st.session_state.final_output_preview_id = 0
     st.session_state.final_output_saved_signature = ""
+    st.session_state.project_integrity_report = ""
+    st.session_state.project_integrity_source_signature = ""
+    st.session_state.project_integrity_status = ""
     st.session_state.show_saved_version_manager = False
     st.session_state.project_saved_notice = False
     st.session_state.picture_book_layout_spreads = []
@@ -3994,567 +4895,753 @@ SPARK_BANK = {
 
 
 if st.session_state.project_stage == "Intake":
-    st.header("🗺️ Step 1: Concept Development")
-    st.markdown("##### Build the foundation for your story, script, or manuscript.")
+    st.markdown(
+        """
+        <style>
+        /* Keep Quill inside its actual right column so every middle-panel field
+           is physically constrained and can never run underneath it. */
+        div[data-testid="stColumn"]:has(.wbs-writer-quill-sticky-anchor),
+        div[data-testid="column"]:has(.wbs-writer-quill-sticky-anchor) {
+            position: sticky !important;
+            top: 0.75rem !important;
+            align-self: flex-start !important;
+            max-height: calc(100vh - 1.5rem) !important;
+            overflow-y: auto !important;
+            z-index: 20 !important;
+            background: var(--background-color, transparent);
+        }
 
-    if get_active_project_id():
-        render_project_title_banner("step_1_concept_development")
-    else:
-        st.session_state.project_title = st.text_input(
-            "Project / Story Title:",
-            value=st.session_state.get("project_title", ""),
-            placeholder="Example: It's Not Safe",
-            key="project_title_input",
-        ).strip()
+        /* Primary Writer navigation and format-selector hierarchy. */
+        [data-testid="stMain"] div[data-testid="stHorizontalBlock"]:first-of-type button p {
+            font-weight: 700 !important;
+            font-size: 1.02rem !important;
+        }
+        .wbs-format-selector-title {
+            font-size: 1.08rem !important;
+            font-weight: 700 !important;
+            line-height: 1.2 !important;
+            margin: 0 0 0.35rem 0 !important;
+        }
 
-    st.markdown("---")
-    st.markdown("### Project Connection")
+        /* Raise the complete Writer workspace to recover vertical real estate. */
+        [data-testid="stMainBlockContainer"] {
+            padding-top: 1.0rem !important;
+        }
 
-    project_scope_options = ["Standalone Book", "Book in a Series"]
-    current_project_scope = str(st.session_state.get("project_scope", "Standalone Book"))
-
-    st.session_state.project_scope = st.radio(
-        "Project Type:",
-        project_scope_options,
-        index=project_scope_options.index(current_project_scope)
-        if current_project_scope in project_scope_options else 0,
-        horizontal=True,
-        key="project_scope_selector",
+        @media (max-width: 1100px) {
+            div[data-testid="stColumn"]:has(.wbs-writer-quill-sticky-anchor),
+            div[data-testid="column"]:has(.wbs-writer-quill-sticky-anchor) {
+                position: static !important;
+                max-height: none !important;
+                overflow: visible !important;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
-    if st.session_state.project_scope == "Book in a Series":
-        existing_series_names = get_existing_series_names()
-        series_choice_options = existing_series_names + ["Create New Series"]
-        current_series_name = str(st.session_state.get("series_name", "") or "").strip()
-        default_series_choice = current_series_name if current_series_name in existing_series_names else "Create New Series"
+    writer_main_col, writer_quill_col = st.columns([2.65, 1.15], gap="large")
 
-        selected_series_choice = st.selectbox(
-            "Select Series:",
-            series_choice_options,
-            index=series_choice_options.index(default_series_choice),
-            key="series_choice_selector",
+    with writer_main_col:
+        st.header("🗺️ Step 1: Concept Development")
+
+        st.markdown("### Writing Format")
+        current_format_id = str(
+            st.session_state.get("active_format_id") or "novel_prose_novella"
         )
+        if current_format_id not in WBS_FORMAT_IDS:
+            current_format_id = "novel_prose_novella"
 
-        if selected_series_choice == "Create New Series":
-            st.session_state.series_name = st.text_input(
-                "Series Name:",
-                value=current_series_name,
-                placeholder="Example: Oakhaven",
-                key="series_name_input",
-            ).strip()
+        _format_control_col, _format_spacer_col = st.columns([1.6, 1.25], gap="small")
+        with _format_control_col:
+            selected_format_id = st.selectbox(
+                "Choose Writing Format",
+                options=WBS_FORMAT_IDS,
+                index=WBS_FORMAT_IDS.index(current_format_id),
+                format_func=get_wbs_format_display_name,
+                key="wbs_format_template_selector",
+                label_visibility="collapsed",
+            )
+
+        if selected_format_id != st.session_state.get("active_format_id"):
+            st.session_state.active_format_id = selected_format_id
+            st.session_state.active_format_template = get_wbs_format_template(selected_format_id)
+            st.session_state.quill_format_instructions = get_wbs_quill_instructions(selected_format_id)
+            st.session_state.quill_format_name = get_wbs_format_display_name(selected_format_id)
+            st.session_state.format_type = WBS_LEGACY_FORMAT_BY_TEMPLATE_ID.get(
+                selected_format_id,
+                "Novel / Prose",
+            )
+            st.rerun()
+
+        concept_ui = get_active_concept_ui()
+        st.markdown(f"##### {concept_ui.get('step_subtitle') or 'Build the foundation for your project.'}")
+
+        if get_active_project_id():
+            render_project_title_banner("step_1_concept_development")
         else:
-            st.session_state.series_name = selected_series_choice
+            st.session_state.project_title = st.text_input(
+                concept_ui.get("title_label") or "Project / Story Title:",
+                value=st.session_state.get("project_title", ""),
+                placeholder="Example: It's Not Safe",
+                key="project_title_input",
+            ).strip()
 
-        resolved_series_name = str(st.session_state.get("series_name") or "").strip()
-        resolved_series_key = make_series_key(resolved_series_name)
-        auto_number_signature = (
-            f"{resolved_series_key}:{st.session_state.get('current_project_id') or 'new-project'}"
+        st.markdown("### " + str(concept_ui.get('project_connection_heading') or 'Project Relationship'))
+
+        project_scope_options = ["Standalone Book", "Book in a Series"]
+        current_project_scope = str(st.session_state.get("project_scope", "Standalone Book"))
+
+        scope_labels = concept_ui.get("scope_labels") or {}
+        st.session_state.project_scope = st.radio(
+            "Project Type:",
+            project_scope_options,
+            index=project_scope_options.index(current_project_scope)
+            if current_project_scope in project_scope_options else 0,
+            horizontal=True,
+            key="project_scope_selector",
+            format_func=lambda value: scope_labels.get(value, value),
         )
 
-        if (
-            resolved_series_key
-            and st.session_state.get("series_book_number_auto_signature")
-            != auto_number_signature
-        ):
-            next_book_number = get_next_series_book_number(
-                resolved_series_name,
-                exclude_project_id=st.session_state.get("current_project_id"),
-            )
-            st.session_state.series_book_number = next_book_number
-            st.session_state.series_book_number_input = next_book_number
-            st.session_state.series_book_number_auto_signature = auto_number_signature
+        if st.session_state.project_scope == "Book in a Series":
+            existing_series_names = get_existing_series_names()
+            series_choice_options = existing_series_names + ["Create New Series"]
+            current_series_name = str(st.session_state.get("series_name", "") or "").strip()
+            default_series_choice = current_series_name if current_series_name in existing_series_names else "Create New Series"
 
-        st.session_state.series_book_number = int(
-            st.number_input(
-                "Book Number:",
-                min_value=1,
-                max_value=100,
-                value=int(st.session_state.get("series_book_number", 1) or 1),
-                step=1,
-                key="series_book_number_input",
-            )
-        )
+            _series_control_col, _series_spacer_col = st.columns([3.0, 1.2])
+            with _series_control_col:
+                selected_series_choice = st.selectbox(
+                    "Select Series:",
+                    series_choice_options,
+                    index=series_choice_options.index(default_series_choice),
+                    key="series_choice_selector",
+                )
 
-        # Series continuity is automatic and always strict.
-        st.session_state.series_continuity_mode = "Strict"
-        st.caption("Continuity Protection: Strict — automatic")
+            if selected_series_choice == "Create New Series":
+                st.session_state.series_name = st.text_input(
+                    "Series Name:",
+                    value=current_series_name,
+                    placeholder="Example: Oakhaven",
+                    key="series_name_input",
+                ).strip()
+            else:
+                st.session_state.series_name = selected_series_choice
 
-        st.session_state.series_key = make_series_key(st.session_state.series_name)
-
-        candidates = get_series_reference_candidates()
-        id_to_candidate = {candidate["id"]: candidate for candidate in candidates}
-
-        # One-time setup for books written before series support was added.
-        unassigned_candidates = [
-            candidate
-            for candidate in candidates
-            if not str(candidate.get("series_key") or "").strip()
-        ]
-
-        if unassigned_candidates and st.session_state.series_name:
-            st.markdown("**Add Previously Written Books to This Series (One-Time Setup):**")
-            setup_label_to_candidate = {
-                candidate["label"]: candidate for candidate in unassigned_candidates
-            }
-            selected_existing_labels = st.multiselect(
-                "Existing Saved Books:",
-                options=list(setup_label_to_candidate.keys()),
-                key="series_existing_book_selector",
-                help=(
-                    "Select books already written before series support was added. "
-                    "They will be numbered automatically by their original saved date."
-                ),
+            resolved_series_name = str(st.session_state.get("series_name") or "").strip()
+            resolved_series_key = make_series_key(resolved_series_name)
+            auto_number_signature = (
+                f"{resolved_series_key}:{st.session_state.get('current_project_id') or 'new-project'}"
             )
 
-            selected_existing_records = [
-                setup_label_to_candidate[label]
-                for label in selected_existing_labels
-                if label in setup_label_to_candidate
-            ]
-            selected_existing_records.sort(
-                key=lambda item: (
-                    str(item.get("created_at") or ""),
-                    str(item.get("title") or "").lower(),
+            if (
+                resolved_series_key
+                and st.session_state.get("series_book_number_auto_signature")
+                != auto_number_signature
+            ):
+                next_book_number = get_next_series_book_number(
+                    resolved_series_name,
+                    exclude_project_id=st.session_state.get("current_project_id"),
+                )
+                st.session_state.series_book_number = next_book_number
+                st.session_state.series_book_number_input = next_book_number
+                st.session_state.series_book_number_auto_signature = auto_number_signature
+
+            st.session_state.series_book_number = int(
+                st.number_input(
+                    "Series Number:",
+                    min_value=1,
+                    max_value=100,
+                    value=int(st.session_state.get("series_book_number", 1) or 1),
+                    step=1,
+                    key="series_book_number_input",
                 )
             )
 
-            if selected_existing_records:
-                st.caption("Automatic series order:")
-                for assigned_number, record in enumerate(selected_existing_records, start=1):
-                    st.write(f"Book {assigned_number}: {record.get('title', 'Untitled Project')}")
+            # Series continuity is automatic and always strict.
+            st.session_state.series_continuity_mode = "Strict"
+            st.caption("Continuity Protection: Strict — automatic")
 
-                if st.button(
-                    "Add Selected Books to Series",
-                    key="assign_existing_books_to_series",
-                    use_container_width=True,
-                ):
-                    for assigned_number, record in enumerate(selected_existing_records, start=1):
-                        assign_existing_project_to_series(
-                            project_id=record.get("project_id"),
-                            series_name=st.session_state.series_name,
-                            book_number=assigned_number,
-                            project_title=record.get("title"),
-                        )
+            st.session_state.series_key = make_series_key(st.session_state.series_name)
 
-                    st.session_state.series_book_number = max(
-                        int(st.session_state.get("series_book_number", 1) or 1),
-                        len(selected_existing_records) + 1,
+            candidates = get_series_reference_candidates()
+            id_to_candidate = {candidate["id"]: candidate for candidate in candidates}
+
+            # One-time setup for books written before series support was added.
+            unassigned_candidates = [
+                candidate
+                for candidate in candidates
+                if not str(candidate.get("series_key") or "").strip()
+            ]
+
+            if unassigned_candidates and st.session_state.series_name:
+                st.markdown("**Add Previously Created Projects to This Series (One-Time Setup):**")
+                setup_label_to_candidate = {
+                    candidate["label"]: candidate for candidate in unassigned_candidates
+                }
+                selected_existing_labels = st.multiselect(
+                    "Existing Saved Projects:",
+                    options=list(setup_label_to_candidate.keys()),
+                    key="series_existing_book_selector",
+                    help=(
+                        "Select books already written before series support was added. "
+                        "They will be numbered automatically by their original saved date."
+                    ),
+                )
+
+                selected_existing_records = [
+                    setup_label_to_candidate[label]
+                    for label in selected_existing_labels
+                    if label in setup_label_to_candidate
+                ]
+                selected_existing_records.sort(
+                    key=lambda item: (
+                        str(item.get("created_at") or ""),
+                        str(item.get("title") or "").lower(),
                     )
-                    st.session_state.series_existing_book_selector = []
-                    st.success("Existing books added to the series.")
-                    st.rerun()
+                )
 
-        valid_saved_ids = [
-            reference_id
-            for reference_id in (st.session_state.get("series_reference_ids", []) or [])
-            if reference_id in id_to_candidate
-        ]
-        prior_series_ids = [
-            candidate["id"]
-            for candidate in candidates
-            if (
-                st.session_state.series_key
-                and candidate.get("series_key") == st.session_state.series_key
-                and int(candidate.get("book_number") or 0) > 0
-                and int(candidate.get("book_number") or 0) < st.session_state.series_book_number
+                if selected_existing_records:
+                    st.caption("Automatic series order:")
+                    for assigned_number, record in enumerate(selected_existing_records, start=1):
+                        st.write(f"Series #{assigned_number}: {record.get('title', 'Untitled Project')}")
+
+                    if st.button(
+                        "Add Selected Projects to Series",
+                        key="assign_existing_books_to_series",
+                        use_container_width=True,
+                    ):
+                        for assigned_number, record in enumerate(selected_existing_records, start=1):
+                            assign_existing_project_to_series(
+                                project_id=record.get("project_id"),
+                                series_name=st.session_state.series_name,
+                                book_number=assigned_number,
+                                project_title=record.get("title"),
+                            )
+
+                        st.session_state.series_book_number = max(
+                            int(st.session_state.get("series_book_number", 1) or 1),
+                            len(selected_existing_records) + 1,
+                        )
+                        st.session_state.series_existing_book_selector = []
+                        st.success("Existing projects added to the series.")
+                        st.rerun()
+
+            valid_saved_ids = [
+                reference_id
+                for reference_id in (st.session_state.get("series_reference_ids", []) or [])
+                if reference_id in id_to_candidate
+            ]
+            prior_series_ids = [
+                candidate["id"]
+                for candidate in candidates
+                if (
+                    st.session_state.series_key
+                    and candidate.get("series_key") == st.session_state.series_key
+                    and int(candidate.get("book_number") or 0) > 0
+                    and int(candidate.get("book_number") or 0) < st.session_state.series_book_number
+                )
+            ]
+
+            # Preserve any books already attached during first-time series setup, then automatically
+            # include every earlier book already saved under the same series.
+            automatic_ids = []
+            for reference_id in valid_saved_ids + prior_series_ids:
+                if reference_id not in automatic_ids:
+                    automatic_ids.append(reference_id)
+            st.session_state.series_reference_ids = automatic_ids
+            st.session_state.series_selection_signature = (
+                f"{st.session_state.series_key}:{st.session_state.series_book_number}"
             )
-        ]
+            st.session_state.pop("series_reference_selector", None)
 
-        # Preserve any books already attached during first-time series setup, then automatically
-        # include every earlier book already saved under the same series.
-        automatic_ids = []
-        for reference_id in valid_saved_ids + prior_series_ids:
-            if reference_id not in automatic_ids:
-                automatic_ids.append(reference_id)
-        st.session_state.series_reference_ids = automatic_ids
-        st.session_state.series_selection_signature = (
-            f"{st.session_state.series_key}:{st.session_state.series_book_number}"
-        )
-        st.session_state.pop("series_reference_selector", None)
+            automatic_records = [
+                id_to_candidate[reference_id]
+                for reference_id in automatic_ids
+                if reference_id in id_to_candidate
+            ]
 
-        automatic_records = [
-            id_to_candidate[reference_id]
-            for reference_id in automatic_ids
-            if reference_id in id_to_candidate
-        ]
+            
+            _series_reference_heading = {
+                "podcast_script": "**Previous Podcast Automatically Referenced:**",
+                "youtube_shorts": "**Previous Series Projects Automatically Referenced:**",
+            }.get(
+                str(st.session_state.get("active_format_id") or ""),
+                "**Previous Series Projects Automatically Referenced:**",
+            )
+            st.markdown(_series_reference_heading)
+            if automatic_records:
+                for record in automatic_records:
+                    st.write(f"✓ {record.get('title', 'Untitled Project')}")
+            elif st.session_state.series_book_number > 1:
+                st.warning(
+                    "No earlier projects are currently saved under this series. Existing projects only need "
+                    "to be assigned to the series once; future projects will include them automatically."
+                )
+            else:
+                st.caption("This is the first project in the series.")
 
-        st.markdown("**Previous Books Automatically Referenced:**")
-        if automatic_records:
-            for record in automatic_records:
-                st.write(f"✓ {record.get('title', 'Untitled Project')}")
-        elif st.session_state.series_book_number > 1:
-            st.warning(
-                "No earlier books are currently saved under this series. Existing books only need "
-                "to be assigned to the series once; future books will include them automatically."
+            inherited_canon = get_inherited_series_canon_notes(
+                st.session_state.series_key,
+                st.session_state.series_book_number,
+            )
+            if inherited_canon:
+                st.markdown("**Inherited Series Reference:** Automatically loaded from earlier series projects.")
+
+            # Series continuity is derived automatically from earlier manuscripts and saved metadata.
+            # No manual facts field is shown or required.
+            st.session_state.series_canon_notes = ""
+            st.session_state.pop("series_canon_notes_input", None)
+
+            reference_count = len(st.session_state.get("series_reference_ids", []) or [])
+            st.success(
+                f"Series Continuity Active: {st.session_state.series_name or 'Name Required'} — "
+                f"Series #{st.session_state.series_book_number} — {reference_count} earlier "
+                f"project{'' if reference_count == 1 else 's'} automatically included."
             )
         else:
-            st.caption("This is the first book in the series.")
+            st.session_state.series_key = ""
+            st.session_state.series_reference_ids = []
 
-        inherited_canon = get_inherited_series_canon_notes(
-            st.session_state.series_key,
-            st.session_state.series_book_number,
-        )
-        if inherited_canon:
-            st.markdown("**Inherited Series Bible:** Automatically loaded from earlier books.")
+        # Render the selected format's independent development fields.
+        # Common WritersBlock controls (title, source/premise, dialogue style) remain shared.
+        render_active_format_development_fields()
 
-        # Series continuity is derived automatically from earlier manuscripts and saved metadata.
-        # No manual facts field is shown or required.
-        st.session_state.series_canon_notes = ""
-        st.session_state.pop("series_canon_notes_input", None)
+        # The project format is selected once from the Format Template dropdown
+        # beneath the WritersBlock header. Do not ask for the same format twice.
 
-        reference_count = len(st.session_state.get("series_reference_ids", []) or [])
-        st.success(
-            f"Series Continuity Active: {st.session_state.series_name or 'Name Required'} — "
-            f"Book {st.session_state.series_book_number} — {reference_count} earlier "
-            f"book{'' if reference_count == 1 else 's'} automatically included."
-        )
-    else:
-        st.session_state.series_key = ""
-        st.session_state.series_reference_ids = []
+        if st.session_state.format_type == "Audio Book":
+            previous_length = st.session_state.get("audiobook_length", "30 Minutes")
+            audiobook_lengths = list(AUDIOBOOK_LENGTH_OPTIONS.keys())
 
-    format_options = list(SPARK_BANK.keys())
+            _audio_length_col, _audio_length_spacer = st.columns([3.0, 1.2])
+            with _audio_length_col:
+                selected_audiobook_length = st.selectbox(
+                    "Approximate Finished Audio Book Length:",
+                    audiobook_lengths,
+                    index=(
+                        audiobook_lengths.index(previous_length)
+                        if previous_length in audiobook_lengths
+                        else audiobook_lengths.index("30 Minutes")
+                    ),
+                    key="audiobook_length_selector",
+                )
 
-    st.session_state.format_type = st.selectbox(
-        "Target Layout Format:",
-        format_options,
-        index=format_options.index(st.session_state.format_type)
-        if st.session_state.format_type in format_options
-        else format_options.index("Short Story"),
-    )
+            st.session_state.audiobook_length = selected_audiobook_length
+            audiobook_spec = AUDIOBOOK_LENGTH_OPTIONS[selected_audiobook_length]
 
-    if st.session_state.format_type == "Audio Book":
-        previous_length = st.session_state.get("audiobook_length", "30 Minutes")
-        audiobook_lengths = list(AUDIOBOOK_LENGTH_OPTIONS.keys())
-
-        selected_audiobook_length = st.selectbox(
-            "Approximate Finished Audio Book Length:",
-            audiobook_lengths,
-            index=(
-                audiobook_lengths.index(previous_length)
-                if previous_length in audiobook_lengths
-                else audiobook_lengths.index("30 Minutes")
-            ),
-            key="audiobook_length_selector",
-        )
-
-        st.session_state.audiobook_length = selected_audiobook_length
-        audiobook_spec = AUDIOBOOK_LENGTH_OPTIONS[selected_audiobook_length]
-
-        existing_target = int(
-            st.session_state.get(
-                "audiobook_target_word_count",
-                audiobook_spec["default_words"],
+            existing_target = int(
+                st.session_state.get(
+                    "audiobook_target_word_count",
+                    audiobook_spec["default_words"],
+                )
             )
+
+            if (
+                selected_audiobook_length != previous_length
+                or existing_target < audiobook_spec["min_words"]
+                or existing_target > audiobook_spec["max_words"]
+            ):
+                existing_target = audiobook_spec["default_words"]
+
+            audiobook_target_words = st.number_input(
+                "Target Total Manuscript Word Count:",
+                min_value=audiobook_spec["min_words"],
+                max_value=audiobook_spec["max_words"],
+                value=existing_target,
+                step=50,
+                key=f"audiobook_target_words_{selected_audiobook_length}",
+            )
+
+            st.session_state.audiobook_target_word_count = int(audiobook_target_words)
+
+            st.info(
+                f"Recommended range for {selected_audiobook_length.lower()}: "
+                f"{audiobook_spec['min_words']:,}–{audiobook_spec['max_words']:,} words. "
+                f"WritersBlock will use the selected {int(audiobook_target_words):,}-word target "
+                f"when building the outline and distributing scene lengths."
+            )
+
+        dialogue_style_options = DIALOGUE_STYLE_OPTIONS
+        current_dialogue_style = get_dialogue_style()
+        _podcast_episode_format = str(
+            get_active_format_template_values().get("episode_format") or ""
+        )
+        _show_dialogue_control = not (
+            st.session_state.get("active_format_id") == "podcast_script"
+            and _podcast_episode_format not in {"Scripted / Narrated", "Hybrid"}
         )
 
-        if (
-            selected_audiobook_length != previous_length
-            or existing_target < audiobook_spec["min_words"]
-            or existing_target > audiobook_spec["max_words"]
-        ):
-            existing_target = audiobook_spec["default_words"]
+        if _show_dialogue_control:
+            _dialogue_col, _dialogue_spacer = st.columns([3.0, 1.2])
+            with _dialogue_col:
+                st.session_state.dialogue_style = st.selectbox(
+                    concept_ui.get("dialogue_label") or "Dialogue Style:",
+                    dialogue_style_options,
+                    index=dialogue_style_options.index(current_dialogue_style),
+                    key="dialogue_style_selector",
+                    format_func=get_dialogue_style_display,
+                    help=(
+                        "Percentages are approximate targets for the share of finished words that are spoken dialogue. "
+                        "Story-Driven / Automatic has no fixed percentage. The selected project type still controls "
+                        "how dialogue is formatted."
+                    ),
+                )
+        elif st.session_state.get("active_format_id") == "podcast_script":
+            # Live/conversational/interview formats are guided by talking points and segment structure,
+            # not an artificial dialogue percentage.
+            st.session_state.dialogue_style = "Story-Driven / Automatic"
 
-        audiobook_target_words = st.number_input(
-            "Target Total Manuscript Word Count:",
-            min_value=audiobook_spec["min_words"],
-            max_value=audiobook_spec["max_words"],
-            value=existing_target,
-            step=50,
-            key=f"audiobook_target_words_{selected_audiobook_length}",
+
+        # Format-specific tone, source intake, and style controls are supplied by
+        # the active template so the lower half of Concept Development is no
+        # longer a generic story form.
+        tone_options = list(concept_ui.get("tone_options") or [
+            "Professional", "Warm", "Serious", "Humorous", "Suspenseful", "Cinematic"
+        ])
+        tone_label = str(concept_ui.get("tone_label") or "Tone / Aesthetic:")
+        current_tone = str(st.session_state.get("tone_style") or "")
+        default_tone_index = tone_options.index(current_tone) if current_tone in tone_options else 0
+
+        _tone_col, _tone_spacer = st.columns([3.0, 1.2])
+        with _tone_col:
+            st.session_state.tone_style = st.selectbox(
+                tone_label,
+                tone_options,
+                index=default_tone_index,
+                key=f"tone_style_{st.session_state.active_format_id}",
+            )
+
+        st.markdown("---")
+        st.markdown(f"### {concept_ui.get('source_heading') or 'Choose a Starting Point'}")
+
+        existing_draft_option = str(
+            concept_ui.get("existing_option") or "-- Use Existing Draft / Manuscript --"
+        )
+        custom_plot_option = str(
+            concept_ui.get("custom_option") or "-- Enter Your Own Project Premise --"
+        )
+        # Use one universal concept/brief entry instead of preloaded sample concepts.
+        # This keeps every format neutral and lets Quill respond to the user's actual intent.
+        seed_bank = []
+        quill_start_option = "-- Quill-Assisted Starting Point --"
+        seed_options = [custom_plot_option, existing_draft_option, quill_start_option]
+
+        current_seed = str(st.session_state.get("story_seed") or "")
+        current_source_mode = str(st.session_state.get("starting_source_mode") or "Story Idea")
+
+        if current_source_mode == "Existing Draft / Manuscript":
+            default_seed_index = seed_options.index(existing_draft_option)
+        elif current_source_mode == "Quill Assisted" and quill_start_option in seed_options:
+            default_seed_index = seed_options.index(quill_start_option)
+        elif current_source_mode == "Custom Plot Line":
+            default_seed_index = seed_options.index(custom_plot_option)
+        elif current_seed in seed_bank:
+            default_seed_index = seed_bank.index(current_seed)
+        else:
+            default_seed_index = seed_options.index(custom_plot_option)
+
+        selected_seed = st.radio(
+            str(concept_ui.get("source_label") or "Starting Source:"),
+            seed_options,
+            index=default_seed_index,
+            key=f"starting_source_{st.session_state.active_format_id}",
         )
 
-        st.session_state.audiobook_target_word_count = int(audiobook_target_words)
-
-        st.info(
-            f"Recommended range for {selected_audiobook_length.lower()}: "
-            f"{audiobook_spec['min_words']:,}–{audiobook_spec['max_words']:,} words. "
-            f"WritersBlock will use the selected {int(audiobook_target_words):,}-word target "
-            f"when building the outline and distributing scene lengths."
-        )
-
-    dialogue_style_options = DIALOGUE_STYLE_OPTIONS
-    current_dialogue_style = get_dialogue_style()
-
-    st.session_state.dialogue_style = st.selectbox(
-        "Dialogue Style:",
-        dialogue_style_options,
-        index=dialogue_style_options.index(current_dialogue_style),
-        key="dialogue_style_selector",
-        format_func=get_dialogue_style_display,
-        help=(
-            "Percentages are approximate targets for the share of finished words that are spoken dialogue. "
-            "Story-Driven / Automatic has no fixed percentage. The selected project type still controls "
-            "how dialogue is formatted."
-        ),
-    )
-
-
-    tone_options = [
-        "Mind-Bending Sci-Fi",
-        "Gritty Noir Mystery",
-        "Children's: Scripture & Life Lessons",
-        "Children's: Whimsical Animal Adventure",
-        "Whimsical & Magical Fantasy",
-        "Satirical & Sarcastic Comedy",
-        "Suspenseful & Tense Thriller",
-        "Melancholic & Nostalgic Prose",
-        "Epic & Grandiose Lore",
-    ]
-
-    st.session_state.tone_style = st.selectbox(
-        "Tone & Aesthetic Base:",
-        tone_options,
-        index=tone_options.index(st.session_state.tone_style)
-        if st.session_state.tone_style in tone_options
-        else tone_options.index("Gritty Noir Mystery"),
-    )
-
-    st.markdown("---")
-    st.markdown("**🔴 Select a Starting Story Idea, Enter Your Own Plot Line, or Use an Existing Draft:**")
-
-    existing_draft_option = "-- Use Existing Draft / Manuscript --"
-    custom_plot_option = "-- Enter Custom Plot Line --"
-    seed_options = SPARK_BANK[st.session_state.format_type] + [
-        custom_plot_option,
-        existing_draft_option,
-    ]
-
-    current_seed = st.session_state.story_seed
-    current_source_mode = str(st.session_state.get("starting_source_mode") or "Story Idea")
-
-    if current_source_mode == "Existing Draft / Manuscript":
-        default_seed_index = seed_options.index(existing_draft_option)
-    elif current_source_mode == "Custom Plot Line":
-        default_seed_index = seed_options.index(custom_plot_option)
-    elif current_seed in seed_options:
-        default_seed_index = seed_options.index(current_seed)
-    elif current_seed in SPARK_BANK[st.session_state.format_type]:
-        default_seed_index = SPARK_BANK[st.session_state.format_type].index(current_seed)
-    else:
-        default_seed_index = seed_options.index(custom_plot_option)
-
-    selected_seed = st.radio(
-        "Starting Story Source:",
-        seed_options,
-        index=default_seed_index,
-    )
-
-    if selected_seed == custom_plot_option:
-        st.session_state.starting_source_mode = "Custom Plot Line"
-        st.session_state.story_seed = st.text_area(
-            "Enter Custom Plot Line:",
-            value=(
+        if selected_seed == custom_plot_option:
+            st.session_state.starting_source_mode = "Custom Plot Line"
+            custom_value = (
                 st.session_state.story_seed
                 if current_source_mode != "Existing Draft / Manuscript"
                 else ""
-            ),
-            height=140,
-            max_chars=1000,
-            key="custom_plot_line_input",
-        )
+            )
+            st.session_state.story_seed = st.text_area(
+                str(concept_ui.get("custom_label") or "Enter Your Project Premise:"),
+                value=custom_value,
+                height=170,
+                key=f"custom_plot_line_input_{st.session_state.active_format_id}",
+                placeholder=(
+                    "Describe what you want to create in your own words. Quill will use this concept/brief, together with the selected template, to guide development."
+                ),
+            )
+            custom_word_count = count_words(st.session_state.story_seed)
+            st.caption(f"{custom_word_count:,} / 1,000 words")
+            if custom_word_count > 1000:
+                st.warning("This entry exceeds the 1,000-word Concept Development limit.")
 
-        st.caption(f"{len(st.session_state.story_seed):,} / 1,000 characters")
-        st.warning(
-            "After typing your custom plot line, press CTRL + ENTER to apply it "
-            "before clicking Generate Sandbox Paths."
-        )
-
-    elif selected_seed == existing_draft_option:
-        st.session_state.starting_source_mode = "Existing Draft / Manuscript"
-
-        st.warning(
-            "Large documents may result in higher API usage during processing."
-        )
-
-        # Hide Streamlit's generic MB-per-file helper because WritersBlock enforces
-        # its own document-length limit below.
-        st.markdown(
-            """
-            <style>
-            [data-testid="stFileUploaderDropzoneInstructions"] {
-                display: none !important;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        uploaded_existing_draft = st.file_uploader(
-            "Upload Existing Draft / Manuscript:",
-            type=["docx", "txt"],
-            key="concept_existing_draft_upload",
-            help="Use a DOCX or TXT as the protected starting source for this WritersBlock project.",
-        )
-        st.caption("Maximum 120,000 words • DOCX, TXT")
-
-        if uploaded_existing_draft is not None:
-            try:
-                extracted_existing_draft = extract_uploaded_manuscript_text(uploaded_existing_draft)
-            except Exception as source_error:
-                st.error(f"The document could not be read: {source_error}")
-                extracted_existing_draft = ""
-
-            if extracted_existing_draft.strip():
-                extracted_word_count = count_words(extracted_existing_draft)
-
-                if extracted_word_count > 120000:
-                    st.session_state.imported_source_text = ""
-                    st.session_state.imported_source_name = ""
-                    st.session_state.imported_source_word_count = 0
-                    st.error(
-                        f"Document contains {extracted_word_count:,} words. "
-                        "WritersBlock accepts existing drafts up to 120,000 words."
-                    )
-                else:
-                    st.session_state.imported_source_text = extracted_existing_draft.strip()
-                    st.session_state.imported_source_name = str(
-                        getattr(uploaded_existing_draft, "name", "Existing Draft") or "Existing Draft"
-                    )
-                    st.session_state.imported_source_word_count = extracted_word_count
-                    st.session_state.story_seed = st.session_state.imported_source_text
-
-        imported_source_text = str(st.session_state.get("imported_source_text") or "").strip()
-        imported_source_name = str(st.session_state.get("imported_source_name") or "").strip()
-
-        if imported_source_text:
-            st.success(
-                f"Existing Draft Loaded: {imported_source_name or 'Uploaded Document'} — "
-                f"{count_words(imported_source_text):,} words"
+        elif selected_seed == quill_start_option:
+            st.session_state.starting_source_mode = "Quill Assisted"
+            format_name = str(
+                (st.session_state.get("active_format_template") or {}).get("display_name")
+                or st.session_state.get("quill_format_name")
+                or "Writing Project"
             )
             st.caption(
-                "This source is read-only in Concept Development. WritersBlock will use it as the "
-                "starting material while the project type, Dialogue Style, tone, and later development "
-                "choices control how the project moves forward."
+                f"Quill uses your {format_name} Development Setup above to propose a starting concept. "
+                "You can edit it or request another suggestion before continuing."
             )
-            st.text_area(
-                "Existing Draft / Manuscript Source — Read Only:",
-                value=imported_source_text,
-                height=320,
-                disabled=True,
-                key="concept_existing_draft_read_only_preview",
+            quill_key = f"wbs_quill_starting_concept_{st.session_state.active_format_id}"
+            if quill_key not in st.session_state:
+                st.session_state[quill_key] = ""
+            if st.button(
+                "Ask Quill to Suggest a Starting Concept",
+                key=f"wbs_quill_generate_concept_{st.session_state.active_format_id}",
+            ):
+                require_product_access("sandbox")
+                backend = st.session_state.get("backend")
+                client = getattr(backend, "client", None)
+                model_name = getattr(backend, "model_name", None)
+                if client is None or not model_name:
+                    st.error("Quill's writing service is unavailable. Please try again later.")
+                else:
+                    development_context = get_active_format_development_context()
+                    prompt = (
+                        "You are Quill, the WritersBlock Studios creative writing guide. "
+                        f"Propose ONE original starting concept/brief for the selected writing format: {format_name}. "
+                        "Write 100-180 words, appropriate to this specific format and its intended output "
+                        "(for example: a story premise for fiction, an episode concept for a podcast, "
+                        "or a production-oriented concept for a script). Respect all development selections "
+                        "provided below, including genre, tone, setting, audience, production influence, "
+                        "and structural or ending requirements wherever applicable. Do not invent "
+                        "requirements for fields not supplied. Include a central idea, motivating tension "
+                        "or purpose, and a possible direction while keeping meaningful choices open "
+                        "for the writer. Do not write the complete project or reference these instructions. "
+                        "Return only the editable starting concept.\n\n"
+                        f"{development_context}\n"
+                        f"Tone: {st.session_state.get('tone_style', '')}\n"
+                        f"Dialogue: {get_dialogue_style_display()}\n"
+                        f"Format guidance: {st.session_state.get('quill_format_instructions', '')}"
+                    )
+                    try:
+                        with st.spinner("Quill is preparing a starting concept..."):
+                            suggestion = client.models.generate_content(model=model_name, contents=prompt)
+                            concept = str(getattr(suggestion, "text", "") or "").strip()
+                        if not concept or not ai_output_is_usable(concept):
+                            st.error("Quill did not return a usable suggestion. Please try again.")
+                        else:
+                            st.session_state[quill_key] = concept
+                            st.session_state.story_seed = concept
+                            st.rerun()
+                    except Exception as exc:
+                        st.error(f"Quill could not generate a starting concept: {exc}")
+            st.session_state.story_seed = st.text_area(
+                "Quill's Suggested Starting Concept — Edit Before Continuing:",
+                key=quill_key,
+                height=180,
+                placeholder="Ask Quill to suggest a starting concept based on your development selections.",
             )
-        else:
-            st.info(
-                "Upload a DOCX or TXT draft to use it as the starting source. "
-                "The original text will be displayed here for review and will not be editable at intake."
+            st.caption(f"{count_words(st.session_state.story_seed):,} / 1,000 words")
+            if count_words(st.session_state.story_seed) > 1000:
+                st.warning("Reduce the starting concept to 1,000 words or fewer.")
+
+        elif selected_seed == existing_draft_option:
+            st.session_state.starting_source_mode = "Existing Draft / Manuscript"
+            st.warning("Large documents may result in higher API usage during processing.")
+
+            st.markdown(
+                """
+                <style>
+                [data-testid="stFileUploaderDropzoneInstructions"] {
+                    display: none !important;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
             )
 
-    else:
-        st.session_state.starting_source_mode = "Story Idea"
-        st.session_state.story_seed = selected_seed
+            uploaded_existing_draft = st.file_uploader(
+                str(concept_ui.get("existing_label") or "Upload Existing Draft / Manuscript:"),
+                type=["docx", "txt"],
+                key=f"concept_existing_draft_upload_{st.session_state.active_format_id}",
+                help="Use a DOCX or TXT as the protected starting source for this WritersBlock project.",
+            )
+            st.caption("Maximum 120,000 words • DOCX, TXT")
 
-    st.session_state.author_style = st.text_input(
-        "Target Author Style Matrix (Optional):",
-        value=st.session_state.author_style,
-        placeholder="e.g., Raymond Chandler, Philip K. Dick",
-    )
+            if uploaded_existing_draft is not None:
+                try:
+                    extracted_existing_draft = extract_uploaded_manuscript_text(uploaded_existing_draft)
+                except Exception as source_error:
+                    st.error(f"The document could not be read: {source_error}")
+                    extracted_existing_draft = ""
 
-    st.markdown("---")
+                if extracted_existing_draft.strip():
+                    extracted_word_count = count_words(extracted_existing_draft)
+                    if extracted_word_count > 120000:
+                        st.session_state.imported_source_text = ""
+                        st.session_state.imported_source_name = ""
+                        st.session_state.imported_source_word_count = 0
+                        st.error(
+                            f"Document contains {extracted_word_count:,} words. "
+                            "WritersBlock accepts existing drafts up to 120,000 words."
+                        )
+                    else:
+                        st.session_state.imported_source_text = extracted_existing_draft.strip()
+                        st.session_state.imported_source_name = str(
+                            getattr(uploaded_existing_draft, "name", "Existing Draft") or "Existing Draft"
+                        )
+                        st.session_state.imported_source_word_count = extracted_word_count
+                        st.session_state.story_seed = st.session_state.imported_source_text
 
-    if st.button(
-        "Generate Sandbox Paths 🚀",
-        key="generate_sandbox_paths",
-        type="primary",
-        use_container_width=True,
-    ):
-        require_product_access("sandbox")
-        require_demo_action_available("sandbox")
-        st.session_state.plot_outline = None
-        st.session_state.current_draft_output = ""
-        st.session_state.rewritten_manuscript = ""
-        st.session_state.manuscript_text = ""
-        st.session_state.current_processing_beat = 0
-        st.session_state.total_beats = 0
-        st.session_state.manuscript_version = 0
-        st.session_state.picture_book_layout_spreads = []
-        st.session_state.picture_book_layout_source_signature = ""
-        st.session_state.picture_book_layout_preview_id = 0
-        st.session_state.picture_book_page_size = DEFAULT_PICTURE_BOOK_PAGE_SIZE
-
-        if not get_project_title():
-            st.error("Please name this project before continuing.")
-            st.stop()
-
-
-        if st.session_state.get("starting_source_mode") == "Existing Draft / Manuscript":
             imported_source_text = str(st.session_state.get("imported_source_text") or "").strip()
-            if not imported_source_text:
-                st.error("Please upload an existing DOCX or TXT draft before generating sandbox paths.")
-                st.stop()
-            st.session_state.story_seed = imported_source_text
-
-        if not st.session_state.story_seed.strip():
-            st.error("Please enter a story concept or upload an existing draft before generating sandbox paths.")
-            st.stop()
-
-        with st.spinner("Processing voice matrices and structural paths..."):
-            time.sleep(1)
-
-            if create_bridge_adapter is None:
-                st.error(
-                    "WritersBlock Model is unavailable. "
-                    f"{WBS_MODEL_IMPORT_ERROR}"
+            imported_source_name = str(st.session_state.get("imported_source_name") or "").strip()
+            if imported_source_text:
+                st.success(
+                    f"Existing Source Loaded: {imported_source_name or 'Uploaded Document'} — "
+                    f"{count_words(imported_source_text):,} words"
                 )
-                st.stop()
-
-            _wbs_bridge_adapter = create_bridge_adapter(
-                backend=st.session_state.backend
-            )
-            _wbs_bridge_result = _wbs_bridge_adapter.execute(
-                "Generate sandbox paths",
-                st.session_state,
-                prepared_context={
-                    "series_aware_story_seed": get_series_aware_story_seed(),
-                    "scripting_format_context": get_scripting_format_context(),
-                },
-                action_payload={
-                    "tone_style": st.session_state.tone_style,
-                    "author_style": st.session_state.author_style,
-                },
-            )
-
-            if not _wbs_bridge_result.success:
-                st.error(
-                    "WritersBlock Model Bridge could not generate the sandbox paths. "
-                    + (_wbs_bridge_result.error or "Unknown bridge error.")
+                st.caption(
+                    "This source is read-only in Concept Development. WritersBlock will use it as protected "
+                    "starting material while the selected format and its development rules control the project."
                 )
-                st.stop()
-
-            st.session_state.sandbox_slates = _wbs_bridge_result.output
-            st.session_state["_wbs_agent_bridge_last_operation"] = (
-                _wbs_bridge_result.backend_operation or ""
-            )
-            st.session_state["_wbs_agent_bridge_last_success"] = True
-
-            if sandbox_output_is_usable(st.session_state.sandbox_slates):
-                mark_demo_action_used("sandbox")
-
-            save_project_to_supabase(
-                project_title=get_project_title_for_display()[:80],
-                project_type=st.session_state.format_type,
-            )
-
-            if st.session_state.get("project_scope") == "Book in a Series":
-                save_series_metadata_for_project(
-                    st.session_state.get("current_project_id")
+                st.text_area(
+                    "Existing Source — Read Only:",
+                    value=imported_source_text,
+                    height=320,
+                    disabled=True,
+                    key=f"concept_existing_draft_read_only_preview_{st.session_state.active_format_id}",
                 )
+            else:
+                st.info("Upload a DOCX or TXT source to use it as the protected starting material.")
 
+        else:
+            st.session_state.starting_source_mode = "Story Idea"
+            st.session_state.story_seed = selected_seed
 
-            st.session_state.chosen_option = None
-            st.session_state.chosen_option_text = None
+        # Production influence is now selected at the top of each relevant
+        # Development Setup instead of appearing as a late style-reference field.
+        if st.session_state.get("active_format_id") == "podcast_script":
+            st.session_state.author_style = ""
+
+        st.markdown("---")
+
+        if st.button(
+            str(concept_ui.get("button_label") or "Develop Project Paths 🚀"),
+            key="generate_sandbox_paths",
+            type="primary",
+            use_container_width=True,
+        ):
+            require_product_access("sandbox")
+            require_demo_action_available("sandbox")
             st.session_state.plot_outline = None
             st.session_state.current_draft_output = ""
-            st.session_state.rolling_lore_book = ""
-            st.session_state.completed_beats = []
-            st.session_state.scene_blocks = {}
-            st.session_state.current_processing_beat = 1
-            st.session_state.project_saved_notice = True
-            st.session_state.project_stage = "Sandbox"
-            st.rerun()
+            st.session_state.rewritten_manuscript = ""
+            st.session_state.manuscript_text = ""
+            st.session_state.current_processing_beat = 0
+            st.session_state.total_beats = 0
+            st.session_state.manuscript_version = 0
+            st.session_state.picture_book_layout_spreads = []
+            st.session_state.picture_book_layout_source_signature = ""
+            st.session_state.picture_book_layout_preview_id = 0
+            st.session_state.picture_book_page_size = DEFAULT_PICTURE_BOOK_PAGE_SIZE
 
-# ======================================
-# PHASE 2: SCRIPTING
-# ======================================
+            if not get_project_title():
+                st.error("Please name this project before continuing.")
+                st.stop()
+
+
+            if st.session_state.get("starting_source_mode") == "Existing Draft / Manuscript":
+                imported_source_text = str(st.session_state.get("imported_source_text") or "").strip()
+                if not imported_source_text:
+                    st.error("Please upload an existing DOCX or TXT draft before generating sandbox paths.")
+                    st.stop()
+                st.session_state.story_seed = imported_source_text
+
+            if not st.session_state.story_seed.strip():
+                source_noun = str(concept_ui.get("source_noun") or "project premise")
+                st.error(f"Please enter a {source_noun} or upload an existing source before continuing.")
+                st.stop()
+
+            if (
+                st.session_state.get("starting_source_mode") in {"Custom Plot Line", "Quill Assisted"}
+                and count_words(st.session_state.story_seed) > 1000
+            ):
+                st.error("Please reduce the Concept Development entry to 1,000 words or fewer before continuing.")
+                st.stop()
+
+            with st.spinner(str(concept_ui.get("spinner") or "Developing project paths...")):
+                time.sleep(1)
+
+                if create_bridge_adapter is None:
+                    st.error(
+                        "WritersBlock Model is unavailable. "
+                        f"{WBS_MODEL_IMPORT_ERROR}"
+                    )
+                    st.stop()
+
+                _wbs_bridge_adapter = create_bridge_adapter(
+                    backend=st.session_state.backend
+                )
+                _wbs_bridge_result = _wbs_bridge_adapter.execute(
+                    "Generate sandbox paths",
+                    st.session_state,
+                    prepared_context={
+                        "series_aware_story_seed": get_series_aware_story_seed(),
+                        "scripting_format_context": get_scripting_format_context(),
+                        "format_development_context": get_active_format_development_context(),
+                        "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
+                        "quill_template_context": refresh_quill_template_context(),
+                    },
+                    action_payload={
+                        "tone_style": st.session_state.tone_style,
+                        "author_style": st.session_state.author_style,
+                    },
+                )
+
+                if not _wbs_bridge_result.success:
+                    st.error(
+                        "WritersBlock Model Bridge could not generate the sandbox paths. "
+                        + (_wbs_bridge_result.error or "Unknown bridge error.")
+                    )
+                    st.stop()
+
+                st.session_state.sandbox_slates = _wbs_bridge_result.output
+                st.session_state["_wbs_agent_bridge_last_operation"] = (
+                    _wbs_bridge_result.backend_operation or ""
+                )
+                st.session_state["_wbs_agent_bridge_last_success"] = True
+
+                if sandbox_output_is_usable(st.session_state.sandbox_slates):
+                    mark_demo_action_used("sandbox")
+
+                save_project_to_supabase(
+                    project_title=get_project_title_for_display()[:80],
+                    project_type=st.session_state.format_type,
+                )
+
+                if st.session_state.get("project_scope") == "Book in a Series":
+                    save_series_metadata_for_project(
+                        st.session_state.get("current_project_id")
+                    )
+
+
+                st.session_state.chosen_option = None
+                st.session_state.chosen_option_text = None
+                st.session_state.plot_outline = None
+                st.session_state.current_draft_output = ""
+                st.session_state.rolling_lore_book = ""
+                st.session_state.completed_beats = []
+                st.session_state.scene_blocks = {}
+                st.session_state.current_processing_beat = 1
+                st.session_state.project_saved_notice = True
+                st.session_state.project_stage = "Sandbox"
+                st.rerun()
+
+        # Every writing-format template ends with the same explicit save reminder.
+        render_format_template_save_reminder()
+
+
+    # ======================================
+    # PHASE 2: SCRIPTING
+    # ======================================
+
+    with writer_quill_col:
+        st.markdown(
+            '<div class="wbs-writer-quill-sticky-anchor"></div>',
+            unsafe_allow_html=True,
+        )
+        render_quill_for_current_stage(st_module=st, show_prelude=True)
+
 elif st.session_state.project_stage == "Sandbox":
     st.header("🗺️ Step 2: Scripting")
     render_project_title_banner("step_2_scripting")
@@ -4702,6 +5789,9 @@ if st.session_state.project_stage == "Plot Architect":
                     prepared_context={
                         "series_aware_story_seed": get_series_aware_story_seed(),
                         "effective_format_type": get_effective_format_type(),
+                        "format_development_context": get_active_format_development_context(),
+                        "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
+                        "quill_template_context": refresh_quill_template_context(),
                     },
                     action_payload={
                         "chosen_option": st.session_state.chosen_option,
@@ -5026,6 +6116,9 @@ Write ONLY this single scene block. Do not repeat earlier scenes. Do not summari
                                 prepared_context={
                                     "effective_format_type": get_effective_format_type(),
                                     "dialogue_development_packet": get_dialogue_development_packet(),
+                                    "format_development_context": get_active_format_development_context(),
+                                    "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
+                                    "quill_template_context": refresh_quill_template_context(),
                                 },
                                 action_payload={
                                     "current_beat_text": drafting_instruction_packet,
@@ -5190,6 +6283,67 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             st.warning("No working manuscript is available for Final Output.")
             st.stop()
 
+        source_signature = get_text_signature(current_source)
+
+        # ------------------------------------------------------------------
+        # PROJECT INTEGRITY / FINAL REVIEW — read-only whole-manuscript QC.
+        # This never changes current_draft_output and never applies fixes automatically.
+        # ------------------------------------------------------------------
+        if project_integrity_review_applies():
+            st.subheader("🛡️ Project Integrity / Final Review")
+            st.caption(
+                "Whole-manuscript quality control before Final Output. It checks continuity, names, timeline, "
+                "repetition, POV/tense drift, unresolved placeholders, missing/duplicate sections, structure, "
+                "and other inconsistencies. This review does not rewrite or alter your manuscript."
+            )
+
+            integrity_is_current = bool(
+                str(st.session_state.get("project_integrity_report") or "").strip()
+                and st.session_state.get("project_integrity_source_signature") == source_signature
+            )
+
+            if not integrity_is_current and st.session_state.get("project_integrity_report"):
+                st.info("The manuscript has changed since the last Project Integrity review. Run the review again for the current manuscript.")
+
+            review_label = "REFRESH PROJECT INTEGRITY REVIEW" if integrity_is_current else "RUN PROJECT INTEGRITY FINAL REVIEW"
+            if st.button(
+                review_label,
+                key="run_project_integrity_final_review",
+                type="primary",
+                use_container_width=True,
+            ):
+                with st.spinner("Running whole-manuscript Project Integrity review..."):
+                    try:
+                        integrity_report = run_project_integrity_final_review(current_source)
+                    except Exception as exc:
+                        st.error(f"Project Integrity review failed: {exc}")
+                    else:
+                        st.session_state.project_integrity_report = integrity_report
+                        st.session_state.project_integrity_source_signature = source_signature
+                        first_line = integrity_report.splitlines()[0].strip().upper() if integrity_report else ""
+                        st.session_state.project_integrity_status = (
+                            "PASS" if "OVERALL STATUS: PASS" in first_line else "WARNINGS"
+                        )
+                        st.rerun()
+
+            if integrity_is_current:
+                if st.session_state.get("project_integrity_status") == "PASS":
+                    st.success("Project Integrity Review: PASS")
+                else:
+                    st.warning("Project Integrity Review: WARNINGS — review the report before Final Output.")
+
+                st.markdown("**Project Integrity Report:**")
+                st.markdown(
+                    render_project_integrity_report_html(
+                        st.session_state.get("project_integrity_report", "")
+                    ),
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.info("Project Integrity review has not been run on the current manuscript. Final Output remains writer-controlled and is not blocked.")
+
+            st.markdown("---")
+
         original_format = str(st.session_state.get("format_type") or "Novel / Prose")
         if not st.session_state.get("final_output_format"):
             st.session_state.final_output_format = original_format if original_format in FINAL_OUTPUT_FORMAT_OPTIONS else "Novel / Prose"
@@ -5215,7 +6369,6 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             st.session_state.picture_book_layout_spreads = []
             st.session_state.picture_book_layout_source_signature = ""
 
-        source_signature = get_text_signature(current_source)
         conversion_is_current = bool(
             str(st.session_state.get("final_output_text") or "").strip()
             and st.session_state.get("final_output_source_signature") == source_signature
@@ -5255,6 +6408,10 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                             "final_output_instruction": get_final_output_conversion_instruction(
                                 selected_final_format
                             ),
+                            "effective_format_type": get_effective_format_type(),
+                            "format_development_context": get_active_format_development_context(),
+                            "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
+                            "quill_template_context": refresh_quill_template_context(),
                         },
                         action_payload={
                             "source_text": current_source,
@@ -6302,6 +7459,12 @@ if st.session_state.project_stage == "Revision Engine":
                     _wbs_polish_result = _wbs_polish_bridge.execute(
                         "Run Script Polish",
                         st.session_state,
+                        prepared_context={
+                            "effective_format_type": get_effective_format_type(),
+                            "format_development_context": get_active_format_development_context(),
+                            "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
+                            "quill_template_context": refresh_quill_template_context(),
+                        },
                         action_payload={
                             "revision_mode": revision_mode,
                             "tone_style": st.session_state.tone_style,
@@ -6577,6 +7740,12 @@ elif st.session_state.project_stage == "Rewrite Engine":
                             _wbs_rewrite_result = _wbs_rewrite_bridge.execute(
                                 "Rewrite this manuscript",
                                 st.session_state,
+                                prepared_context={
+                                    "effective_format_type": get_effective_format_type(),
+                                    "format_development_context": get_active_format_development_context(),
+                                    "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
+                                    "quill_template_context": refresh_quill_template_context(),
+                                },
                                 action_payload={
                                     "source_text": edited_source_text,
                                     "backend_rewrite_mode": rewrite_mode,

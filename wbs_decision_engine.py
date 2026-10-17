@@ -77,6 +77,12 @@ class WBSProjectSnapshot:
     project_stage: str = "Intake"
     export_view: bool = False
     format_type: str = "Novel / Prose"
+    active_format_id: str = ""
+    quill_format_name: str = ""
+    quill_format_instructions: str = ""
+    format_template_values: Mapping[str, Any] = field(default_factory=dict)
+    active_format_development_context: str = ""
+    quill_template_context: Mapping[str, Any] = field(default_factory=dict)
     dialogue_style: str = "Story-Driven / Automatic"
     project_scope: str = "Standalone Book"
     series_name: str = ""
@@ -168,6 +174,22 @@ class WBSProjectSnapshot:
             project_stage=str(raw.get("project_stage") or "Intake").strip(),
             export_view=bool(raw.get("export_view", False)),
             format_type=format_type,
+            active_format_id=str(raw.get("active_format_id") or "").strip(),
+            quill_format_name=str(raw.get("quill_format_name") or "").strip(),
+            quill_format_instructions=str(raw.get("quill_format_instructions") or "").strip(),
+            format_template_values=(
+                dict(raw.get("format_template_values") or {})
+                if isinstance(raw.get("format_template_values"), Mapping) else {}
+            ),
+            active_format_development_context=str(
+                raw.get("active_format_development_context")
+                or raw.get("format_development_context")
+                or ""
+            ).strip(),
+            quill_template_context=(
+                dict(raw.get("quill_template_context") or {})
+                if isinstance(raw.get("quill_template_context"), Mapping) else {}
+            ),
             dialogue_style=dialogue_style,
             project_scope=str(raw.get("project_scope") or "Standalone Book").strip(),
             series_name=str(raw.get("series_name") or "").strip(),
@@ -535,6 +557,13 @@ def _backend_hint(
     request_text: str,
 ) -> Dict[str, Any]:
     hint: Dict[str, Any] = {}
+    quill_direction = {
+        "active_format_id": snapshot.active_format_id,
+        "writing_format": snapshot.quill_format_name or snapshot.format_type,
+        "format_instructions": snapshot.quill_format_instructions,
+        "development_context": snapshot.active_format_development_context,
+        "template_context": dict(snapshot.quill_template_context or {}),
+    }
 
     if action == DecisionAction.GENERATE_SANDBOX:
         hint = {
@@ -635,6 +664,9 @@ def _backend_hint(
             "page_size": snapshot.picture_book_page_size,
             "print_ready": False,
         }
+
+    if hint:
+        hint["quill_template_direction"] = quill_direction
 
     return hint
 

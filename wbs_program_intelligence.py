@@ -71,6 +71,8 @@ PROJECT_TYPES: Tuple[str, ...] = (
     "Stage Play / Dramatic Script",
     "Full Novel Blueprint",
     "Children's Picture Book (32-Page Layout)",
+    "YouTube Shorts",
+    "Podcast Script",
 )
 
 FINAL_OUTPUT_FORMATS: Tuple[str, ...] = (
@@ -82,6 +84,8 @@ FINAL_OUTPUT_FORMATS: Tuple[str, ...] = (
     "Audio Book",
     "Children's Picture Book (32-Page Layout)",
     "Full Novel Blueprint",
+    "YouTube Shorts",
+    "Podcast Script",
 )
 
 FINAL_OUTPUT_DISPLAY_LABELS: Dict[str, str] = {
@@ -93,6 +97,8 @@ FINAL_OUTPUT_DISPLAY_LABELS: Dict[str, str] = {
     "Audio Book": "Audiobook Theatre Production Script",
     "Children's Picture Book (32-Page Layout)": "Children's Picture Book",
     "Full Novel Blueprint": "Full Novel Blueprint",
+    "YouTube Shorts": "YouTube Shorts Script",
+    "Podcast Script": "Podcast Script",
 }
 
 # Current application behavior: Steps 1-7 use a neutral readable development
@@ -285,6 +291,8 @@ LEGACY_PROJECT_TYPE_ALIASES = {
     "Children's Storybook (32-Page Layout)": PICTURE_BOOK_PROJECT_TYPE,
     "Children's Picture Book": PICTURE_BOOK_PROJECT_TYPE,
     "Blueprint": "Full Novel Blueprint",
+    "YouTube Short": "YouTube Shorts",
+    "Podcast": "Podcast Script",
 }
 
 LEGACY_DIALOGUE_STYLE_ALIASES = {
