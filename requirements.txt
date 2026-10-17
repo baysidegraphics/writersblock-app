@@ -4,3 +4,4 @@ google-generativeai
 python-dotenv
 python-docx
 supabase
+kokoro-onnx==0.6.1
