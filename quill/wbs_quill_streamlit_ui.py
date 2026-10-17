@@ -237,38 +237,50 @@ def _set_personal_startup_welcome(
 
 
 def _resolve_kokoro_server_files() -> tuple[Path, Path]:
-    """Locate the WritersBlock-hosted Kokoro model and combined voices file."""
+    """Find local Kokoro models or provision them for hosted Streamlit."""
     configured = str(os.getenv("WBS_QUILL_TTS_DIR", "") or "").strip()
-
-    candidates: list[Path] = []
+    candidates = []
     if configured:
         candidates.append(Path(configured).expanduser())
-
-    # Normal Integration-Test / production layout.
-    candidates.append(Path.cwd() / "static" / "quill_tts" / "server")
-
-    # Helpful fallback if Streamlit was launched from one folder above the app.
-    candidates.append(
-        Path.cwd()
-        / "WritersBlock Integration-Test"
-        / "static"
-        / "quill_tts"
-        / "server"
-    )
-
-    checked: list[str] = []
+    candidates.extend([
+        Path.cwd() / "static" / "quill_tts" / "server",
+        Path.cwd() / "WritersBlock Integration-Test" / "static" / "quill_tts" / "server",
+    ])
     for folder in candidates:
         model = folder / "kokoro-v1.0.onnx"
         voices = folder / "voices-v1.0.bin"
-        checked.append(str(folder))
-        if model.exists() and voices.exists():
+        if model.is_file() and voices.is_file():
             return model, voices
 
-    raise FileNotFoundError(
-        "Quill voice files were not found. Expected kokoro-v1.0.onnx and "
-        "voices-v1.0.bin in static\\quill_tts\\server. Checked: "
-        + " | ".join(checked)
-    )
+    # Models cannot be committed to an ordinary GitHub repository (100 MB limit).
+    # Download the smaller official FP16 checkpoint lazily to the running server.
+    folder = candidates[0] if configured else candidates[1]
+    folder.mkdir(parents=True, exist_ok=True)
+    model = folder / "kokoro-v1.0.onnx"
+    voices = folder / "voices-v1.0.bin"
+    base = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
+
+    def fetch(url: str, target: Path, minimum_bytes: int) -> None:
+        if target.is_file() and target.stat().st_size >= minimum_bytes:
+            return
+        import requests
+        temporary = target.with_suffix(target.suffix + ".download")
+        try:
+            with requests.get(url, stream=True, timeout=(20, 180), allow_redirects=True) as response:
+                response.raise_for_status()
+                with temporary.open("wb") as out:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            out.write(chunk)
+            if temporary.stat().st_size < minimum_bytes:
+                raise RuntimeError(f"Incomplete voice model download: {target.name}")
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    fetch(base + "kokoro-v1.0.fp16.onnx", model, 100_000_000)
+    fetch(base + "voices-v1.0.bin", voices, 20_000_000)
+    return model, voices
 
 
 @lru_cache(maxsize=1)
