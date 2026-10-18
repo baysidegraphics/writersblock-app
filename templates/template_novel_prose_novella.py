@@ -6,19 +6,42 @@ Format-specific UI/configuration data for the selected WritersBlock writing form
 
 TEMPLATE = {'id': 'novel_prose_novella',
  'display_name': 'Novel / Prose / Novella',
- 'description': 'Long-form prose fiction with chapter development, character arcs, subplots, pacing, and continuity.',
+ 'description': 'Long-form prose fiction with chapter development, character arcs, subplots, pacing, and '
+                'continuity.',
  'uses_existing_concept_layout_as_base': True,
  'concept_fields': [{'key': 'project_title',
                      'label': 'Project Title',
                      'type': 'text',
                      'required': True,
                      'help': 'Working title for the manuscript.'},
+                    {'key': 'audience_age_group',
+                     'label': 'Target Audience — Age Group',
+                     'type': 'select',
+                     'required': False,
+                     'options': ['All Ages',
+                                 'Children (3–7)',
+                                 'Middle Grade (8–12)',
+                                 'Young Adult (13–17)',
+                                 'New Adult (18–25)',
+                                 'Adult (18+)'],
+                     'help': 'Choose the intended audience age group; All Ages is the default.'},
+                    {'key': 'audience_gender',
+                     'label': 'Target Audience — Gender',
+                     'type': 'select',
+                     'required': False,
+                     'options': ['All Genders', 'Female', 'Male', 'Specific / Other'],
+                     'help': 'Optional audience targeting; All Genders is the default.'},
+                    {'key': 'audience_details',
+                     'label': 'Additional Audience Details (Optional)',
+                     'type': 'textarea',
+                     'required': False,
+                     'help': 'Optional audience interests, preferences, and accessibility considerations.'},
                     {'key': 'production_influence',
                      'label': 'Production Influence',
                      'type': 'select',
                      'required': False,
-                     'help': 'Choose an author whose storytelling approach can guide Quill’s pacing, voice, structure, '
-                             'or narrative emphasis while keeping your project original.',
+                     'help': 'Choose an author whose storytelling approach can guide Quill’s pacing, voice, '
+                             'structure, or narrative emphasis while keeping your project original.',
                      'options': ['Automatic / Recommend',
                                  'Ernest Hemingway',
                                  'Agatha Christie',
@@ -127,11 +150,12 @@ TEMPLATE = {'id': 'novel_prose_novella',
                                  'Dialogue Forward',
                                  'Narration Only']}],
  'quill_instruction_module': 'format_quill.quill_novel_prose_novella',
- 'concept_ui': {'step_subtitle': 'Build the premise, story world, character arcs, tone, and long-form direction for '
-                                 'the manuscript.',
+ 'concept_ui': {'step_subtitle': 'Build the premise, story world, character arcs, tone, and long-form '
+                                 'direction for the manuscript.',
                 'title_label': 'Novel / Novella Title:',
                 'project_connection_heading': 'Project Relationship',
-                'scope_labels': {'Standalone Book': 'Standalone Book', 'Book in a Series': 'Book in a Series'},
+                'scope_labels': {'Standalone Book': 'Standalone Book',
+                                 'Book in a Series': 'Book in a Series'},
                 'source_heading': 'Choose a Novel / Novella Starting Point',
                 'source_label': 'Manuscript Starting Source:',
                 'custom_label': 'Enter Your Novel / Novella Premise:',
@@ -154,12 +178,13 @@ TEMPLATE = {'id': 'novel_prose_novella',
                 'author_style_label': 'Author / Prose Style Reference (Optional):',
                 'author_placeholder': 'e.g., spare noir, lyrical literary, fast commercial thriller',
                 'button_label': 'Develop Novel Paths 🚀',
-                'spinner': 'Developing long-form story paths, character pressure, and structural possibilities...',
-                'sparks': ['A retired cartographer discovers that one forgotten road on every map he ever drew leads '
-                           'to the same abandoned house.',
-                           'A woman inherits a rural post office where letters continue arriving for residents who '
-                           'died decades ago.',
-                           'A historian finds a family diary that accurately describes events scheduled to happen the '
-                           'following week.'],
-                'style_reference_help': 'Let Quill use your selected author influence to guide storytelling approach '
-                                        'while keeping the writing original.'}}
+                'spinner': 'Developing long-form story paths, character pressure, and structural '
+                           'possibilities...',
+                'sparks': ['A retired cartographer discovers that one forgotten road on every map he ever '
+                           'drew leads to the same abandoned house.',
+                           'A woman inherits a rural post office where letters continue arriving for '
+                           'residents who died decades ago.',
+                           'A historian finds a family diary that accurately describes events scheduled to '
+                           'happen the following week.'],
+                'style_reference_help': 'Let Quill use your selected author influence to guide storytelling '
+                                        'approach while keeping the writing original.'}}

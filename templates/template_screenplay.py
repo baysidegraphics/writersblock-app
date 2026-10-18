@@ -6,20 +6,42 @@ Format-specific UI/configuration data for the selected WritersBlock writing form
 
 TEMPLATE = {'id': 'screenplay',
  'display_name': 'Screenplay',
- 'description': 'Film-oriented dramatic writing built around visual action, scenes, runtime, dialogue, and screenplay '
-                'conventions.',
+ 'description': 'Film-oriented dramatic writing built around visual action, scenes, runtime, dialogue, and '
+                'screenplay conventions.',
  'uses_existing_concept_layout_as_base': False,
  'concept_fields': [{'key': 'project_title',
                      'label': 'Project Title',
                      'type': 'text',
                      'required': True,
                      'help': 'Working screenplay title.'},
+                    {'key': 'audience_age_group',
+                     'label': 'Target Audience — Age Group',
+                     'type': 'select',
+                     'required': False,
+                     'options': ['All Ages',
+                                 'Children (3–7)',
+                                 'Middle Grade (8–12)',
+                                 'Young Adult (13–17)',
+                                 'New Adult (18–25)',
+                                 'Adult (18+)'],
+                     'help': 'Choose the intended audience age group; All Ages is the default.'},
+                    {'key': 'audience_gender',
+                     'label': 'Target Audience — Gender',
+                     'type': 'select',
+                     'required': False,
+                     'options': ['All Genders', 'Female', 'Male', 'Specific / Other'],
+                     'help': 'Optional audience targeting; All Genders is the default.'},
+                    {'key': 'audience_details',
+                     'label': 'Additional Audience Details (Optional)',
+                     'type': 'textarea',
+                     'required': False,
+                     'help': 'Optional audience interests, preferences, and accessibility considerations.'},
                     {'key': 'production_influence',
                      'label': 'Production Influence',
                      'type': 'select',
                      'required': False,
-                     'help': 'Choose a director whose pacing, visual storytelling, tone, or scene construction can '
-                             'guide Quill while keeping your screenplay original.',
+                     'help': 'Choose a director whose pacing, visual storytelling, tone, or scene '
+                             'construction can guide Quill while keeping your screenplay original.',
                      'options': ['Automatic / Recommend',
                                  'Alfred Hitchcock',
                                  'Billy Wilder',
@@ -85,7 +107,11 @@ TEMPLATE = {'id': 'screenplay',
                      'type': 'select',
                      'required': False,
                      'help': 'Preferred macro structure.',
-                     'options': ['Three Act', 'Five Act', 'Sequence-Based', 'Nonlinear', 'Automatic / Recommend']},
+                     'options': ['Three Act',
+                                 'Five Act',
+                                 'Sequence-Based',
+                                 'Nonlinear',
+                                 'Automatic / Recommend']},
                     {'key': 'protagonist',
                      'label': 'Protagonist',
                      'type': 'textarea',
@@ -129,8 +155,8 @@ TEMPLATE = {'id': 'screenplay',
                                  'Dialogue Forward',
                                  'Narration Only']}],
  'quill_instruction_module': 'format_quill.quill_screenplay',
- 'concept_ui': {'step_subtitle': 'Develop a film-ready premise around visual action, runtime, character conflict, '
-                                 'locations, and dramatic turns.',
+ 'concept_ui': {'step_subtitle': 'Develop a film-ready premise around visual action, runtime, character '
+                                 'conflict, locations, and dramatic turns.',
                 'title_label': 'Screenplay Title:',
                 'project_connection_heading': 'Project Relationship',
                 'scope_labels': {'Standalone Book': 'Standalone Screenplay',
@@ -155,15 +181,16 @@ TEMPLATE = {'id': 'screenplay',
                                  'Historical / Period'],
                 'dialogue_label': 'Screen Dialogue Density:',
                 'author_style_label': 'Screenwriting / Film Style Reference (Optional):',
-                'author_placeholder': 'e.g., restrained dialogue, fast thriller pacing, visual-first storytelling',
+                'author_placeholder': 'e.g., restrained dialogue, fast thriller pacing, visual-first '
+                                      'storytelling',
                 'button_label': 'Develop Screenplay Paths 🚀',
                 'spinner': 'Developing screenplay paths, visual beats, and dramatic structure...',
-                'sparks': ['A disgraced detective is forced to work with an android whose code contains fragments of '
-                           'his missing daughter’s handwriting.',
-                           'Astronauts wake from hypersleep to discover an extra occupied stasis pod that was not '
-                           'aboard at launch.',
-                           'A forensic accountant finds a corporate payroll entry for an employee who has been '
-                           'continuously paid since 1895.'],
-                'style_reference_help': 'Let Quill use your selected director influence to guide pacing, visual '
-                                        'storytelling, tone, and scene construction while keeping the screenplay '
-                                        'original.'}}
+                'sparks': ['A disgraced detective is forced to work with an android whose code contains '
+                           'fragments of his missing daughter’s handwriting.',
+                           'Astronauts wake from hypersleep to discover an extra occupied stasis pod that '
+                           'was not aboard at launch.',
+                           'A forensic accountant finds a corporate payroll entry for an employee who has '
+                           'been continuously paid since 1895.'],
+                'style_reference_help': 'Let Quill use your selected director influence to guide pacing, '
+                                        'visual storytelling, tone, and scene construction while keeping the '
+                                        'screenplay original.'}}

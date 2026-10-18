@@ -6,19 +6,42 @@ Format-specific UI/configuration data for the selected WritersBlock writing form
 
 TEMPLATE = {'id': 'full_novel_blueprint',
  'display_name': 'Full Novel Blueprint',
- 'description': 'A planning-first template for building a complete novel architecture before drafting the manuscript.',
+ 'description': 'A planning-first template for building a complete novel architecture before drafting the '
+                'manuscript.',
  'uses_existing_concept_layout_as_base': False,
  'concept_fields': [{'key': 'project_title',
                      'label': 'Project Title',
                      'type': 'text',
                      'required': True,
                      'help': 'Working novel title.'},
+                    {'key': 'audience_age_group',
+                     'label': 'Target Audience — Age Group',
+                     'type': 'select',
+                     'required': False,
+                     'options': ['All Ages',
+                                 'Children (3–7)',
+                                 'Middle Grade (8–12)',
+                                 'Young Adult (13–17)',
+                                 'New Adult (18–25)',
+                                 'Adult (18+)'],
+                     'help': 'Choose the intended audience age group; All Ages is the default.'},
+                    {'key': 'audience_gender',
+                     'label': 'Target Audience — Gender',
+                     'type': 'select',
+                     'required': False,
+                     'options': ['All Genders', 'Female', 'Male', 'Specific / Other'],
+                     'help': 'Optional audience targeting; All Genders is the default.'},
+                    {'key': 'audience_details',
+                     'label': 'Additional Audience Details (Optional)',
+                     'type': 'textarea',
+                     'required': False,
+                     'help': 'Optional audience interests, preferences, and accessibility considerations.'},
                     {'key': 'production_influence',
                      'label': 'Production Influence',
                      'type': 'select',
                      'required': False,
-                     'help': 'Choose an author whose storytelling approach can guide Quill’s pacing, voice, structure, '
-                             'or narrative emphasis while keeping your project original.',
+                     'help': 'Choose an author whose storytelling approach can guide Quill’s pacing, voice, '
+                             'structure, or narrative emphasis while keeping your project original.',
                      'options': ['Automatic / Recommend',
                                  'Ernest Hemingway',
                                  'Agatha Christie',
@@ -108,8 +131,8 @@ TEMPLATE = {'id': 'full_novel_blueprint',
                      'required': False,
                      'help': 'Known climax, reveal, resolution, or final emotional state.'}],
  'quill_instruction_module': 'format_quill.quill_full_novel_blueprint',
- 'concept_ui': {'step_subtitle': 'Architect the entire novel before drafting: premise, character arcs, turning points, '
-                                 'plot threads, chapter flow, and payoff.',
+ 'concept_ui': {'step_subtitle': 'Architect the entire novel before drafting: premise, character arcs, '
+                                 'turning points, plot threads, chapter flow, and payoff.',
                 'title_label': 'Novel Blueprint Title:',
                 'project_connection_heading': 'Project Relationship',
                 'scope_labels': {'Standalone Book': 'Standalone Novel Blueprint',
@@ -134,15 +157,16 @@ TEMPLATE = {'id': 'full_novel_blueprint',
                                  'Humorous / Satirical'],
                 'dialogue_label': 'Dialogue Planning Preference:',
                 'author_style_label': 'Structural / Author Style Reference (Optional):',
-                'author_placeholder': 'e.g., mystery reveal structure, character-driven literary, commercial thriller',
+                'author_placeholder': 'e.g., mystery reveal structure, character-driven literary, commercial '
+                                      'thriller',
                 'button_label': 'Build Novel Blueprint Paths 🚀',
                 'spinner': 'Developing novel architecture, turning points, subplot paths, and structural '
                            'alternatives...',
-                'sparks': ['In a networked future, one man begins hearing the internal monologues of everyone within a '
-                           'mile of him.',
-                           'An archaeologist finds a modern digital watch sealed inside an untouched 3,000-year-old '
-                           'tomb.',
-                           'A hacker discovers a string of code embedded in the human genome—and something from deep '
-                           'space has just pinged it.'],
-                'style_reference_help': 'Let Quill use your selected author influence to guide storytelling approach '
-                                        'while keeping the writing original.'}}
+                'sparks': ['In a networked future, one man begins hearing the internal monologues of '
+                           'everyone within a mile of him.',
+                           'An archaeologist finds a modern digital watch sealed inside an untouched '
+                           '3,000-year-old tomb.',
+                           'A hacker discovers a string of code embedded in the human genome—and something '
+                           'from deep space has just pinged it.'],
+                'style_reference_help': 'Let Quill use your selected author influence to guide storytelling '
+                                        'approach while keeping the writing original.'}}

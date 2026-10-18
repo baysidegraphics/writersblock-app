@@ -6,20 +6,42 @@ Format-specific UI/configuration data for the selected WritersBlock writing form
 
 TEMPLATE = {'id': 'stage_play',
  'display_name': 'Stage Play / Dramatic Script',
- 'description': 'Live-performance dramatic writing organized around acts, scenes, cast, stageable action, dialogue, '
-                'and practical locations.',
+ 'description': 'Live-performance dramatic writing organized around acts, scenes, cast, stageable action, '
+                'dialogue, and practical locations.',
  'uses_existing_concept_layout_as_base': False,
  'concept_fields': [{'key': 'project_title',
                      'label': 'Project Title',
                      'type': 'text',
                      'required': True,
                      'help': 'Working title of the play.'},
+                    {'key': 'audience_age_group',
+                     'label': 'Target Audience — Age Group',
+                     'type': 'select',
+                     'required': False,
+                     'options': ['All Ages',
+                                 'Children (3–7)',
+                                 'Middle Grade (8–12)',
+                                 'Young Adult (13–17)',
+                                 'New Adult (18–25)',
+                                 'Adult (18+)'],
+                     'help': 'Choose the intended audience age group; All Ages is the default.'},
+                    {'key': 'audience_gender',
+                     'label': 'Target Audience — Gender',
+                     'type': 'select',
+                     'required': False,
+                     'options': ['All Genders', 'Female', 'Male', 'Specific / Other'],
+                     'help': 'Optional audience targeting; All Genders is the default.'},
+                    {'key': 'audience_details',
+                     'label': 'Additional Audience Details (Optional)',
+                     'type': 'textarea',
+                     'required': False,
+                     'help': 'Optional audience interests, preferences, and accessibility considerations.'},
                     {'key': 'production_influence',
                      'label': 'Production Influence',
                      'type': 'select',
                      'required': False,
-                     'help': 'Choose a playwright whose dialogue, dramatic structure, pacing, or stagecraft can guide '
-                             'Quill while keeping your play original.',
+                     'help': 'Choose a playwright whose dialogue, dramatic structure, pacing, or stagecraft '
+                             'can guide Quill while keeping your play original.',
                      'options': ['Automatic / Recommend',
                                  'William Shakespeare',
                                  'Anton Chekhov',
@@ -119,11 +141,12 @@ TEMPLATE = {'id': 'stage_play',
                                  'Dialogue Forward',
                                  'Narration Only']}],
  'quill_instruction_module': 'format_quill.quill_stage_play',
- 'concept_ui': {'step_subtitle': 'Develop a live-performance premise around cast, dialogue, stageable action, acts, '
-                                 'scenes, and practical settings.',
+ 'concept_ui': {'step_subtitle': 'Develop a live-performance premise around cast, dialogue, stageable '
+                                 'action, acts, scenes, and practical settings.',
                 'title_label': 'Stage Play Title:',
                 'project_connection_heading': 'Project Relationship',
-                'scope_labels': {'Standalone Book': 'Standalone Play', 'Book in a Series': 'Play in a Series / Cycle'},
+                'scope_labels': {'Standalone Book': 'Standalone Play',
+                                 'Book in a Series': 'Play in a Series / Cycle'},
                 'source_heading': 'Choose a Stage Play Starting Point',
                 'source_label': 'Stage Play Source:',
                 'custom_label': 'Enter Your Dramatic Premise:',
@@ -147,11 +170,12 @@ TEMPLATE = {'id': 'stage_play',
                 'author_placeholder': 'e.g., intimate realism, heightened theatrical dialogue',
                 'button_label': 'Develop Stage Play Paths 🚀',
                 'spinner': 'Developing stageable dramatic paths, cast pressure, and act structure...',
-                'sparks': ['Three estranged siblings gather in their childhood home to hear a will that requires them '
-                           'to remain together until sunrise.',
-                           'A retired judge and the prisoner he once sentenced meet unexpectedly in an empty railway '
-                           'waiting room.',
-                           'Two actors rehearsing a forgotten play realize the dialogue is exposing secrets neither '
-                           'has confessed.'],
-                'style_reference_help': 'Let Quill use your selected playwright influence to guide dialogue, dramatic '
-                                        'structure, pacing, and stagecraft while keeping the play original.'}}
+                'sparks': ['Three estranged siblings gather in their childhood home to hear a will that '
+                           'requires them to remain together until sunrise.',
+                           'A retired judge and the prisoner he once sentenced meet unexpectedly in an empty '
+                           'railway waiting room.',
+                           'Two actors rehearsing a forgotten play realize the dialogue is exposing secrets '
+                           'neither has confessed.'],
+                'style_reference_help': 'Let Quill use your selected playwright influence to guide dialogue, '
+                                        'dramatic structure, pacing, and stagecraft while keeping the play '
+                                        'original.'}}

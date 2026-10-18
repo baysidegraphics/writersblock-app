@@ -6,20 +6,42 @@ Format-specific UI/configuration data for the selected WritersBlock writing form
 
 TEMPLATE = {'id': 'audiobook',
  'display_name': 'Audiobook',
- 'description': 'Narration-first writing and adaptation designed for listening clarity, vocal performance, pacing, and '
-                'audio continuity.',
+ 'description': 'Narration-first writing and adaptation designed for listening clarity, vocal performance, '
+                'pacing, and audio continuity.',
  'uses_existing_concept_layout_as_base': False,
  'concept_fields': [{'key': 'project_title',
                      'label': 'Project Title',
                      'type': 'text',
                      'required': True,
                      'help': 'Audiobook or audio-story title.'},
+                    {'key': 'audience_age_group',
+                     'label': 'Target Audience — Age Group',
+                     'type': 'select',
+                     'required': False,
+                     'options': ['All Ages',
+                                 'Children (3–7)',
+                                 'Middle Grade (8–12)',
+                                 'Young Adult (13–17)',
+                                 'New Adult (18–25)',
+                                 'Adult (18+)'],
+                     'help': 'Choose the intended audience age group; All Ages is the default.'},
+                    {'key': 'audience_gender',
+                     'label': 'Target Audience — Gender',
+                     'type': 'select',
+                     'required': False,
+                     'options': ['All Genders', 'Female', 'Male', 'Specific / Other'],
+                     'help': 'Optional audience targeting; All Genders is the default.'},
+                    {'key': 'audience_details',
+                     'label': 'Additional Audience Details (Optional)',
+                     'type': 'textarea',
+                     'required': False,
+                     'help': 'Optional audience interests, preferences, and accessibility considerations.'},
                     {'key': 'narration_type',
                      'label': 'Narration Type',
                      'type': 'select',
                      'required': True,
-                     'help': 'Choose whether the finished audiobook is intended for AI-generated narration, human '
-                             'narration, or let Quill recommend the production approach.',
+                     'help': 'Choose whether the finished audiobook is intended for AI-generated narration, '
+                             'human narration, or let Quill recommend the production approach.',
                      'options': ['AI Generated', 'Human Narration', 'Undecided / Recommend']},
                     {'key': 'source_mode',
                      'label': 'Source Type',
@@ -106,8 +128,8 @@ TEMPLATE = {'id': 'audiobook',
                      'required': False,
                      'help': 'Names, locations, invented words, or pronunciation requirements.'}],
  'quill_instruction_module': 'format_quill.quill_audiobook',
- 'concept_ui': {'step_subtitle': 'Develop an audio-first story or adaptation around listening clarity, narration, '
-                                 'voices, runtime, and chapter flow.',
+ 'concept_ui': {'step_subtitle': 'Develop an audio-first story or adaptation around listening clarity, '
+                                 'narration, voices, runtime, and chapter flow.',
                 'title_label': 'Audiobook / Audio Story Title:',
                 'project_connection_heading': 'Project Relationship',
                 'scope_labels': {'Standalone Book': 'Standalone Audiobook',
@@ -135,10 +157,11 @@ TEMPLATE = {'id': 'audiobook',
                 'author_placeholder': 'e.g., intimate narrator, cinematic audio drama, restrained mystery',
                 'button_label': 'Develop Audiobook Paths 🚀',
                 'spinner': 'Developing audio-first story paths, listening rhythm, and narration structure...',
-                'sparks': ['A lighthouse keeper records one final message before the fog rolls in and the lantern '
-                           'begins answering back.',
-                           'An elderly train conductor tells the same bedtime story every night, until the story '
-                           'starts changing on its own.',
-                           'A woman staying alone in a seaside inn hears a piano playing after midnight, though the '
-                           'inn has no piano.'],
-                'style_reference_help': 'Let Quill use the selected narration type when developing the audiobook.'}}
+                'sparks': ['A lighthouse keeper records one final message before the fog rolls in and the '
+                           'lantern begins answering back.',
+                           'An elderly train conductor tells the same bedtime story every night, until the '
+                           'story starts changing on its own.',
+                           'A woman staying alone in a seaside inn hears a piano playing after midnight, '
+                           'though the inn has no piano.'],
+                'style_reference_help': 'Let Quill use the selected narration type when developing the '
+                                        'audiobook.'}}

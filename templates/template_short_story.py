@@ -6,20 +6,42 @@ Format-specific UI/configuration data for the selected WritersBlock writing form
 
 TEMPLATE = {'id': 'short_story',
  'display_name': 'Short Story',
- 'description': 'Compact prose fiction with a focused premise, limited cast, controlled word count, and a complete '
-                'narrative arc.',
+ 'description': 'Compact prose fiction with a focused premise, limited cast, controlled word count, and a '
+                'complete narrative arc.',
  'uses_existing_concept_layout_as_base': True,
  'concept_fields': [{'key': 'project_title',
                      'label': 'Project Title',
                      'type': 'text',
                      'required': True,
                      'help': 'Working title for the story.'},
+                    {'key': 'audience_age_group',
+                     'label': 'Target Audience — Age Group',
+                     'type': 'select',
+                     'required': False,
+                     'options': ['All Ages',
+                                 'Children (3–7)',
+                                 'Middle Grade (8–12)',
+                                 'Young Adult (13–17)',
+                                 'New Adult (18–25)',
+                                 'Adult (18+)'],
+                     'help': 'Choose the intended audience age group; All Ages is the default.'},
+                    {'key': 'audience_gender',
+                     'label': 'Target Audience — Gender',
+                     'type': 'select',
+                     'required': False,
+                     'options': ['All Genders', 'Female', 'Male', 'Specific / Other'],
+                     'help': 'Optional audience targeting; All Genders is the default.'},
+                    {'key': 'audience_details',
+                     'label': 'Additional Audience Details (Optional)',
+                     'type': 'textarea',
+                     'required': False,
+                     'help': 'Optional audience interests, preferences, and accessibility considerations.'},
                     {'key': 'production_influence',
                      'label': 'Production Influence',
                      'type': 'select',
                      'required': False,
-                     'help': 'Choose an author whose storytelling approach can guide Quill’s pacing, voice, structure, '
-                             'or narrative emphasis while keeping your project original.',
+                     'help': 'Choose an author whose storytelling approach can guide Quill’s pacing, voice, '
+                             'structure, or narrative emphasis while keeping your project original.',
                      'options': ['Automatic / Recommend',
                                  'Ernest Hemingway',
                                  'Agatha Christie',
@@ -127,11 +149,12 @@ TEMPLATE = {'id': 'short_story',
                                  'Dialogue Forward',
                                  'Narration Only']}],
  'quill_instruction_module': 'format_quill.quill_short_story',
- 'concept_ui': {'step_subtitle': 'Develop the central story, character pressure, tone, and ending direction for a '
-                                 'focused short-form narrative.',
+ 'concept_ui': {'step_subtitle': 'Develop the central story, character pressure, tone, and ending direction '
+                                 'for a focused short-form narrative.',
                 'title_label': 'Short Story Title:',
                 'project_connection_heading': 'Project Relationship',
-                'scope_labels': {'Standalone Book': 'Standalone Story', 'Book in a Series': 'Story in a Series'},
+                'scope_labels': {'Standalone Book': 'Standalone Story',
+                                 'Book in a Series': 'Story in a Series'},
                 'source_heading': 'Choose a Short Story Starting Point',
                 'source_label': 'Short Story Source:',
                 'custom_label': 'Enter Your Short Story Premise / Plot:',
@@ -155,11 +178,11 @@ TEMPLATE = {'id': 'short_story',
                 'author_placeholder': 'e.g., concise noir, lyrical literary prose',
                 'button_label': 'Develop Short Story Paths 🚀',
                 'spinner': 'Developing short-story paths and structural possibilities...',
-                'sparks': ['An antique shop owner buys a heavy iron safe that cannot be opened, only to realize that '
-                           'every night, the ticking sounds coming from inside it get faster.',
-                           'In a city where memories can be bought and sold, a detective is hired to recover one '
-                           'memory someone was murdered to forget.',
-                           'A lighthouse keeper notices that something beneath the water has begun answering the beam '
-                           'from his lantern.'],
-                'style_reference_help': 'Let Quill use your selected author influence to guide storytelling approach '
-                                        'while keeping the writing original.'}}
+                'sparks': ['An antique shop owner buys a heavy iron safe that cannot be opened, only to '
+                           'realize that every night, the ticking sounds coming from inside it get faster.',
+                           'In a city where memories can be bought and sold, a detective is hired to recover '
+                           'one memory someone was murdered to forget.',
+                           'A lighthouse keeper notices that something beneath the water has begun answering '
+                           'the beam from his lantern.'],
+                'style_reference_help': 'Let Quill use your selected author influence to guide storytelling '
+                                        'approach while keeping the writing original.'}}

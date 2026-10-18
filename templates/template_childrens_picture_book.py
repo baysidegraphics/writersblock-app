@@ -6,8 +6,8 @@ Format-specific UI/configuration data for the selected WritersBlock writing form
 
 TEMPLATE = {'id': 'childrens_picture_book',
  'display_name': 'Children’s Picture Book',
- 'description': 'Illustration-led children’s storytelling built around age range, page turns, read-aloud rhythm, '
-                'visual storytelling, and concise text.',
+ 'description': 'Illustration-led children’s storytelling built around age range, page turns, read-aloud '
+                'rhythm, visual storytelling, and concise text.',
  'uses_existing_concept_layout_as_base': False,
  'concept_fields': [{'key': 'project_title',
                      'label': 'Book Title',
@@ -18,8 +18,8 @@ TEMPLATE = {'id': 'childrens_picture_book',
                      'label': 'Production Influence',
                      'type': 'select',
                      'required': False,
-                     'help': 'Choose the visual direction Quill should consider when shaping story tone, page moments, '
-                             'and illustration opportunities.',
+                     'help': 'Choose the visual direction Quill should consider when shaping story tone, '
+                             'page moments, and illustration opportunities.',
                      'options': ['Automatic / Recommend',
                                  'Classic Storybook Illustration',
                                  'Watercolor',
@@ -45,12 +45,26 @@ TEMPLATE = {'id': 'childrens_picture_book',
                      'required': True,
                      'help': 'Primary intended reader/listener.',
                      'options': ['Ages 2–4', 'Ages 3–5', 'Ages 4–6', 'Ages 5–8', 'Ages 6–9']},
+                    {'key': 'audience_gender',
+                     'label': 'Target Audience — Gender',
+                     'type': 'select',
+                     'required': False,
+                     'options': ['All Genders', 'Female', 'Male', 'Specific / Other'],
+                     'help': 'Optional audience targeting; All Genders is the default.'},
+                    {'key': 'audience_details',
+                     'label': 'Additional Audience Details (Optional)',
+                     'type': 'textarea',
+                     'required': False,
+                     'help': 'Optional audience interests, preferences, and accessibility considerations.'},
                     {'key': 'page_format',
                      'label': 'Book Format',
                      'type': 'select',
                      'required': True,
                      'help': 'Baseline physical/story structure.',
-                     'options': ['32 Pages — 8.5 × 8.5', '32 Pages — 10 × 8', '24 Pages', 'Custom / Decide Later']},
+                     'options': ['32 Pages — 8.5 × 8.5',
+                                 '32 Pages — 10 × 8',
+                                 '24 Pages',
+                                 'Custom / Decide Later']},
                     {'key': 'tone',
                      'label': 'Tone',
                      'type': 'select',
@@ -104,8 +118,8 @@ TEMPLATE = {'id': 'childrens_picture_book',
                                  'Bedtime Calm',
                                  'Automatic / Recommend']}],
  'quill_instruction_module': 'format_quill.quill_childrens_picture_book',
- 'concept_ui': {'step_subtitle': 'Build a young-reader story around age level, read-aloud rhythm, page turns, '
-                                 'illustration opportunities, and emotional payoff.',
+ 'concept_ui': {'step_subtitle': 'Build a young-reader story around age level, read-aloud rhythm, page '
+                                 'turns, illustration opportunities, and emotional payoff.',
                 'title_label': 'Picture Book Title:',
                 'project_connection_heading': 'Project Relationship',
                 'scope_labels': {'Standalone Book': 'Standalone Picture Book',
@@ -134,11 +148,11 @@ TEMPLATE = {'id': 'childrens_picture_book',
                 'button_label': 'Develop Picture Book Paths 🚀',
                 'spinner': 'Developing age-appropriate story paths, page-turn moments, and illustration '
                            'opportunities...',
-                'sparks': ['A tiny field mouse finds a fallen star and crosses the forest to return it to the night '
-                           'sky.',
-                           'A child discovers that their shadow no longer wants to copy them—it wants to teach them '
-                           'how to be brave.',
-                           'A bear afraid of the dark learns from an old owl that nighttime is full of quiet helpers '
-                           'and hidden wonders.'],
-                'style_reference_help': 'Let Quill use the selected visual production influence when developing the '
-                                        'project.'}}
+                'sparks': ['A tiny field mouse finds a fallen star and crosses the forest to return it to '
+                           'the night sky.',
+                           'A child discovers that their shadow no longer wants to copy them—it wants to '
+                           'teach them how to be brave.',
+                           'A bear afraid of the dark learns from an old owl that nighttime is full of quiet '
+                           'helpers and hidden wonders.'],
+                'style_reference_help': 'Let Quill use the selected visual production influence when '
+                                        'developing the project.'}}
