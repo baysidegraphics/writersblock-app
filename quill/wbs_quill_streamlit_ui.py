@@ -641,8 +641,11 @@ def _revise_existing_quill_concept(state: MutableMapping[str, Any], request: str
         "Revise the existing concept according to the latest feedback. "
         "Retain the original premise, characters and key intent unless the writer asks otherwise. "
         "Honor the original genre, age range, tone and other available development settings. "
-        "Return ONLY the updated, editable starting concept (100–180 words). "
-        "No status messages, setup instructions, or stage transitions.\n\n"
+        "Return ONLY a natural, polished third-person synopsis in 100–180 words. "
+        "Use character actions, stakes and events, not editorial observations. "
+        "Never say 'this story explores', 'the narrative should', 'the story should', "
+        "'the premise', 'the audience', 'the writer', or 'the theme'. "
+        "No headings, commentary, stage instructions, analysis or status.\n\n"
         f"Writing format: {format_name}\n"
         f"Existing concept:\n{original}\n\n"
         f"Writer's requested change:\n{request}\n\n"
@@ -658,8 +661,9 @@ def _revise_existing_quill_concept(state: MutableMapping[str, Any], request: str
             text="I couldn't revise the concept just now. The current suggestion has been preserved; please try again.",
             stage="Concept Development", source="concept_revision_failed"
         )
-    state[concept_key] = revised
-    state["story_seed"] = revised
+    # Streamlit has already instantiated the concept widget in this run.
+    # Queue the revision; app.py will install it before recreating that widget.
+    state[f"_wbs_quill_pending_concept_{format_id}"] = revised
     return QuillUIPayload(
         text="I've revised the starting concept to reflect your direction. The updated concept is in the editable box under Quill-Assisted Starting Point.",
         stage="Concept Development", source="concept_revision"
