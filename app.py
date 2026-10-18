@@ -5381,11 +5381,24 @@ if st.session_state.project_stage == "Intake":
                 f"Quill uses your {format_name} Development Setup above to propose a starting concept. "
                 "You can edit it or request another suggestion before continuing."
             )
+            # Optional creative direction for Quill-Assisted Starting Point.
+            # This is guidance for concept generation, not the generated concept itself.
+            quill_direction = st.text_area(
+                "Starting Idea / Direction (Optional):",
+                key=f"wbs_quill_starting_direction_{st.session_state.active_format_id}",
+                height=110,
+                placeholder=(
+                    "Share a basic idea, theme, character, situation, or intended outcome. "
+                    "Quill will build a starting concept around your direction."
+                ),
+                help="Give Quill as much or as little direction as you wish. Leave blank for an original suggestion.",
+            )
+            st.caption("Optional: leave the direction blank for Quill to suggest a concept from your Development Setup above.")
             quill_key = f"wbs_quill_starting_concept_{st.session_state.active_format_id}"
             if quill_key not in st.session_state:
                 st.session_state[quill_key] = ""
             if st.button(
-                "Ask Quill to Suggest a Starting Concept",
+                "Ask Quill to Suggest a Starting Point",
                 key=f"wbs_quill_generate_concept_{st.session_state.active_format_id}",
             ):
                 require_product_access("sandbox")
@@ -5408,6 +5421,9 @@ if st.session_state.project_stage == "Intake":
                         "or purpose, and a possible direction while keeping meaningful choices open "
                         "for the writer. Do not write the complete project or reference these instructions. "
                         "Return only the editable starting concept.\n\n"
+                        "Writer's optional starting idea/direction (honor this when supplied; "
+                        "do not replace it with an unrelated idea):\n"
+                        f"{quill_direction.strip() or '[No starting direction supplied]'}\n\n"
                         f"{development_context}\n"
                         f"Tone: {st.session_state.get('tone_style', '')}\n"
                         f"Dialogue: {get_dialogue_style_display()}\n"
