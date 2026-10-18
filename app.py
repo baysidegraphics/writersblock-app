@@ -273,6 +273,7 @@ def get_project_session_snapshot():
     snapshot_keys = [
         "project_stage",
         "story_seed",
+        "wbs_project_original_concept",
         "starting_source_mode",
         "imported_source_text",
         "imported_source_name",
@@ -1320,16 +1321,59 @@ def get_active_format_development_context():
     return "\n".join(lines).strip()
 
 
+def get_full_project_continuity_context():
+    """Bounded, shared creative reference for all WBS production stages.
+
+    Read-only: user-approved state always takes priority over old drafts.
+    """
+    state = st.session_state
+    title = str(state.get("project_title") or "").strip()
+    original = str(state.get("wbs_project_original_concept") or "").strip()
+    if not original:
+        original = str(state.get("story_seed") or "").strip()
+    sections = [
+        "PROJECT CONTINUITY — apply at every creative stage",
+        "Preserve the original creative premise and all established names, events, setting, tone, POV, and chronology unless the writer explicitly approves a change. The latest writer-approved direction takes precedence over older planning notes. Do not automatically rewrite existing approved manuscript text.",
+        f"Project title: {title or 'Untitled'}",
+        f"Current stage: {state.get('project_stage') or ''}",
+        f"Format: {state.get('quill_format_name') or state.get('format_type') or ''}",
+        "DEVELOPMENT SETUP:\n" + get_active_format_development_context()[:8500],
+        "ORIGINAL CREATIVE PREMISE:\n" + original[:5500],
+    ]
+    latest = str(state.get("story_seed") or "").strip()
+    if latest and latest != original:
+        sections.append("LATEST APPROVED CONCEPT:\n" + latest[:5500])
+    for key, label, limit in (
+        ("chosen_option_text", "WRITER-SELECTED STORY PATH", 5500),
+        ("plot_outline", "APPROVED PLOT ARCHITECTURE", 7500),
+        ("rolling_lore_book", "ESTABLISHED CONTINUITY / LORE", 6500),
+    ):
+        value = state.get(key)
+        if value:
+            if not isinstance(value, str):
+                try:
+                    value = json.dumps(value, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    value = str(value)
+            sections.append(label + ":\n" + value[:limit])
+    draft = str(state.get("current_draft_output") or "").strip()
+    if draft:
+        sections.append("CURRENT WRITER-APPROVED DRAFT (RECENT EXCERPT, reference only; do not overwrite):\n" + draft[-4500:])
+    return "\n\n".join(sections)
+
+
 def refresh_quill_template_context():
     """Publish every active center-panel direction to Quill and the model bridge."""
     template = st.session_state.get("active_format_template") or {}
     values = get_active_format_template_values()
     st.session_state.active_format_development_context = get_active_format_development_context()
+    st.session_state.wbs_quill_continuity_context = get_full_project_continuity_context()
     st.session_state.quill_template_context = {
         "active_format_id": str(st.session_state.get("active_format_id") or ""),
         "writing_format": str(template.get("display_name") or st.session_state.get("quill_format_name") or ""),
         "format_instructions": str(st.session_state.get("quill_format_instructions") or ""),
         "development_fields": dict(values),
+        "project_continuity": st.session_state.wbs_quill_continuity_context,
         "project_title": str(st.session_state.get("project_title") or ""),
         "project_scope": str(st.session_state.get("project_scope") or ""),
         "series_name": str(st.session_state.get("series_name") or ""),
@@ -5606,6 +5650,9 @@ if st.session_state.project_stage == "Intake":
                     st.stop()
                 st.session_state.story_seed = imported_source_text
 
+            if not st.session_state.get("wbs_project_original_concept"):
+                st.session_state.wbs_project_original_concept = str(st.session_state.story_seed or "").strip()
+
             if not st.session_state.story_seed.strip():
                 source_noun = str(concept_ui.get("source_noun") or "project premise")
                 st.error(f"Please enter a {source_noun} or upload an existing source before continuing.")
@@ -5637,7 +5684,7 @@ if st.session_state.project_stage == "Intake":
                     prepared_context={
                         "series_aware_story_seed": get_series_aware_story_seed(),
                         "scripting_format_context": get_scripting_format_context(),
-                        "format_development_context": get_active_format_development_context(),
+                        "format_development_context": get_full_project_continuity_context(),
                         "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
                         "quill_template_context": refresh_quill_template_context(),
                     },
@@ -5848,7 +5895,7 @@ if st.session_state.project_stage == "Plot Architect":
                     prepared_context={
                         "series_aware_story_seed": get_series_aware_story_seed(),
                         "effective_format_type": get_effective_format_type(),
-                        "format_development_context": get_active_format_development_context(),
+                        "format_development_context": get_full_project_continuity_context(),
                         "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
                         "quill_template_context": refresh_quill_template_context(),
                     },
@@ -6149,6 +6196,9 @@ Apply this requirement to the current scene. Preserve the selected project type 
 SERIES CONTINUITY REFERENCE:
 {series_drafting_context or "This is a standalone book with no series reference package."}
 
+PROJECT-WIDE CREATIVE CONTINUITY:
+{get_full_project_continuity_context()}
+
 CURRENT OUTLINE BEAT:
 {current_beat_data}
 
@@ -6175,7 +6225,7 @@ Write ONLY this single scene block. Do not repeat earlier scenes. Do not summari
                                 prepared_context={
                                     "effective_format_type": get_effective_format_type(),
                                     "dialogue_development_packet": get_dialogue_development_packet(),
-                                    "format_development_context": get_active_format_development_context(),
+                                    "format_development_context": get_full_project_continuity_context(),
                                     "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
                                     "quill_template_context": refresh_quill_template_context(),
                                 },
@@ -6468,7 +6518,7 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                                 selected_final_format
                             ),
                             "effective_format_type": get_effective_format_type(),
-                            "format_development_context": get_active_format_development_context(),
+                            "format_development_context": get_full_project_continuity_context(),
                             "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
                             "quill_template_context": refresh_quill_template_context(),
                         },
@@ -7520,7 +7570,7 @@ if st.session_state.project_stage == "Revision Engine":
                         st.session_state,
                         prepared_context={
                             "effective_format_type": get_effective_format_type(),
-                            "format_development_context": get_active_format_development_context(),
+                            "format_development_context": get_full_project_continuity_context(),
                             "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
                             "quill_template_context": refresh_quill_template_context(),
                         },
@@ -7801,7 +7851,7 @@ elif st.session_state.project_stage == "Rewrite Engine":
                                 st.session_state,
                                 prepared_context={
                                     "effective_format_type": get_effective_format_type(),
-                                    "format_development_context": get_active_format_development_context(),
+                                    "format_development_context": get_full_project_continuity_context(),
                                     "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
                                     "quill_template_context": refresh_quill_template_context(),
                                 },
