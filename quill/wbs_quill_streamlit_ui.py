@@ -590,6 +590,81 @@ def build_quill_controller(
     return QuillInterfaceController(active_bridge, session_state)
 
 
+
+
+def _revise_existing_quill_concept(state: MutableMapping[str, Any], request: str) -> Optional[QuillUIPayload]:
+    """Route explicit concept feedback to the existing editable concept, not stage advice."""
+    if state.get("starting_source_mode") != "Quill Assisted":
+        return None
+    format_id = str(state.get("active_format_id") or "")
+    if not format_id:
+        return None
+    concept_key = f"wbs_quill_starting_concept_{format_id}"
+    original = str(state.get(concept_key) or "").strip()
+    if not original:
+        return None
+
+    lowered = request.lower()
+    edit_intent = bool(re.search(
+        r"\b(revise|rewrite|change|adjust|modify|tailor|rework|refine|less|more|instead|"
+        r"tone down|make it|make the|not so|too dramatic|too dark|too much|"
+        r"rather than|shift|different direction|another direction)\b", lowered
+    ))
+    concept_reference = bool(re.search(
+        r"\b(story|concept|suggestion|premise|plot|direction|idea|ending|character|tone|"
+        r"narrative|this|that|it|your)\b", lowered
+    ))
+    if not (edit_intent and concept_reference):
+        return None
+
+    backend = state.get("backend")
+    client = getattr(backend, "client", None)
+    model = getattr(backend, "model_name", None)
+    if client is None or not model:
+        return QuillUIPayload(
+            text="I can revise the current concept when the writing service is available. Your existing suggestion is unchanged.",
+            stage="Concept Development", source="concept_revision_unavailable"
+        )
+
+    setup_context = str(state.get("active_format_development_context") or "")
+    format_name = str((state.get("active_format_template") or {}).get("display_name") or format_id)
+    context_fields = []
+    for key in ("tone_style", "genre", "story_genre", "dialogue_style", "production_influence", "quill_format_instructions"):
+        value = state.get(key)
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            context_fields.append(f"{key}: {value}")
+    instructions = (
+        "You are Quill, the WritersBlock Studios writing collaborator. "
+        "The writer is revising the CURRENT suggested starting concept in Step 1, "
+        "not requesting workflow instructions or entry into Scripting. "
+        "The development setup was already selected. Never ask the writer to fill it again. "
+        "Revise the existing concept according to the latest feedback. "
+        "Retain the original premise, characters and key intent unless the writer asks otherwise. "
+        "Honor the original genre, age range, tone and other available development settings. "
+        "Return ONLY the updated, editable starting concept (100–180 words). "
+        "No status messages, setup instructions, or stage transitions.\n\n"
+        f"Writing format: {format_name}\n"
+        f"Existing concept:\n{original}\n\n"
+        f"Writer's requested change:\n{request}\n\n"
+        f"Development details:\n{setup_context}\n" + "\n".join(context_fields)
+    )
+    try:
+        result = client.models.generate_content(model=model, contents=instructions)
+        revised = str(getattr(result, "text", "") or "").strip()
+        if not revised:
+            raise ValueError("No revised concept returned")
+    except Exception:
+        return QuillUIPayload(
+            text="I couldn't revise the concept just now. The current suggestion has been preserved; please try again.",
+            stage="Concept Development", source="concept_revision_failed"
+        )
+    state[concept_key] = revised
+    state["story_seed"] = revised
+    return QuillUIPayload(
+        text="I've revised the starting concept to reflect your direction. The updated concept is in the editable box under Quill-Assisted Starting Point.",
+        stage="Concept Development", source="concept_revision"
+    )
+
 def render_quill_studio_coach(
     *,
     agent: Any = None,
@@ -1222,11 +1297,13 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                 if backend_for_usage is not None and hasattr(backend_for_usage, "last_usage"):
                     backend_for_usage.last_usage = {}
 
-                payload = controller.ask(
-                    user_text,
-                    project_id=_clean(state.get("current_project_id", "")) or None,
-                    project_name=_clean(state.get("project_title", "")) or None,
-                )
+                payload = _revise_existing_quill_concept(state, user_text)
+                if payload is None:
+                    payload = controller.ask(
+                        user_text,
+                        project_id=_clean(state.get("current_project_id", "")) or None,
+                        project_name=_clean(state.get("project_title", "")) or None,
+                    )
 
                 if usage_logger is not None:
                     try:
