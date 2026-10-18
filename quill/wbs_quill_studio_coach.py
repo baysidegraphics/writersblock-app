@@ -343,11 +343,9 @@ class QuillStudioCoach:
             )
 
         if mode == QuillDetailMode.DETAIL:
-            reason = _decision_reason(decision) if decision is not None else ""
+            # Internal decision reasons are routing diagnostics, not customer prose.
             spec = STAGE_COACHING[_stage_number(snapshot)]
             parts = [spec["focus"]]
-            if reason:
-                parts.append(reason)
             parts.append(f"Next: {next_action}")
             text = " ".join(part for part in parts if part)
             return QuillCoachMessage(
@@ -389,9 +387,7 @@ class QuillStudioCoach:
         if mode == QuillDetailMode.BRIEF:
             return _word_limit(base, self.max_brief_words)
 
-        reason = _decision_reason(decision) if decision is not None else ""
-        if reason and reason.lower() not in base.lower():
-            return f"{base} {reason}"
+        # Never append private routing explanations to customer-facing responses.
         return base
 
 
