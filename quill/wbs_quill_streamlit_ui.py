@@ -626,7 +626,7 @@ def _revise_existing_quill_concept(state: MutableMapping[str, Any], request: str
             stage="Concept Development", source="concept_revision_unavailable"
         )
 
-    setup_context = str(state.get("active_format_development_context") or "")
+    setup_context = str(state.get("wbs_quill_continuity_context") or state.get("active_format_development_context") or "")
     format_name = str((state.get("active_format_template") or {}).get("display_name") or format_id)
     context_fields = []
     for key in ("tone_style", "genre", "story_genre", "dialogue_style", "production_influence", "quill_format_instructions"):
