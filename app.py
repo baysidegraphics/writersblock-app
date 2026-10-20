@@ -3411,7 +3411,10 @@ def render_project_title_banner(stage_key):
         st.markdown("### 📘 CURRENT PROJECT")
         st.markdown(f"## {current_title}")
 
-        if st.session_state.get("project_stage") != "Intake":
+        if (
+            st.session_state.get("project_stage") != "Intake"
+            and (st.session_state.get("licensed_mode") or st.session_state.get("demo_mode"))
+        ):
             render_quill_for_current_stage(st_module=st, show_prelude=True)
 
         if st.session_state.get("demo_mode"):
@@ -4370,11 +4373,41 @@ st.session_state.format_type = WBS_LEGACY_FORMAT_BY_TEMPLATE_ID.get(
 )
 refresh_quill_template_context()
 
+# WBS_STARTUP_SEQUENCE_NOTICE_20261020
+_startup_access_active = bool(
+    st.session_state.get("licensed_mode")
+    or st.session_state.get("demo_mode")
+)
+
+if not _startup_access_active:
+    st.markdown(
+        """
+        <div style="
+            color:#ff4b4b;
+            font-size:1.02rem;
+            font-weight:700;
+            line-height:1.45;
+            margin:0.15rem 0 0.9rem 0;
+        ">
+        START HERE: Open <strong>License / Trial</strong> in the left sidebar and activate your account.
+        Once login is complete, introduce yourself to your writing assistant, <strong>Quill</strong>,
+        in the right-hand panel.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 # =====================================
 # SIDEBAR STATUS / NAVIGATION / ACCESS
 # =====================================
 
-with st.sidebar.expander("License / Trial", expanded=False):
+with st.sidebar.expander(
+    "License / Trial",
+    expanded=not bool(
+        st.session_state.get("licensed_mode")
+        or st.session_state.get("demo_mode")
+    ),
+):
     active_access = st.session_state.get("licensed_mode") or st.session_state.get("demo_mode")
 
     if not st.session_state.get("licensed_mode"):
@@ -5742,11 +5775,12 @@ if st.session_state.project_stage == "Intake":
     # ======================================
 
     with writer_quill_col:
-        st.markdown(
-            '<div class="wbs-writer-quill-sticky-anchor"></div>',
-            unsafe_allow_html=True,
-        )
-        render_quill_for_current_stage(st_module=st, show_prelude=True)
+        if st.session_state.get("licensed_mode") or st.session_state.get("demo_mode"):
+            st.markdown(
+                '<div class="wbs-writer-quill-sticky-anchor"></div>',
+                unsafe_allow_html=True,
+            )
+            render_quill_for_current_stage(st_module=st, show_prelude=True)
 
 elif st.session_state.project_stage == "Sandbox":
     st.header("🗺️ Step 2: Scripting")
