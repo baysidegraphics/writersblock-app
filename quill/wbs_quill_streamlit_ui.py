@@ -237,50 +237,38 @@ def _set_personal_startup_welcome(
 
 
 def _resolve_kokoro_server_files() -> tuple[Path, Path]:
-    """Find local Kokoro models or provision them for hosted Streamlit."""
+    """Locate the WritersBlock-hosted Kokoro model and combined voices file."""
     configured = str(os.getenv("WBS_QUILL_TTS_DIR", "") or "").strip()
-    candidates = []
+
+    candidates: list[Path] = []
     if configured:
         candidates.append(Path(configured).expanduser())
-    candidates.extend([
-        Path.cwd() / "static" / "quill_tts" / "server",
-        Path.cwd() / "WritersBlock Integration-Test" / "static" / "quill_tts" / "server",
-    ])
+
+    # Normal Integration-Test / production layout.
+    candidates.append(Path.cwd() / "static" / "quill_tts" / "server")
+
+    # Helpful fallback if Streamlit was launched from one folder above the app.
+    candidates.append(
+        Path.cwd()
+        / "WritersBlock Integration-Test"
+        / "static"
+        / "quill_tts"
+        / "server"
+    )
+
+    checked: list[str] = []
     for folder in candidates:
         model = folder / "kokoro-v1.0.onnx"
         voices = folder / "voices-v1.0.bin"
-        if model.is_file() and voices.is_file():
+        checked.append(str(folder))
+        if model.exists() and voices.exists():
             return model, voices
 
-    # Models cannot be committed to an ordinary GitHub repository (100 MB limit).
-    # Download the smaller official FP16 checkpoint lazily to the running server.
-    folder = candidates[0] if configured else candidates[1]
-    folder.mkdir(parents=True, exist_ok=True)
-    model = folder / "kokoro-v1.0.onnx"
-    voices = folder / "voices-v1.0.bin"
-    base = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
-
-    def fetch(url: str, target: Path, minimum_bytes: int) -> None:
-        if target.is_file() and target.stat().st_size >= minimum_bytes:
-            return
-        import requests
-        temporary = target.with_suffix(target.suffix + ".download")
-        try:
-            with requests.get(url, stream=True, timeout=(20, 180), allow_redirects=True) as response:
-                response.raise_for_status()
-                with temporary.open("wb") as out:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            out.write(chunk)
-            if temporary.stat().st_size < minimum_bytes:
-                raise RuntimeError(f"Incomplete voice model download: {target.name}")
-            temporary.replace(target)
-        finally:
-            temporary.unlink(missing_ok=True)
-
-    fetch(base + "kokoro-v1.0.fp16.onnx", model, 100_000_000)
-    fetch(base + "voices-v1.0.bin", voices, 20_000_000)
-    return model, voices
+    raise FileNotFoundError(
+        "Quill voice files were not found. Expected kokoro-v1.0.onnx and "
+        "voices-v1.0.bin in static\\quill_tts\\server. Checked: "
+        + " | ".join(checked)
+    )
 
 
 @lru_cache(maxsize=1)
@@ -590,85 +578,6 @@ def build_quill_controller(
     return QuillInterfaceController(active_bridge, session_state)
 
 
-
-
-def _revise_existing_quill_concept(state: MutableMapping[str, Any], request: str) -> Optional[QuillUIPayload]:
-    """Route explicit concept feedback to the existing editable concept, not stage advice."""
-    if state.get("starting_source_mode") != "Quill Assisted":
-        return None
-    format_id = str(state.get("active_format_id") or "")
-    if not format_id:
-        return None
-    concept_key = f"wbs_quill_starting_concept_{format_id}"
-    original = str(state.get(concept_key) or "").strip()
-    if not original:
-        return None
-
-    lowered = request.lower()
-    edit_intent = bool(re.search(
-        r"\b(revise|rewrite|change|adjust|modify|tailor|rework|refine|less|more|instead|"
-        r"tone down|make it|make the|not so|too dramatic|too dark|too much|"
-        r"rather than|shift|different direction|another direction)\b", lowered
-    ))
-    concept_reference = bool(re.search(
-        r"\b(story|concept|suggestion|premise|plot|direction|idea|ending|character|tone|"
-        r"narrative|this|that|it|your)\b", lowered
-    ))
-    if not (edit_intent and concept_reference):
-        return None
-
-    backend = state.get("backend")
-    client = getattr(backend, "client", None)
-    model = getattr(backend, "model_name", None)
-    if client is None or not model:
-        return QuillUIPayload(
-            text="I can revise the current concept when the writing service is available. Your existing suggestion is unchanged.",
-            stage="Concept Development", source="concept_revision_unavailable"
-        )
-
-    setup_context = str(state.get("wbs_quill_continuity_context") or state.get("active_format_development_context") or "")
-    format_name = str((state.get("active_format_template") or {}).get("display_name") or format_id)
-    context_fields = []
-    for key in ("tone_style", "genre", "story_genre", "dialogue_style", "production_influence", "quill_format_instructions"):
-        value = state.get(key)
-        if isinstance(value, (str, int, float)) and str(value).strip():
-            context_fields.append(f"{key}: {value}")
-    instructions = (
-        "You are Quill, the WritersBlock Studios writing collaborator. "
-        "The writer is revising the CURRENT suggested starting concept in Step 1, "
-        "not requesting workflow instructions or entry into Scripting. "
-        "The development setup was already selected. Never ask the writer to fill it again. "
-        "Revise the existing concept according to the latest feedback. "
-        "Retain the original premise, characters and key intent unless the writer asks otherwise. "
-        "Honor the original genre, age range, tone and other available development settings. "
-        "Return ONLY a natural, polished third-person synopsis in 100–180 words. "
-        "Use character actions, stakes and events, not editorial observations. "
-        "Never say 'this story explores', 'the narrative should', 'the story should', "
-        "'the premise', 'the audience', 'the writer', or 'the theme'. "
-        "No headings, commentary, stage instructions, analysis or status.\n\n"
-        f"Writing format: {format_name}\n"
-        f"Existing concept:\n{original}\n\n"
-        f"Writer's requested change:\n{request}\n\n"
-        f"Development details:\n{setup_context}\n" + "\n".join(context_fields)
-    )
-    try:
-        result = client.models.generate_content(model=model, contents=instructions)
-        revised = str(getattr(result, "text", "") or "").strip()
-        if not revised:
-            raise ValueError("No revised concept returned")
-    except Exception:
-        return QuillUIPayload(
-            text="I couldn't revise the concept just now. The current suggestion has been preserved; please try again.",
-            stage="Concept Development", source="concept_revision_failed"
-        )
-    # Streamlit has already instantiated the concept widget in this run.
-    # Queue the revision; app.py will install it before recreating that widget.
-    state[f"_wbs_quill_pending_concept_{format_id}"] = revised
-    return QuillUIPayload(
-        text="I've revised the starting concept to reflect your direction. The updated concept is in the editable box under Quill-Assisted Starting Point.",
-        stage="Concept Development", source="concept_revision"
-    )
-
 def render_quill_studio_coach(
     *,
     agent: Any = None,
@@ -683,12 +592,12 @@ def render_quill_studio_coach(
     """Render Quill as a non-obstructive Studio Coach.
 
     First use:
-      - Quill takes center stage in a modal introduction.
-      - The user can choose the name Quill should use.
+      - Quill remains in the right-hand panel.
+      - Quill asks what name the writer would like it to use.
+      - Quill responds with a personalized welcome.
 
     Normal use:
-      - Quill remains perched at the upper-right.
-      - Clicking QUILL opens a compact popover coach.
+      - Quill remains in the right-hand panel throughout WritersBlock Studios.
       - Existing WritersBlock controls remain authoritative.
     """
     if st_module is None:
@@ -944,6 +853,13 @@ def render_quill_studio_coach(
             text-align: center;
             margin: 0 0 10px 0;
         }}
+        .wbs-quill-v11-nameprompt {{
+            margin: 10px 0 7px 0;
+            font-size: 0.90rem;
+            font-weight: 700;
+            color: #F4F4F4;
+            line-height: 1.25;
+        }}
 
         .wbs-quill-v11-chat {{
             height: 285px;
@@ -1159,9 +1075,10 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
             unsafe_allow_html=True,
         )
 
-        # Keep Quill in the right-hand panel even when an older/saved session
-        # does not yet contain Quill's display-name state. Never reroute the writer
-        # to a full-width Quill introduction.
+        # Keep Quill in the right-hand panel for onboarding as well as normal use.
+        # On the first Quill interaction of a fresh session, ask the writer what
+        # name Quill should use. The normal chat becomes available immediately
+        # after the writer confirms the name.
         active_name = _clean(state.get(DISPLAY_NAME_KEY, "")) or _clean(display_name)
         if not active_name:
             for _name_key in ("writer_name", "preferred_name", "user_name", "full_name", "name"):
@@ -1180,9 +1097,45 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                     )
                     if active_name:
                         break
-        if active_name:
-            state[DISPLAY_NAME_KEY] = active_name
 
+        if not bool(state.get(NAME_CONFIRMED_KEY, False)):
+            st.markdown(
+                '<div class="wbs-quill-v11-nameprompt">Welcome to WritersBlock Studios! I’m Quill. What name would you like me to use?</div>',
+                unsafe_allow_html=True,
+            )
+            with st.form(
+                key=f"{QUILL_STATE_PREFIX}name_form",
+                clear_on_submit=False,
+            ):
+                entered_name = st.text_input(
+                    "Your name",
+                    value=active_name,
+                    key=f"{QUILL_STATE_PREFIX}name_setup",
+                    max_chars=60,
+                    placeholder="First name, full name, or pen name",
+                    label_visibility="collapsed",
+                )
+                name_submitted = st.form_submit_button(
+                    "START WORKING WITH QUILL",
+                    use_container_width=True,
+                )
+
+            if name_submitted:
+                chosen_name = _clean(entered_name)
+                if not chosen_name:
+                    st.warning("Enter the name you would like Quill to use.")
+                else:
+                    state[DISPLAY_NAME_KEY] = chosen_name
+                    state[NAME_CONFIRMED_KEY] = True
+                    state[LAST_SPOKEN_KEY] = ""
+                    _set_personal_startup_welcome(state, chosen_name)
+                    st.rerun()
+
+            # Name setup is the first interaction in the right-hand Quill panel.
+            # Do not show the normal chat input until the writer has answered it.
+            return None
+
+        state[DISPLAY_NAME_KEY] = active_name
         history = list(state.get(CHAT_HISTORY_KEY, []) or [])
 
         # Suppress any duplicate zero-credit title prompt that app.py may add
@@ -1301,13 +1254,11 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                 if backend_for_usage is not None and hasattr(backend_for_usage, "last_usage"):
                     backend_for_usage.last_usage = {}
 
-                payload = _revise_existing_quill_concept(state, user_text)
-                if payload is None:
-                    payload = controller.ask(
-                        user_text,
-                        project_id=_clean(state.get("current_project_id", "")) or None,
-                        project_name=_clean(state.get("project_title", "")) or None,
-                    )
+                payload = controller.ask(
+                    user_text,
+                    project_id=_clean(state.get("current_project_id", "")) or None,
+                    project_name=_clean(state.get("project_title", "")) or None,
+                )
 
                 if usage_logger is not None:
                     try:
