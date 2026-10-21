@@ -101,15 +101,15 @@ def current_step(state: Mapping[str, Any]) -> tuple[int, str]:
         return 1, STEP_NAMES[1]
     if stage in {"Sandbox", "Sandbox Engine", "Sandbox Selection"}:
         return 2, STEP_NAMES[2]
-    if stage in {"Plotting", "Plot Engine", "Plot Development"}:
+    if stage in {"Plot Architect", "Plotting", "Plot Engine", "Plot Development"}:
         return 3, STEP_NAMES[3]
-    if stage == "Drafting Engine":
+    if stage in {"Drafting", "Drafting Engine", "Creative Draft"}:
         return 4, STEP_NAMES[4]
     if stage == "Isolation Guardrail":
         return (8, STEP_NAMES[8]) if export_view else (5, STEP_NAMES[5])
-    if stage == "Revision Engine":
+    if stage in {"Revision Engine", "Script Polish"}:
         return 6, STEP_NAMES[6]
-    if stage == "Rewrite Engine":
+    if stage in {"Rewrite Engine", "Script Rewrite"}:
         return 7, STEP_NAMES[7]
     return 0, stage or "Current Project"
 
@@ -135,26 +135,84 @@ def build_context(state: Mapping[str, Any]) -> dict[str, Any]:
     manuscript = current_manuscript(state)
     title = project_title(state)
 
+    plot_outline = clean(get_value(state, "plot_outline", ""))
+    scene_blocks_raw = get_value(state, "scene_blocks", {}) or {}
+
+    plot_beats: dict[int, str] = {}
+    if plot_outline:
+        beat_pattern = re.compile(r"(?im)^\s*\[BEAT\s+(\d+)\]\s*$")
+        matches = list(beat_pattern.finditer(plot_outline))
+        if matches:
+            for idx, match in enumerate(matches):
+                end = matches[idx + 1].start() if idx + 1 < len(matches) else len(plot_outline)
+                block = plot_outline[match.start():end].strip()
+                if block:
+                    plot_beats[int(match.group(1))] = block
+        else:
+            plain_pattern = re.compile(r"(?im)^\s*BEAT\s+(\d+)\s*:?\s*$")
+            plain_matches = list(plain_pattern.finditer(plot_outline))
+            if plain_matches:
+                for idx, match in enumerate(plain_matches):
+                    end = plain_matches[idx + 1].start() if idx + 1 < len(plain_matches) else len(plot_outline)
+                    block = plot_outline[match.start():end].strip()
+                    if block:
+                        plot_beats[int(match.group(1))] = block
+            else:
+                legacy = [b.strip() for b in plot_outline.split("===") if b.strip()]
+                if len(legacy) > 1:
+                    for idx, block in enumerate(legacy, start=1):
+                        plot_beats[idx] = block
+                elif plot_outline:
+                    plot_beats[1] = plot_outline
+
+    scene_blocks: dict[int, str] = {}
+    if isinstance(scene_blocks_raw, Mapping):
+        for key, value in scene_blocks_raw.items():
+            try:
+                number = int(key)
+            except Exception:
+                continue
+            text_value = clean(value)
+            if text_value:
+                scene_blocks[number] = text_value
+
     ctx["project_title"] = title
     ctx["wbs_current_step"] = step
     ctx["wbs_current_stage_name"] = stage_name
     ctx["current_manuscript"] = manuscript
     ctx["current_manuscript_word_count"] = count_words(manuscript)
-    ctx["selected_final_output_format"] = clean(
-        get_value(state, "final_output_format", "")
-    )
+    ctx["selected_final_output_format"] = clean(get_value(state, "final_output_format", ""))
+
+    ctx["quill_plot_beats"] = plot_beats
+    ctx["quill_scene_blocks"] = scene_blocks
+    ctx["quill_current_processing_beat"] = int(get_value(state, "current_processing_beat", 0) or 0)
+    ctx["quill_total_beats"] = int(get_value(state, "total_beats", len(plot_beats)) or len(plot_beats))
+
+    if step == 3:
+        ctx["quill_active_work_object"] = "plot_architecture"
+    elif step == 4:
+        ctx["quill_active_work_object"] = "creative_draft"
+    elif step == 7:
+        ctx["quill_active_work_object"] = "script_rewrite"
+    elif step == 8:
+        ctx["quill_active_work_object"] = "final_output"
+    else:
+        ctx["quill_active_work_object"] = stage_name.lower().replace(" ", "_")
 
     ctx["quill_project_reference"] = {
         "title": title,
         "step": step,
         "stage": stage_name,
+        "active_work_object": ctx["quill_active_work_object"],
         "format_type": clean(get_value(state, "format_type", "")),
         "final_output_format": ctx["selected_final_output_format"],
         "dialogue_style": clean(get_value(state, "dialogue_style", "")),
         "story_seed": clean(get_value(state, "story_seed", "")),
         "chosen_option": get_value(state, "chosen_option", ""),
         "chosen_option_text": get_value(state, "chosen_option_text", ""),
-        "plot_outline": get_value(state, "plot_outline", ""),
+        "plot_outline": plot_outline,
+        "plot_beats": plot_beats,
+        "scene_blocks": scene_blocks,
         "rolling_lore_book": get_value(state, "rolling_lore_book", ""),
         "revision_report": get_value(state, "revision_report", ""),
         "manuscript_word_count": ctx["current_manuscript_word_count"],
@@ -250,7 +308,6 @@ def approved_workaround_reply(
     )
 
 def direct_fact(state: Mapping[str, Any], user_text: str) -> Optional[dict[str, str]]:
-    """Answer simple facts about the CURRENT loaded WritersBlock project."""
     text = clean(user_text)
     if not text:
         return None
@@ -266,11 +323,69 @@ def direct_fact(state: Mapping[str, Any], user_text: str) -> Optional[dict[str, 
     output_format = clean(ctx.get("selected_final_output_format", ""))
     base_format = clean(ctx.get("format_type", ""))
 
-    if (
+    plot_beats = ctx.get("quill_plot_beats", {}) or {}
+    scene_blocks = ctx.get("quill_scene_blocks", {}) or {}
+
+    wants_count = (
         "word count" in normalized
         or "how many words" in normalized
         or "number of words" in normalized
-    ):
+        or "target words" in normalized
+        or "words were used" in normalized
+        or "words are in" in normalized
+    )
+
+    beat_match = re.search(r"\bbeat\s+(\d+)\b", normalized)
+    scene_match = re.search(r"\bscene(?:\s+block)?\s+(\d+)\b", normalized)
+
+    if wants_count and scene_match:
+        number = int(scene_match.group(1))
+        block = clean(scene_blocks.get(number, ""))
+        if block:
+            return {
+                "text": f"Creative Draft Scene Block {number} contains {count_words(block):,} words.",
+                "stage": stage,
+                "source": "working_object_context",
+            }
+        return {
+            "text": (
+                f"I can see the project, but Creative Draft Scene Block {number} "
+                "has not been generated or is not currently stored in this project."
+            ),
+            "stage": stage,
+            "source": "working_object_context",
+        }
+
+    if wants_count and beat_match:
+        number = int(beat_match.group(1))
+
+        if step == 4:
+            draft_block = clean(scene_blocks.get(number, ""))
+            if draft_block:
+                return {
+                    "text": (
+                        f"Creative Draft Scene Block {number}, which was generated from Beat {number}, "
+                        f"contains {count_words(draft_block):,} words."
+                    ),
+                    "stage": stage,
+                    "source": "working_object_context",
+                }
+
+        beat_block = clean(plot_beats.get(number, ""))
+        if beat_block:
+            return {
+                "text": f"Plot Architecture Beat {number} contains {count_words(beat_block):,} words.",
+                "stage": stage,
+                "source": "working_object_context",
+            }
+
+        return {
+            "text": f"I can see the project, but I cannot find Beat {number} in the current Plot Architecture.",
+            "stage": stage,
+            "source": "working_object_context",
+        }
+
+    if wants_count:
         if manuscript:
             count = int(ctx.get("current_manuscript_word_count") or 0)
             suffix = f' for "{title}"' if title else ""
@@ -280,44 +395,29 @@ def direct_fact(state: Mapping[str, Any], user_text: str) -> Optional[dict[str, 
         return {"text": answer, "stage": stage, "source": "project_context"}
 
     stage_phrases = (
-        "where am i",
-        "where are we",
-        "what stage am i in",
-        "what stage are we in",
-        "what step am i on",
-        "what step are we on",
-        "current stage",
-        "current step",
+        "where am i", "where are we", "what stage am i in",
+        "what stage are we in", "what step am i on", "what step are we on",
+        "current stage", "current step",
     )
     if any(phrase in normalized for phrase in stage_phrases):
         suffix = f' in "{title}"' if title else ""
+        work_object = clean(ctx.get("quill_active_work_object", "")).replace("_", " ")
         answer = (
-            f"You are at Step {step}: {stage}{suffix}."
-            if step
-            else f"You are in {stage}{suffix}."
+            f"You are at Step {step}: {stage}{suffix}. Your active working area is {work_object}."
+            if step else f"You are in {stage}{suffix}."
         )
         return {"text": answer, "stage": stage, "source": "project_context"}
 
     project_phrases = (
-        "what project is this",
-        "what project are we in",
-        "what story is this",
-        "what story are we working on",
-        "what is the project title",
-        "project title",
+        "what project is this", "what project are we in",
+        "what story is this", "what story are we working on",
+        "what is the project title", "project title",
     )
     if any(phrase in normalized for phrase in project_phrases):
-        answer = (
-            f'You are working in "{title}".'
-            if title
-            else "The current project does not have a saved title."
-        )
+        answer = f'You are working in "{title}".' if title else "The current project does not have a saved title."
         return {"text": answer, "stage": stage, "source": "project_context"}
 
-    if (
-        "output format" in normalized
-        or normalized in {"what format is this", "what format am i using"}
-    ):
+    if "output format" in normalized or normalized in {"what format is this", "what format am i using"}:
         if output_format:
             answer = f"The selected Final Output format is {output_format}."
         elif base_format:
@@ -391,50 +491,50 @@ def build_ai_prompt(state: Mapping[str, Any], user_text: str) -> str:
     ref = ctx["quill_project_reference"]
     manuscript_context = _clip(ctx.get("current_manuscript", ""), 50000)
 
+    plot_beat_summary = "\n\n".join(
+        f"BEAT {number}:\n{_clip(block, 6000)}"
+        for number, block in sorted((ctx.get("quill_plot_beats") or {}).items())
+    )
+    scene_block_summary = "\n\n".join(
+        f"SCENE BLOCK {number}:\n{_clip(block, 10000)}"
+        for number, block in sorted((ctx.get("quill_scene_blocks") or {}).items())
+    )
+
     return f"""
 You are Quill, the WritersBlock Studios writing partner.
 
 CORE RULES:
-- The writer may ask about ANY part of the CURRENT loaded WritersBlock project,
-  regardless of the workflow screen currently open.
+- The writer may ask about ANY part of the CURRENT loaded WritersBlock project, regardless of the workflow screen currently open.
 - The current screen tells you where the writer is working; it does not limit what you may discuss.
+- Distinguish project-level context from the active working object inside the current step.
+- In Step 3, Beat N means Plot Architecture Beat N unless the writer explicitly asks for a draft scene.
+- In Step 4, Scene Block N means the generated Creative Draft scene.
+- Never confuse a Plot Architecture beat with its generated Creative Draft scene.
 - Answer general writing, publishing, terminology, research, and outside-world questions normally.
-- Do not claim you changed WritersBlock state, switched projects, navigated screens,
-  rewrote text, or applied a workaround unless the application explicitly did so.
-- State-changing cross-stage/project requests are handled separately by WritersBlock.
+- Do not claim you changed WritersBlock state, switched projects, navigated screens, rewrote text, or applied a workaround unless the application explicitly did so.
 - Be concise and practical.
 
 CURRENT PROJECT
 Title: {ref.get("title") or "(untitled)"}
 Current Step: {ref.get("step")} - {ref.get("stage")}
+Active Working Object: {ref.get("active_work_object")}
 Writing Format: {ref.get("format_type")}
 Selected Final Output Format: {ref.get("final_output_format")}
-Dialogue Style: {ref.get("dialogue_style")}
 Current Manuscript Word Count: {ref.get("manuscript_word_count")}
 
-PROJECT DEVELOPMENT CONTEXT
-Concept / Story Seed:
-{_clip(ref.get("story_seed"), 7000)}
+PLOT ARCHITECTURE BEATS:
+{plot_beat_summary}
 
-Chosen Story Path:
-{_clip(ref.get("chosen_option_text") or ref.get("chosen_option"), 7000)}
+CREATIVE DRAFT SCENE BLOCKS:
+{scene_block_summary}
 
-Plot Outline:
-{_clip(ref.get("plot_outline"), 12000)}
-
-Rolling Lore / Continuity:
-{_clip(ref.get("rolling_lore_book"), 12000)}
-
-Revision Report:
-{_clip(ref.get("revision_report"), 8000)}
-
-CURRENT WORKING MANUSCRIPT CONTEXT:
+CURRENT WORKING MANUSCRIPT:
 {manuscript_context}
 
 WRITER QUESTION:
 {clean(user_text)}
 
-Answer directly. If the supplied project material is insufficient, say what is missing rather than inventing project facts.
+Answer directly. Identify which WritersBlock object you are referring to when the question could be ambiguous.
 """.strip()
 
 def contextual_ai_answer(state: Mapping[str, Any], user_text: str) -> Optional[str]:
