@@ -57,7 +57,7 @@ except ImportError:
         answer_quill = None
 
 
-QUILL_STREAMLIT_UI_VERSION = "32.5-TEXT-INTRO"
+QUILL_STREAMLIT_UI_VERSION = "32.7-LOCAL-IDENTITY-BEFORE-CREDITS"
 QUILL_STATE_PREFIX = "_wbs_quill_"
 PRELUDE_SEEN_KEY = f"{QUILL_STATE_PREFIX}prelude_seen"
 DISPLAY_NAME_KEY = f"{QUILL_STATE_PREFIX}display_name"
@@ -592,6 +592,78 @@ def build_quill_controller(
 
 
 
+
+
+def _quill_identity_reply(
+    state: MutableMapping[str, Any],
+    request: str,
+) -> Optional[QuillUIPayload]:
+    """Handle Quill-facing name changes/questions without workflow routing."""
+    clean_request = _clean(request)
+    if not clean_request:
+        return None
+
+    lower = clean_request.casefold()
+    current_name = _clean(state.get(DISPLAY_NAME_KEY, ""))
+    stage = _clean(state.get("project_stage", "")) or "Concept Development"
+
+    change_patterns = (
+        r"^\s*(?:can you\s+|could you\s+|please\s+)?change my name to\s+(.+?)\s*[.!?]*$",
+        r"^\s*(?:please\s+)?call me\s+(.+?)\s*[.!?]*$",
+        r"^\s*my name is\s+(.+?)\s*[.!?]*$",
+        r"^\s*change what you call me to\s+(.+?)\s*[.!?]*$",
+    )
+    for pattern in change_patterns:
+        match = re.match(pattern, clean_request, flags=re.IGNORECASE)
+        if match:
+            chosen = _clean(match.group(1)).strip(" .!?\"'")
+            if not chosen:
+                return None
+            chosen = chosen[:60]
+            state[DISPLAY_NAME_KEY] = chosen
+            state[NAME_CONFIRMED_KEY] = True
+            return QuillUIPayload(
+                text=f"Yes. I’ll call you {chosen} from now on.",
+                stage=stage,
+                severity="info",
+                source="identity",
+                next_action="",
+            )
+
+    if any(phrase in lower for phrase in (
+        "what is my name",
+        "what's my name",
+        "what name are you using",
+        "what do you call me",
+        "what name do you have for me",
+    )):
+        text = (
+            f"I’m calling you {current_name}."
+            if current_name
+            else "You haven’t given me a name to use yet."
+        )
+        return QuillUIPayload(
+            text=text,
+            stage=stage,
+            severity="info",
+            source="identity",
+            next_action="",
+        )
+
+    if any(phrase in lower for phrase in (
+        "can i change my name",
+        "can i change what you call me",
+        "can you change my name",
+    )):
+        return QuillUIPayload(
+            text='Yes. Tell me the name you want me to use, for example: “Call me Dave.”',
+            stage=stage,
+            severity="info",
+            source="identity",
+            next_action="",
+        )
+
+    return None
 
 def _revise_existing_quill_concept(state: MutableMapping[str, Any], request: str) -> Optional[QuillUIPayload]:
     """Route explicit concept feedback to the existing editable concept, not stage advice."""
@@ -1285,7 +1357,6 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
 
             if (
                 latest_quill_text
-                and latest_quill_source != "startup_welcome"
                 and latest_quill_text != str(state.get(LAST_SPOKEN_KEY, "") or "")
             ):
                 # Mark this response before synthesis so a failure does not cause
@@ -1325,6 +1396,23 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
         if submitted and _clean(question):
             user_text = _clean(question)
             history = list(state.get(CHAT_HISTORY_KEY, []) or [])
+
+            # Handle Quill-facing identity requests locally BEFORE credits,
+            # workflow routing, title requirements, or any AI/backend call.
+            identity_payload = _quill_identity_reply(state, user_text)
+            if identity_payload is not None:
+                history.append({"role": "user", "content": user_text})
+                history.append({
+                    "role": "assistant",
+                    "content": identity_payload.text,
+                    "source": "identity",
+                })
+                state[CHAT_HISTORY_KEY] = history
+                state[LAST_RESPONSE_KEY] = identity_payload.text
+                state[LAST_SOURCE_KEY] = "identity"
+                state[LAST_SPOKEN_KEY] = ""
+                st.rerun()
+
             history.append({"role": "user", "content": user_text})
             state[CHAT_HISTORY_KEY] = history
 
@@ -1346,7 +1434,9 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                 if backend_for_usage is not None and hasattr(backend_for_usage, "last_usage"):
                     backend_for_usage.last_usage = {}
 
-                payload = _revise_existing_quill_concept(state, user_text)
+                payload = _quill_identity_reply(state, user_text)
+                if payload is None:
+                    payload = _revise_existing_quill_concept(state, user_text)
                 if payload is None:
                     payload = controller.ask(
                         user_text,

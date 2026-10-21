@@ -22,7 +22,7 @@ from pathlib import Path
 import sys
 from typing import Any, Optional
 
-QUILL_APP_HOOK_VERSION = "1.0"
+QUILL_APP_HOOK_VERSION = "1.1-RERUN-PASSTHROUGH"
 
 QUILL_DIR = Path(__file__).resolve().parent
 WBS_AGENT_DIR = QUILL_DIR.parent
@@ -100,10 +100,19 @@ def render_quill_for_current_stage(
             show_prelude=show_prelude,
         )
     except Exception as exc:
-        # Never allow Quill to break the existing WritersBlock application.
+        # Streamlit uses internal control-flow exceptions for rerun/stop.
+        # These MUST pass through or Quill SEND appears to do nothing.
+        if type(exc).__name__ in {"RerunException", "StopException"}:
+            raise
+
+        # Keep the main app alive, but expose a real Quill failure.
         try:
             st_module.session_state["_wbs_quill_hook_error"] = (
                 f"{type(exc).__name__}: {exc}"
+            )
+            st_module.error(
+                "Quill error: "
+                + st_module.session_state["_wbs_quill_hook_error"]
             )
         except Exception:
             pass
