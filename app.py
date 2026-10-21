@@ -4398,6 +4398,37 @@ if not _startup_access_active:
     )
 
 
+# WBS_API_REQUIREMENT_NOTICE_20261021
+if not _startup_access_active:
+    st.markdown(
+        """
+        <div style="
+            margin-top:-8px;
+            margin-bottom:12px;
+            font-size:0.80rem;
+            font-weight:600;
+            color:#ff5a5a;
+        ">
+            GOOGLE GEMINI API KEY REQUIRED.
+            <span style="color:#f2f2f2;font-weight:500;">
+                Google Free tier may be suitable for light/small projects.
+            </span>
+            <a href="https://writersblockstudios.com/google-api-usage.html"
+               target="_blank"
+               style="color:#ff7777;font-weight:700;text-decoration:underline;">
+               How Google API Usage Works
+            </a>
+            &nbsp;|&nbsp;
+            <a href="https://writersblockstudios.com/google-api-key-setup.html"
+               target="_blank"
+               style="color:#ff7777;font-weight:700;text-decoration:underline;">
+               API Key Setup
+            </a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 # =====================================
 # SIDEBAR STATUS / NAVIGATION / ACCESS
 # =====================================
