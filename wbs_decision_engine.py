@@ -688,7 +688,10 @@ class WBSDecisionEngine:
 
         action = _explicit_action(text)
         if action is None:
-            action = WORKFLOW_ACTION_DEFAULTS.get(snapshot.step, DecisionAction.GENERAL)
+            # Normal Quill conversation must remain available at every stage.
+            # Missing workflow prerequisites (such as a project title) only block
+            # an explicit workflow action, not ordinary questions or discussion.
+            action = DecisionAction.GENERAL
 
         # A plain "continue"/"go"/"next" should advance the current workflow.
         if text in {"continue", "go", "next", "proceed", "go ahead"}:
