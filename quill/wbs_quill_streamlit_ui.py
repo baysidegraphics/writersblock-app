@@ -57,7 +57,7 @@ except ImportError:
         answer_quill = None
 
 
-QUILL_STREAMLIT_UI_VERSION = "32.3-RIGHT-PANEL-NAME-INTRO"
+QUILL_STREAMLIT_UI_VERSION = "32.5-TEXT-INTRO"
 QUILL_STATE_PREFIX = "_wbs_quill_"
 PRELUDE_SEEN_KEY = f"{QUILL_STATE_PREFIX}prelude_seen"
 DISPLAY_NAME_KEY = f"{QUILL_STATE_PREFIX}display_name"
@@ -109,6 +109,7 @@ def _render_quill_logo(st: Any, *, width: int) -> None:
         return
 
     st.markdown("### QUILL")
+
 
 
 @dataclass(frozen=True)
@@ -1162,13 +1163,16 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
         # First-use name introduction stays inside the fixed right-hand Quill panel.
         # Ask once for the name Quill should use, then continue with the personalized welcome.
         if not bool(state.get(NAME_CONFIRMED_KEY, False)):
+            intro_message = (
+                "Welcome to WritersBlock Studios! I’m Quill. "
+                "What name would you like me to use?"
+            )
             st.markdown(
                 '<div class="wbs-quill-v11-chat">'
                 '<div class="wbs-quill-v11-quill">'
                 '<div class="wbs-quill-v11-label">QUILL</div>'
-                'Welcome to WritersBlock Studios! I’m Quill. '
-                'What name would you like me to use?'
-                '</div></div>',
+                + html.escape(intro_message)
+                + '</div></div>',
                 unsafe_allow_html=True,
             )
 
@@ -1272,13 +1276,16 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
         # Auto-read only new Quill responses when the speaker is ON.
         if bool(state.get(VOICE_ENABLED_KEY, False)):
             latest_quill_text = ""
+            latest_quill_source = ""
             for message in reversed(history):
                 if _clean(message.get("role", "")) == "assistant":
                     latest_quill_text = str(message.get("content", "") or "").strip()
+                    latest_quill_source = _clean(message.get("source", ""))
                     break
 
             if (
                 latest_quill_text
+                and latest_quill_source != "startup_welcome"
                 and latest_quill_text != str(state.get(LAST_SPOKEN_KEY, "") or "")
             ):
                 # Mark this response before synthesis so a failure does not cause
