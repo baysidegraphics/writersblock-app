@@ -57,7 +57,29 @@ except ImportError:
         answer_quill = None
 
 
-QUILL_STREAMLIT_UI_VERSION = "32.7-LOCAL-IDENTITY-BEFORE-CREDITS"
+try:
+    from .wbs_quill_project_context import (
+        approved_workaround_reply as _quill_approved_workaround_reply,
+        build_context as _quill_build_context,
+        contextual_ai_answer as _quill_contextual_ai_answer,
+        direct_fact as _quill_direct_fact,
+        has_loaded_project as _quill_has_loaded_project,
+        recovery_text as _quill_recovery_text,
+        route_action as _quill_route_action,
+    )
+except ImportError:
+    from wbs_quill_project_context import (
+        approved_workaround_reply as _quill_approved_workaround_reply,
+        build_context as _quill_build_context,
+        contextual_ai_answer as _quill_contextual_ai_answer,
+        direct_fact as _quill_direct_fact,
+        has_loaded_project as _quill_has_loaded_project,
+        recovery_text as _quill_recovery_text,
+        route_action as _quill_route_action,
+    )
+
+
+QUILL_STREAMLIT_UI_VERSION = "33.0-PROJECT-AWARE-SAFE-ROUTING"
 QUILL_STATE_PREFIX = "_wbs_quill_"
 PRELUDE_SEEN_KEY = f"{QUILL_STATE_PREFIX}prelude_seen"
 DISPLAY_NAME_KEY = f"{QUILL_STATE_PREFIX}display_name"
@@ -480,11 +502,46 @@ class QuillInterfaceController:
         if not clean_question:
             return self.brief()
 
+        # Entire CURRENT project is available for discussion, regardless of screen.
+        context_state = _quill_build_context(self.project_state)
+
+        approved_workaround = _quill_approved_workaround_reply(
+            self.project_state, clean_question
+        )
+        if approved_workaround:
+            return QuillUIPayload(
+                text=approved_workaround,
+                stage=str(context_state.get("wbs_current_stage_name", "Current Project")),
+                severity="info",
+                source="workaround_guidance",
+                next_action="",
+            )
+
+        direct = _quill_direct_fact(context_state, clean_question)
+        if direct is not None:
+            return QuillUIPayload(
+                text=direct["text"],
+                stage=direct["stage"],
+                severity="info",
+                source=direct["source"],
+                next_action="",
+            )
+
+        route = _quill_route_action(context_state, clean_question)
+        if route is not None:
+            return QuillUIPayload(
+                text=route["text"],
+                stage=route["stage"],
+                severity="info",
+                source=route["source"],
+                next_action="",
+            )
+
         # Project-aware Quill intelligence handles both Program Coach and
         # Creative Collaboration questions before falling back to the runtime bridge.
         try:
             intelligent = (
-                answer_quill(clean_question, self.project_state)
+                answer_quill(clean_question, context_state)
                 if callable(answer_quill)
                 else None
             )
@@ -509,7 +566,7 @@ class QuillInterfaceController:
                 )
                 if any(marker in blocked_text for marker in old_gate_markers):
                     try:
-                        trial_collaboration_state = dict(self.project_state)
+                        trial_collaboration_state = dict(context_state)
                     except Exception:
                         trial_collaboration_state = {}
 
@@ -538,18 +595,30 @@ class QuillInterfaceController:
         except Exception:
             pass
 
+        # If optional Quill intelligence is unavailable, answer from the
+        # full CURRENT project through the existing WBS Gemini backend (read-only).
+        contextual_text = _quill_contextual_ai_answer(context_state, clean_question)
+        if contextual_text:
+            return QuillUIPayload(
+                text=contextual_text,
+                stage=str(context_state.get("wbs_current_stage_name", "Current Project")),
+                severity="info",
+                source="project_discussion",
+                next_action="",
+            )
+
         # Safe fallback: existing deterministic/runtime behavior remains available.
         if getattr(self.bridge, "agent", None) is None:
             result = self.bridge.guidance(
                 clean_question,
-                self.project_state,
+                context_state,
                 detail_mode=QuillDetailMode.DETAIL,
             )
             return self._coach_payload(result, source="detail")
 
         result = self.bridge.ask(
             clean_question,
-            self.project_state,
+            context_state,
             project_id=project_id,
             project_name=project_name,
             detail_mode=QuillDetailMode.DETAIL,
@@ -1232,8 +1301,16 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
             unsafe_allow_html=True,
         )
 
+        # A loaded/saved project is already an active WritersBlock context.
+        # Never reinterpret a project question as first-use name entry.
+        if _quill_has_loaded_project(state) and not bool(state.get(NAME_CONFIRMED_KEY, False)):
+            existing_name = _clean(state.get(DISPLAY_NAME_KEY, "")) or _clean(display_name)
+            if existing_name:
+                state[DISPLAY_NAME_KEY] = existing_name
+            state[NAME_CONFIRMED_KEY] = True
+
         # First-use name introduction stays inside the fixed right-hand Quill panel.
-        # Ask once for the name Quill should use, then continue with the personalized welcome.
+        # Ask only when this is genuinely a new project/session.
         if not bool(state.get(NAME_CONFIRMED_KEY, False)):
             intro_message = (
                 "Welcome to WritersBlock Studios! I’m Quill. "
@@ -1314,7 +1391,10 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
         history = cleaned_history
         state[CHAT_HISTORY_KEY] = history
 
-        if not any(_clean(item.get("source", "")) == "startup_welcome" for item in history):
+        if (
+            not _quill_has_loaded_project(state)
+            and not any(_clean(item.get("source", "")) == "startup_welcome" for item in history)
+        ):
             _set_personal_startup_welcome(state, active_name)
             history = list(state.get(CHAT_HISTORY_KEY, []) or [])
 
@@ -1388,7 +1468,7 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
             question = st.text_input(
                 "Message Quill",
                 placeholder="Type your question here… then press Enter",
-                max_chars=1000,
+                max_chars=4000,
                 label_visibility="collapsed",
             )
             submitted = st.form_submit_button("SEND")
@@ -1438,11 +1518,45 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                 if payload is None:
                     payload = _revise_existing_quill_concept(state, user_text)
                 if payload is None:
-                    payload = controller.ask(
-                        user_text,
-                        project_id=_clean(state.get("current_project_id", "")) or None,
-                        project_name=_clean(state.get("project_title", "")) or None,
-                    )
+                    try:
+                        payload = controller.ask(
+                            user_text,
+                            project_id=_clean(state.get("current_project_id", "")) or None,
+                            project_name=_clean(state.get("project_title", "")) or None,
+                        )
+                    except Exception as quill_exc:
+                        recovery_message, issue = _quill_recovery_text(
+                            state,
+                            message=f"{type(quill_exc).__name__}: {quill_exc}",
+                            user_text=user_text,
+                            workaround=(
+                                "remain on the current screen and use the normal WritersBlock "
+                                "controls, or reload this saved project before retrying the blocked action"
+                            ),
+                        )
+                        if usage_logger is not None:
+                            try:
+                                usage_logger(
+                                    "quill_context_issue",
+                                    input_text="",
+                                    output_text="",
+                                    note=(
+                                        f"{issue.get('code')} | "
+                                        f"{issue.get('context_signature')} | "
+                                        f"{issue.get('project_title')}"
+                                    ),
+                                )
+                            except Exception:
+                                pass
+                        payload = QuillUIPayload(
+                            text=recovery_message,
+                            stage=str(_quill_build_context(state).get(
+                                "wbs_current_stage_name", "Current Project"
+                            )),
+                            severity="warning",
+                            source="context_recovery",
+                            next_action="",
+                        )
 
                 if usage_logger is not None:
                     try:
@@ -1466,7 +1580,7 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                         pass
                 raise
 
-            history.append({"role": "assistant", "content": payload.text})
+            history.append({"role": "assistant", "content": payload.text, "source": payload.source})
             state[CHAT_HISTORY_KEY] = history
             state[LAST_RESPONSE_KEY] = payload.text
             state[LAST_SOURCE_KEY] = payload.source
