@@ -79,7 +79,7 @@ except ImportError:
     )
 
 
-QUILL_STREAMLIT_UI_VERSION = "33.2-STEP7-HANDOFF-TTS-CLEAN"
+QUILL_STREAMLIT_UI_VERSION = "33.3-CREATIVE-PROSE-NAME-RESTORE"
 QUILL_STATE_PREFIX = "_wbs_quill_"
 PRELUDE_SEEN_KEY = f"{QUILL_STATE_PREFIX}prelude_seen"
 DISPLAY_NAME_KEY = f"{QUILL_STATE_PREFIX}display_name"
@@ -96,8 +96,8 @@ VOICE_GENDER_KEY = f"{QUILL_STATE_PREFIX}voice_gender"
 LAST_SPOKEN_KEY = f"{QUILL_STATE_PREFIX}last_spoken"
 VOICE_STOP_KEY = f"{QUILL_STATE_PREFIX}voice_stop"
 VOICE_ERROR_KEY = f"{QUILL_STATE_PREFIX}voice_error"
-SESSION_INITIALIZED_KEY = f"{QUILL_STATE_PREFIX}session_initialized_v33"
-NAME_CONFIRMED_KEY = f"{QUILL_STATE_PREFIX}name_confirmed_v33"
+SESSION_INITIALIZED_KEY = f"{QUILL_STATE_PREFIX}session_initialized_v34"
+NAME_CONFIRMED_KEY = f"{QUILL_STATE_PREFIX}name_confirmed_v34"
 
 QUILL_DIR = Path(__file__).resolve().parent
 QUILL_LOGO_CANDIDATES = (
@@ -484,6 +484,24 @@ def _runtime_output(runtime_result: Any) -> str:
     return ""
 
 
+def _is_quill_creative_writing_request(text: str) -> bool:
+    """True for requests asking Quill to draft or improve story prose.
+
+    This does not authorize a manuscript change. Step-routing remains authoritative.
+    """
+    lower = _clean(text).lower()
+    markers = (
+        "add a more descriptive", "add an intro", "add a better intro",
+        "write an intro", "write a better intro", "extend the intro",
+        "extend beat", "expand beat", "expand scene", "improve the intro",
+        "improve scene", "improve beat", "suggest an intro", "suggest a better intro",
+        "give me an intro", "give me a better intro", "draft an intro",
+        "draft a scene", "draft a passage", "write a scene", "write a passage",
+        "creative addition", "story addition",
+    )
+    return any(marker in lower for marker in markers)
+
+
 class QuillInterfaceController:
     """UI-neutral Quill controller used by the Streamlit renderer and tests."""
 
@@ -555,6 +573,20 @@ class QuillInterfaceController:
                 source=route["source"],
                 next_action="",
             )
+
+        # Natural creative collaboration: when the writer asks for story prose,
+        # return the prose itself rather than exposing WBS architecture fields.
+        # State-changing rewrite requests are already intercepted above by route_action.
+        if _is_quill_creative_writing_request(clean_question):
+            creative_text = _quill_contextual_ai_answer(context_state, clean_question)
+            if creative_text:
+                return QuillUIPayload(
+                    text=creative_text,
+                    stage=str(context_state.get("wbs_current_stage_name", "Current Project")),
+                    severity="info",
+                    source="collaboration",
+                    next_action="",
+                )
 
         # Project-aware Quill intelligence handles both Program Coach and
         # Creative Collaboration questions before falling back to the runtime bridge.

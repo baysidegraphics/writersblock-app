@@ -513,6 +513,11 @@ CORE RULES:
 - Answer general writing, publishing, terminology, research, and outside-world questions normally.
 - Do not claim you changed WritersBlock state, switched projects, navigated screens, rewrote text, or applied a workaround unless the application explicitly did so.
 - Be concise and practical.
+- When the writer asks for a creative addition, intro, scene, passage, or other story text, answer with the requested STORY PROSE itself.
+- Do NOT expose WritersBlock planning labels or internal architecture unless the writer explicitly asks for structure or architecture.
+- For creative prose requests, do not output labels such as "Plot Architecture Beat", "[BEAT]", "[SCENE TITLE]", "[CORE OBJECTIVE]", "[SCENE DETAILS & CONFLICT]", or "[STYLE & SYNTAX DIRECTIVE]".
+- Do not begin a creative answer with workflow commentary such as "You're looking to..." or "This belongs in...". Lead with the requested writing.
+- Outside Step 7 you may propose or draft text for the writer to review, but you must not claim that it has been applied to the manuscript.
 
 CURRENT PROJECT
 Title: {ref.get("title") or "(untitled)"}
