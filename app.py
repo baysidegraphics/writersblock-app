@@ -7897,10 +7897,43 @@ elif st.session_state.project_stage == "Rewrite Engine":
                     with st.spinner("Running script rewrite..."):
                         try:
 
+                            effective_custom_rewrite_instruction = custom_rewrite_instruction.strip()
+
+                            # STEP 7 ONLY — natural-language Quill handoff.
+                            # Example: "Use the modified Quill intro in the rewrite."
+                            # Quill may discuss/recommend changes anywhere, but manuscript
+                            # changes remain controlled here in Script Rewrite.
+                            if "quill" in effective_custom_rewrite_instruction.lower():
+                                quill_creative_suggestion = str(
+                                    st.session_state.get(
+                                        "_wbs_quill_last_creative_suggestion", ""
+                                    )
+                                    or ""
+                                ).strip()
+
+                                if not quill_creative_suggestion:
+                                    st.warning(
+                                        "No recent Quill creative revision is available in this session. "
+                                        "Ask Quill for the revision first, then return to Step 7 and run the rewrite."
+                                    )
+                                    st.stop()
+
+                                effective_custom_rewrite_instruction = (
+                                    effective_custom_rewrite_instruction
+                                    + "\n\nQUILL CREATIVE SUGGESTION REFERENCED BY THE WRITER:\n"
+                                    + quill_creative_suggestion
+                                    + "\n\nApply that Quill material only within the selected Script Rewrite Location. "
+                                    "Preserve all other scenes/beats and the balance of the existing manuscript."
+                                )
+
                             rewrite_instruction_packet = (
                                 get_rewrite_dialogue_instruction(rewrite_dialogue_choice)
                                 + "\n\nADDITIONAL CREATOR REWRITE DIRECTION:\n"
-                                + (custom_rewrite_instruction.strip() if custom_rewrite_instruction.strip() else "No additional rewrite direction provided.")
+                                + (
+                                    effective_custom_rewrite_instruction
+                                    if effective_custom_rewrite_instruction
+                                    else "No additional rewrite direction provided."
+                                )
                             )
 
                             if create_bridge_adapter is None:
