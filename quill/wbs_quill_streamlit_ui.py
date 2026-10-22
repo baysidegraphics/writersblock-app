@@ -79,7 +79,7 @@ except ImportError:
     )
 
 
-QUILL_STREAMLIT_UI_VERSION = "33.0-PROJECT-AWARE-SAFE-ROUTING"
+QUILL_STREAMLIT_UI_VERSION = "33.2-STEP7-HANDOFF-TTS-CLEAN"
 QUILL_STATE_PREFIX = "_wbs_quill_"
 PRELUDE_SEEN_KEY = f"{QUILL_STATE_PREFIX}prelude_seen"
 DISPLAY_NAME_KEY = f"{QUILL_STATE_PREFIX}display_name"
@@ -88,6 +88,8 @@ LAST_SOURCE_KEY = f"{QUILL_STATE_PREFIX}last_source"
 QUESTION_KEY = f"{QUILL_STATE_PREFIX}question"
 INTRO_RENDERED_KEY = f"{QUILL_STATE_PREFIX}intro_rendered"
 CHAT_HISTORY_KEY = f"{QUILL_STATE_PREFIX}chat_history"
+LAST_CREATIVE_SUGGESTION_KEY = f"{QUILL_STATE_PREFIX}last_creative_suggestion"
+LAST_CREATIVE_REQUEST_KEY = f"{QUILL_STATE_PREFIX}last_creative_request"
 COLLAPSED_KEY = f"{QUILL_STATE_PREFIX}collapsed"
 VOICE_ENABLED_KEY = f"{QUILL_STATE_PREFIX}voice_enabled_v32"
 VOICE_GENDER_KEY = f"{QUILL_STATE_PREFIX}voice_gender"
@@ -184,6 +186,8 @@ def initialize_quill_state(state: MutableMapping[str, Any]) -> None:
         QUESTION_KEY: "",
         INTRO_RENDERED_KEY: False,
         CHAT_HISTORY_KEY: [],
+        LAST_CREATIVE_SUGGESTION_KEY: "",
+        LAST_CREATIVE_REQUEST_KEY: "",
         COLLAPSED_KEY: False,
         VOICE_ENABLED_KEY: True,
         VOICE_GENDER_KEY: "Male",
@@ -372,14 +376,30 @@ def _spoken_integer(value: int) -> str:
 
 
 def _normalize_quill_tts_text(text: str) -> str:
-    """Convert display-friendly prices into words before Kokoro sees them.
+    """Prepare Quill display text for natural Kokoro speech only.
 
-    Visible text remains unchanged. Examples:
-    $99 -> "ninety nine dollars"
-    $49 -> "forty nine dollars"
-    $1.99 -> "one dollar and ninety nine cents"
+    The visible Quill response is not changed.
     """
+    import html as _html
+
     clean = str(text or "")
+    clean = _html.unescape(clean)
+
+    clean = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", clean)
+    clean = re.sub(r"```(?:[A-Za-z0-9_+-]+)?", " ", clean)
+    clean = clean.replace("```", " ")
+    clean = clean.replace("`", "")
+    clean = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", clean)
+    clean = re.sub(r"(?m)^\s*[-+*]\s+", "", clean)
+    clean = re.sub(r"(?m)^\s*\d+[.)]\s+", "", clean)
+    clean = clean.replace("**", "")
+    clean = clean.replace("__", "")
+    clean = clean.replace("~~", "")
+    clean = clean.replace("*", "")
+    clean = clean.replace("_", " ")
+    clean = re.sub(r"<[^>]+>", " ", clean)
+    clean = clean.replace("\u00a0", " ")
+    clean = re.sub(r"\s+", " ", clean).strip()
 
     def replace_usd(match: re.Match[str]) -> str:
         whole_raw = (match.group(1) or "0").replace(",", "")
@@ -403,7 +423,6 @@ def _normalize_quill_tts_text(text: str) -> str:
 
     clean = re.sub(r"\$(\d[\d,]*)(?:\.(\d{1,2}))?", replace_usd, clean)
     return clean.strip()
-
 
 def _generate_quill_voice(text: str, gender: str) -> bytes:
     """Generate Quill speech locally with Kokoro ONNX; no paid TTS API."""
@@ -733,6 +752,46 @@ def _quill_identity_reply(
         )
 
     return None
+
+def _remember_quill_creative_suggestion(
+    state: MutableMapping[str, Any],
+    user_text: str,
+    payload: QuillUIPayload,
+) -> None:
+    """Remember creative text for an explicit Step 7 handoff.
+
+    This never edits the manuscript. It only preserves Quill's latest substantive
+    creative suggestion so Step 7 can use it when the writer explicitly refers
+    to Quill in the optional rewrite direction.
+    """
+    source = _clean(getattr(payload, "source", "")).lower()
+    response = str(getattr(payload, "text", "") or "").strip()
+    request = _clean(user_text).lower()
+
+    blocked_sources = {
+        "startup_welcome",
+        "identity",
+        "stage_boundary",
+        "project_boundary",
+        "context_recovery",
+        "workaround_guidance",
+        "project_context",
+        "working_object_context",
+    }
+    if source in blocked_sources or len(response) < 60:
+        return
+
+    creative_markers = (
+        "rewrite", "revise", "revision", "rework", "modify", "change",
+        "extend", "extension", "expand", "addition", "add to",
+        "intro", "introduction", "opening", "ending",
+        "improve", "better scene", "better beat",
+    )
+
+    if source == "collaboration" or any(marker in request for marker in creative_markers):
+        state[LAST_CREATIVE_SUGGESTION_KEY] = response
+        state[LAST_CREATIVE_REQUEST_KEY] = _clean(user_text)
+
 
 def _revise_existing_quill_concept(state: MutableMapping[str, Any], request: str) -> Optional[QuillUIPayload]:
     """Route explicit concept feedback to the existing editable concept, not stage advice."""
@@ -1580,6 +1639,7 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                         pass
                 raise
 
+            _remember_quill_creative_suggestion(state, user_text, payload)
             history.append({"role": "assistant", "content": payload.text, "source": payload.source})
             state[CHAT_HISTORY_KEY] = history
             state[LAST_RESPONSE_KEY] = payload.text
@@ -1598,6 +1658,8 @@ __all__ = [
     "DISPLAY_NAME_KEY",
     "INTRO_RENDERED_KEY",
     "LAST_RESPONSE_KEY",
+    "LAST_CREATIVE_SUGGESTION_KEY",
+    "LAST_CREATIVE_REQUEST_KEY",
     "NAME_CONFIRMED_KEY",
     "PRELUDE_SEEN_KEY",
     "SESSION_INITIALIZED_KEY",
