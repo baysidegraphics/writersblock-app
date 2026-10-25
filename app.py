@@ -629,6 +629,8 @@ def save_current_project_session_to_supabase(version_name=None, save_as_new_vers
         st.session_state["_wbs_active_saved_session_row_id"] = str(result.data[0].get("id") or "")
         st.session_state["wbs_locked_format_id"] = snapshot["active_format_id"]
         st.session_state["_wbs_locked_project_id"] = str(project_id)
+        st.session_state["_wbs_loaded_project_id"] = str(project_id)
+        st.session_state["_wbs_loaded_project_title"] = str(snapshot.get("project_title") or "").strip()
         return result
 
     st.error("The project was not confirmed saved. Remain here and retry.")
@@ -728,6 +730,7 @@ def clear_concept_widget_state_for_loaded_project():
         "audiobook_length_selector",
     }
     prefix_keys = (
+        "rename_project_title_",
         "format_field_",
         "tone_style_",
         "starting_source_",
@@ -833,7 +836,9 @@ def get_latest_saved_project_session_for_project(project_id, version_name=None):
             if row_name.lower() == requested_name.lower():
                 return row
 
-    return rows[0]
+    # A different branch is not a valid restoration source for this checkpoint.
+    # Older saves with no explicit branch name are matched above as "Original".
+    return rows[0] if not requested_name else None
 
 
 def load_saved_project_session_to_state(saved_session_row):
@@ -966,6 +971,8 @@ def load_saved_project_session_to_state(saved_session_row):
     st.session_state["_wbs_stage3_unsaved_changes"] = False
     st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(verified)
     st.session_state["_wbs_last_saved_project_id"] = str(load_project_id or "")
+    st.session_state["_wbs_loaded_project_id"] = str(load_project_id or "")
+    st.session_state["_wbs_loaded_project_title"] = str(verified.get("project_title") or "").strip()
     st.session_state["wbs_locked_format_id"] = restored_format_id
     st.session_state["_wbs_locked_project_id"] = str(load_project_id or "")
     st.session_state["_wbs_concept_recovered_for_review"] = recovered_setup
@@ -4305,8 +4312,10 @@ def rename_current_project_everywhere(new_title):
                     .execute()
                 )
 
-        # 4) Update the current live project title.
+        # 4) Update the current live project title and loaded-project identity.
         st.session_state.project_title = clean_title
+        st.session_state["_wbs_loaded_project_id"] = str(project_id)
+        st.session_state["_wbs_loaded_project_title"] = clean_title
 
         # 5) Save the complete current working state immediately for licensed users.
         #    This is a database save only; it makes no Gemini/API generation call.
@@ -5677,11 +5686,20 @@ with st.sidebar.expander("Saved Projects / Versions", expanded=False):
             )
 
             selected_saved_item = saved_lookup.get(selected_saved_label)
+            if selected_saved_item:
+                chosen_project_id = str((selected_saved_item.get("row") or {}).get("project_id") or "")
+                selected_title = str(selected_saved_label).split(" — V-", 1)[0].strip()
+                live_project_id = str(get_active_project_id() or "")
+                live_title = get_project_title()
+                if (chosen_project_id != live_project_id or (selected_title and selected_title != live_title)):
+                    st.caption("Selected saved item is not the active story. Click **Load Selected Saved Item** to open it.")
 
             if st.button("Load Selected Saved Item", key="sidebar_load_saved_item", use_container_width=True):
                 if selected_saved_item and selected_saved_item["type"] == "project_session":
                     if load_saved_project_session_to_state(selected_saved_item["row"]):
                         st.session_state["_wbs_loaded_saved_session_id"] = str(selected_saved_item["row"].get("id") or "")
+                        st.session_state["_wbs_loaded_project_id"] = str(selected_saved_item["row"].get("project_id") or "")
+                        st.session_state["_wbs_loaded_project_title"] = get_project_title()
                         st.session_state.pop("_wbs_stage3_clean_editor", None)
                         st.session_state.pop("_wbs_stage3_clean_source", None)
                         st.success("Saved project loaded.")
@@ -5699,20 +5717,41 @@ with st.sidebar.expander("Saved Projects / Versions", expanded=False):
                         selected_project_id,
                         version_name=branch_name,
                     )
-                    if saved_project_state:
-                        load_saved_project_session_to_state(saved_project_state)
+                    if not saved_project_state:
+                        st.error(
+                            "Cannot safely load this manuscript version: its matching "
+                            "saved project session was not found. The current project "
+                            "has NOT been replaced or mixed with another story."
+                        )
+                        st.stop()
+                    # Validate the selected record and title BEFORE applying any
+                    # saved state. A previous project must survive a failed load.
+                    loaded_project_title = str(
+                        get_project_title_from_project_id(selected_project_id)
+                        or selected_version.get("project_title")
+                        or ""
+                    ).strip()
+                    if not selected_project_id or not loaded_project_title:
+                        st.error("The selected manuscript has no valid project identity. Load cancelled.")
+                        st.stop()
+                    if str(saved_project_state.get("project_id") or "") != str(selected_project_id):
+                        st.error("The saved session belongs to a different project. Load cancelled.")
+                        st.stop()
+                    if not load_saved_project_session_to_state(saved_project_state):
+                        st.error("The manuscript was not loaded because its project session failed validation.")
+                        st.stop()
+                    if str(st.session_state.get("current_project_id") or "") != str(selected_project_id):
+                        st.error("Project ID mismatch. The manuscript was not applied.")
+                        st.stop()
 
+                    # A checkpoint title is bound to its parent project, never to
+                    # the previously open project or a stale input widget.
                     st.session_state.current_project_id = selected_project_id
                     st.session_state.project_version_name = branch_name
-
-                    loaded_project_title = str(
-                        selected_version.get("project_title")
-                        or get_project_title_from_project_id(selected_version.get("project_id"))
-                        or get_project_title()
-                        or "Untitled Project"
-                    ).strip()
-
                     st.session_state.project_title = loaded_project_title
+                    st.session_state["_wbs_loaded_project_id"] = str(selected_project_id)
+                    st.session_state["_wbs_loaded_project_title"] = loaded_project_title
+                    st.session_state["_wbs_loaded_saved_session_id"] = str(saved_project_state.get("id") or "")
                     st.session_state.current_draft_output = str(selected_version.get("manuscript_content") or "")
                     st.session_state.manuscript_version = int(selected_version.get("version_number") or 0)
 
@@ -5817,6 +5856,20 @@ def wbs_request_stage_change(destination, export_view=None):
     current_export = bool(st.session_state.get("export_view", False))
     target_export = current_export if export_view is None else bool(export_view)
     if current == destination and (destination != "Isolation Guardrail" or current_export == target_export):
+        return
+    # Stop cross-project leakage before stage 2/3/4 displays cached story text.
+    anchor_id = str(st.session_state.get("_wbs_loaded_project_id") or "")
+    anchor_title = str(st.session_state.get("_wbs_loaded_project_title") or "").strip()
+    active_id = str(get_active_project_id() or "")
+    active_title = get_project_title()
+    if anchor_id and anchor_id != active_id:
+        st.error("Project identity mismatch. Reload the intended saved project; no work was saved.")
+        return
+    if anchor_id and anchor_title and current == "Intake" and destination != "Intake" and active_title != anchor_title:
+        st.error(
+            f'Project title changed from "{anchor_title}" to "{active_title}". '
+            "Save the revised project or confirm the rename before moving to another stage."
+        )
         return
     st.session_state["wbs_pending_stage_change"] = {
         "target": destination, "export_view": target_export,
@@ -6059,6 +6112,9 @@ if st.sidebar.button("⚠️ Start New Project", key="global_reset", use_contain
     st.session_state.pop("concept_existing_draft_upload", None)
     st.session_state.pop("wbs_locked_format_id", None)
     st.session_state.pop("_wbs_locked_project_id", None)
+    st.session_state.pop("_wbs_loaded_project_id", None)
+    st.session_state.pop("_wbs_loaded_project_title", None)
+    st.session_state.pop("_wbs_loaded_saved_session_id", None)
     st.session_state.pop("_wbs_draft_scope_id", None)
     st.session_state.active_format_id = "novel_prose_novella"
     st.session_state.format_type = "Novel / Prose"
@@ -9272,6 +9328,9 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             wbs_clear_new_project_ui_state()
             st.session_state.project_title = ""
             st.session_state.current_project_id = None
+            for _key in ("_wbs_loaded_project_id", "_wbs_loaded_project_title", "_wbs_loaded_saved_session_id",
+                         "wbs_locked_format_id", "_wbs_locked_project_id"):
+                st.session_state.pop(_key, None)
             st.session_state.project_version_name = "Original"
             st.session_state.project_stage = "Intake"
             st.session_state.project_scope = "Standalone Book"
