@@ -6218,9 +6218,11 @@ if st.session_state.project_stage == "Intake":
         if current_format_id not in WBS_FORMAT_IDS:
             current_format_id = "novel_prose_novella"
 
-        # Synchronize the displayed format BEFORE constructing the keyed widget.
-        # Loading any saved project must never reinterpret it as the last-used format.
-        if st.session_state.get("wbs_format_template_selector") != current_format_id:
+        # Initialize the dropdown only when the widget has no saved value.
+        # Streamlit updates its keyed value BEFORE rerunning the script when a writer
+        # selects another format. Resetting it on every rerun silently undoes the click.
+        # Saved-project loading explicitly restores this key from its validated format.
+        if "wbs_format_template_selector" not in st.session_state:
             st.session_state["wbs_format_template_selector"] = current_format_id
 
         _format_control_col, _format_spacer_col = st.columns([1.6, 1.25], gap="small")
