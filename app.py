@@ -5697,6 +5697,7 @@ with st.sidebar.expander("Saved Projects / Versions", expanded=False):
             if st.button("Load Selected Saved Item", key="sidebar_load_saved_item", use_container_width=True):
                 if selected_saved_item and selected_saved_item["type"] == "project_session":
                     if load_saved_project_session_to_state(selected_saved_item["row"]):
+                        st.session_state.pop("_wbs_loaded_manuscript_version_id", None)
                         st.session_state["_wbs_loaded_saved_session_id"] = str(selected_saved_item["row"].get("id") or "")
                         st.session_state["_wbs_loaded_project_id"] = str(selected_saved_item["row"].get("project_id") or "")
                         st.session_state["_wbs_loaded_project_title"] = get_project_title()
@@ -5752,6 +5753,9 @@ with st.sidebar.expander("Saved Projects / Versions", expanded=False):
                     st.session_state["_wbs_loaded_project_id"] = str(selected_project_id)
                     st.session_state["_wbs_loaded_project_title"] = loaded_project_title
                     st.session_state["_wbs_loaded_saved_session_id"] = str(saved_project_state.get("id") or "")
+                    # This checkpoint ID gives stage navigation a read-only,
+                    # user-scoped way to verify project provenance after a rerun.
+                    st.session_state["_wbs_loaded_manuscript_version_id"] = str(selected_version.get("id") or "")
                     st.session_state.current_draft_output = str(selected_version.get("manuscript_content") or "")
                     st.session_state.manuscript_version = int(selected_version.get("version_number") or 0)
 
@@ -5847,6 +5851,72 @@ def wbs_stage_title(stage, export_view=False):
         return "8. Final Output" if export_view else "5. Script Lock"
     return _WBS_STAGE_TITLES.get(stage, str(stage))
 
+def wbs_verify_navigation_project_identity():
+    """Read-only reconciliation of a stale active ID for a loaded checkpoint.
+
+    The loaded saved-version record, saved-session record, user, format and
+    manuscript content must all agree before restoring an active project ID.
+    Never auto-save, auto-rename, or substitute one project's content.
+    """
+    state = st.session_state
+    expected_id = str(state.get("_wbs_loaded_project_id") or "")
+    active_id = str(get_active_project_id() or "")
+    if not expected_id or active_id == expected_id:
+        return True
+
+    # Absence of a checkpoint identity must NOT cause us to guess based on title.
+    version_id = str(state.get("_wbs_loaded_manuscript_version_id") or "")
+    saved_session_id = str(state.get("_wbs_loaded_saved_session_id") or "")
+    user_id = str(get_current_user_id() or "")
+    expected_title = str(state.get("_wbs_loaded_project_title") or "").strip()
+    displayed_title = get_project_title()
+    source_text = str(state.get("saved_version_source_text") or "")
+    if not (version_id and saved_session_id and user_id and expected_title
+            and displayed_title == expected_title and source_text):
+        return False
+    try:
+        version_result = (
+            supabase.table("writersblock_manuscript_versions")
+            .select("id,project_id,manuscript_content")
+            .eq("id", version_id).eq("user_id", user_id).limit(1).execute()
+        )
+        saved_result = (
+            supabase.table("writersblock_project_drafts")
+            .select("id,project_id,draft_type,draft_content")
+            .eq("id", saved_session_id).eq("user_id", user_id).limit(1).execute()
+        )
+        versions = getattr(version_result, "data", None) or []
+        sessions = getattr(saved_result, "data", None) or []
+        if len(versions) != 1 or len(sessions) != 1:
+            return False
+        version, session = versions[0], sessions[0]
+        if (str(version.get("project_id") or "") != expected_id
+                or str(session.get("project_id") or "") != expected_id
+                or session.get("draft_type") != "project_session"
+                or str(version.get("manuscript_content") or "").strip() != source_text.strip()):
+            return False
+        snapshot = json.loads(session.get("draft_content") or "{}")
+        if not isinstance(snapshot, dict):
+            return False
+        # Reject any persisted session which is itself tagged with another ID.
+        if str(snapshot.get("current_project_id") or expected_id) != expected_id:
+            return False
+        saved_format = str(snapshot.get("active_format_id") or "")
+        if saved_format and saved_format != str(state.get("active_format_id") or ""):
+            return False
+        # Parent title must agree with the loaded screen title.
+        if get_project_title_from_project_id(expected_id).strip() != expected_title:
+            return False
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False
+    except Exception:
+        # Database/network failures cannot authorize identity repair.
+        return False
+    # All verification above was read-only. This repairs only an in-memory ID.
+    state["current_project_id"] = expected_id
+    return True
+
+
 def wbs_request_stage_change(destination, export_view=None):
     """Go directly to the requested writing stage; never display a second save gate.
 
@@ -5863,8 +5933,13 @@ def wbs_request_stage_change(destination, export_view=None):
     active_id = str(get_active_project_id() or "")
     active_title = get_project_title()
     if anchor_id and anchor_id != active_id:
-        st.error("Project identity mismatch. Reload the intended saved project; no work was saved.")
-        return
+        if not wbs_verify_navigation_project_identity():
+            st.error(
+                "Project identity needs verification. Navigation was blocked; "
+                "no work was saved or overwritten. Reload the exact saved item."
+            )
+            return
+        active_id = str(get_active_project_id() or "")
     if anchor_id and anchor_title and current == "Intake" and destination != "Intake" and active_title != anchor_title:
         st.error(
             f'Project title changed from "{anchor_title}" to "{active_title}". '
@@ -6115,6 +6190,7 @@ if st.sidebar.button("⚠️ Start New Project", key="global_reset", use_contain
     st.session_state.pop("_wbs_loaded_project_id", None)
     st.session_state.pop("_wbs_loaded_project_title", None)
     st.session_state.pop("_wbs_loaded_saved_session_id", None)
+    st.session_state.pop("_wbs_loaded_manuscript_version_id", None)
     st.session_state.pop("_wbs_draft_scope_id", None)
     st.session_state.active_format_id = "novel_prose_novella"
     st.session_state.format_type = "Novel / Prose"
@@ -9329,7 +9405,7 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             st.session_state.project_title = ""
             st.session_state.current_project_id = None
             for _key in ("_wbs_loaded_project_id", "_wbs_loaded_project_title", "_wbs_loaded_saved_session_id",
-                         "wbs_locked_format_id", "_wbs_locked_project_id"):
+                         "_wbs_loaded_manuscript_version_id", "wbs_locked_format_id", "_wbs_locked_project_id"):
                 st.session_state.pop(_key, None)
             st.session_state.project_version_name = "Original"
             st.session_state.project_stage = "Intake"
