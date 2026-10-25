@@ -1,5 +1,5 @@
 """
-Central registry for all nine WritersBlock format templates.
+Central registry for all ten WritersBlock format templates.
 
 The application should store the selected `format_id` in project/session state.
 That same value controls both the center-page template and Quill's format rules.
@@ -14,6 +14,7 @@ from templates.template_audiobook import TEMPLATE as AUDIOBOOK_TEMPLATE
 from templates.template_childrens_picture_book import TEMPLATE as CHILDRENS_PICTURE_BOOK_TEMPLATE
 from templates.template_full_novel_blueprint import TEMPLATE as FULL_NOVEL_BLUEPRINT_TEMPLATE
 from templates.template_podcast_script import TEMPLATE as PODCAST_SCRIPT_TEMPLATE
+from templates.template_standard_manuscript import TEMPLATE as STANDARD_MANUSCRIPT_TEMPLATE
 
 from format_quill.quill_short_story import QUILL_INSTRUCTIONS as SHORT_STORY_QUILL
 from format_quill.quill_novel_prose_novella import QUILL_INSTRUCTIONS as NOVEL_PROSE_NOVELLA_QUILL
@@ -24,6 +25,7 @@ from format_quill.quill_audiobook import QUILL_INSTRUCTIONS as AUDIOBOOK_QUILL
 from format_quill.quill_childrens_picture_book import QUILL_INSTRUCTIONS as CHILDRENS_PICTURE_BOOK_QUILL
 from format_quill.quill_full_novel_blueprint import QUILL_INSTRUCTIONS as FULL_NOVEL_BLUEPRINT_QUILL
 from format_quill.quill_podcast_script import QUILL_INSTRUCTIONS as PODCAST_SCRIPT_QUILL
+from format_quill.quill_standard_manuscript import QUILL_INSTRUCTIONS as STANDARD_MANUSCRIPT_QUILL
 
 FORMAT_REGISTRY = {
     'short_story': (SHORT_STORY_TEMPLATE, SHORT_STORY_QUILL),
@@ -35,6 +37,7 @@ FORMAT_REGISTRY = {
     'childrens_picture_book': (CHILDRENS_PICTURE_BOOK_TEMPLATE, CHILDRENS_PICTURE_BOOK_QUILL),
     'full_novel_blueprint': (FULL_NOVEL_BLUEPRINT_TEMPLATE, FULL_NOVEL_BLUEPRINT_QUILL),
     'podcast_script': (PODCAST_SCRIPT_TEMPLATE, PODCAST_SCRIPT_QUILL),
+    'standard_manuscript': (STANDARD_MANUSCRIPT_TEMPLATE, STANDARD_MANUSCRIPT_QUILL),
 }
 
 FORMAT_OPTIONS = [
@@ -47,6 +50,7 @@ FORMAT_OPTIONS = [
     ('childrens_picture_book', 'Children’s Picture Book'),
     ('full_novel_blueprint', 'Full Novel Blueprint'),
     ('podcast_script', 'Podcast Script'),
+    ('standard_manuscript', 'Standard Manuscript'),
 ]
 
 def get_template(format_id: str):
