@@ -4667,6 +4667,111 @@ def render_confirmed_project_rename(stage_key):
                 st.rerun()
 
 
+def get_loaded_project_series_versions(project_id):
+    """Saved versions ONLY for the loaded project, with exact source IDs/word totals."""
+    active_id = str(get_active_project_id() or "")
+    if not project_id or str(project_id) != active_id:
+        return []
+    result = []
+    for item in get_saved_projects_versions_dropdown_items():
+        row = item.get("row") or {}
+        if str(row.get("project_id") or "") != active_id:
+            continue
+        kind = item.get("type")
+        if kind == "manuscript_version":
+            saved_text = str(row.get("manuscript_content") or "")
+        elif kind == "project_session":
+            try:
+                snapshot = json.loads(row.get("draft_content") or "{}")
+            except (ValueError, TypeError):
+                snapshot = {}
+            saved_text = get_best_saved_manuscript_source(snapshot) if isinstance(snapshot, dict) and snapshot else ""
+            if not saved_text and isinstance(snapshot, dict):
+                saved_text = str(snapshot.get("story_seed") or "")
+        else:
+            continue
+        key = f"{kind}:{row.get('id')}"
+        result.append({"key": key, "type": kind, "id": str(row.get("id") or ""),
+                       "label": str(item.get("label") or ""),
+                       "words": count_words(saved_text)})
+    return result
+
+
+def render_save_open_project_to_series():
+    """Explicit series/reference selection, scoped to the loaded project ID."""
+    project_id = str(get_active_project_id() or "")
+    if not project_id or not get_current_user_id() or st.session_state.get("demo_mode"):
+        return
+    confirmed_title = get_project_title_from_project_id(project_id)
+    if not confirmed_title or confirmed_title != get_project_title():
+        st.caption("Load the saved project before changing its series.")
+        return
+    membership = get_series_metadata_by_project().get(project_id) or {}
+    current_series = str(membership.get("series_name") or "")
+    current_source = f"{membership.get('series_source_type') or ''}:{membership.get('series_source_id') or ''}"
+    versions = get_loaded_project_series_versions(project_id)
+    if not versions:
+        st.caption("No saved versions of this project are available for a series reference.")
+        return
+    ui_prefix = f"wbs_series_save_{project_id}"
+    with st.expander("Save Project to Series", expanded=False):
+        st.caption("Only the open project's saved versions are eligible. Your manuscript and version history are not changed.")
+        known_series = get_existing_series_names()
+        series_options = list(known_series) + ["Create New Series", "Standalone (Remove series link)"]
+        selection = st.selectbox(
+            "Select Series:", series_options,
+            index=(known_series.index(current_series) if current_series in known_series else 0),
+            key=f"{ui_prefix}_series")
+        if selection == "Create New Series":
+            destination = st.text_input("New Series Name:", key=f"{ui_prefix}_new", max_chars=80).strip()
+        elif selection == "Standalone (Remove series link)":
+            destination = ""
+        else:
+            destination = selection
+        labels = [f"{v['label']} — {v['words']:,} words" for v in versions]
+        loaded_id = str(st.session_state.get("_wbs_loaded_saved_session_id") or "")
+        loaded_manuscript_id = str(st.session_state.get("_wbs_loaded_manuscript_version_id") or "")
+        loaded_key = (f"manuscript_version:{loaded_manuscript_id}" if loaded_manuscript_id
+                      else f"project_session:{loaded_id}")
+        default_key = (loaded_key if loaded_key in [v["key"] for v in versions]
+                       else current_source)
+        default_index = next((idx for idx,v in enumerate(versions) if v["key"] == default_key), 0)
+        selected_idx = st.selectbox(
+            "Saved Version to Use in Series:", list(range(len(versions))),
+            format_func=lambda idx: labels[idx], index=default_index,
+            key=f"{ui_prefix}_revision_{loaded_manuscript_id or loaded_id or 'unspecified'}")
+        picked = versions[selected_idx]
+        st.caption(f"Selected saved version: {picked['words']:,} words. This does not load or rewrite that version.")
+        # Confirmation is bound to this exact project, destination, and version.
+        # Changing either dropdown requires a fresh checkmark.
+        confirmation_token = hashlib.sha256(
+            f"{project_id}:{destination}:{picked['key']}".encode("utf-8")
+        ).hexdigest()[:12]
+        confirm = st.checkbox(
+            "Confirm series and saved version", key=f"{ui_prefix}_confirm_{confirmation_token}", value=False)
+        if st.button("Save Project to Series", key=f"{ui_prefix}_submit",
+                     use_container_width=True, disabled=not confirm or (not destination and selection != "Standalone (Remove series link)")):
+            # Re-verify owner/project and selected revision. No foreign titles/IDs.
+            if str(get_active_project_id() or "") != project_id or get_project_title_from_project_id(project_id) != confirmed_title:
+                st.error("The open project changed; series assignment cancelled.")
+            elif selection == "Standalone (Remove series link)" and not current_series:
+                st.info("This project is already standalone.")
+            else:
+                try:
+                    changed = assign_saved_project_to_series(project_id, destination, picked)
+                except Exception as exc:
+                    st.error(f"Series assignment was not saved: {exc}")
+                else:
+                    if not changed:
+                        st.info("No change to the current series/version assignment.")
+                    else:
+                        st.session_state.project_scope = "Book in a Series" if destination else "Standalone Book"
+                        st.session_state.series_name = destination
+                        st.session_state.series_key = make_series_key(destination)
+                        st.success("Series reference saved. Manuscripts and project versions were not modified.")
+                        st.rerun()
+
+
 def render_project_title_banner(stage_key):
     """
     Prominent Current Project banner plus database-safe rename control.
@@ -4694,6 +4799,7 @@ def render_project_title_banner(stage_key):
             return
 
         render_confirmed_project_rename(stage_key)
+        render_save_open_project_to_series()
 
 
 def make_version_display_label(version):
@@ -4926,8 +5032,8 @@ def save_series_book_order(series_name, ordered_ids):
     return result
 
 
-def assign_saved_project_to_series(project_id, series_name):
-    """Membership only. Does not save or rename the project/manuscript."""
+def assign_saved_project_to_series(project_id, series_name, selected_version=None):
+    """Save series membership and the writer's chosen version, without editing any text."""
     user_id = get_current_user_id()
     project_id = str(project_id or "")
     name = str(series_name or "").strip()
@@ -4938,7 +5044,54 @@ def assign_saved_project_to_series(project_id, series_name):
         raise ValueError("The saved project was not found in your account.")
     prior = get_series_metadata_by_project().get(project_id) or {}
     old_name = str(prior.get("series_name") or "").strip()
-    if name and make_series_key(name) == str(prior.get("series_key") or ""):
+
+    # Verify the exact selected revision belongs to the logged-in user's LOADED
+    # project. Never accept only a title or an unverified browser widget value.
+    selected_info = {}
+    if name:
+        if not isinstance(selected_version, dict):
+            raise ValueError("Select and confirm a saved version of the open project.")
+        selected_type = str(selected_version.get("type") or "")
+        selected_id = str(selected_version.get("id") or "")
+        if selected_type == "manuscript_version":
+            rows = (supabase.table("writersblock_manuscript_versions")
+                    .select("id, project_id, user_id, manuscript_content")
+                    .eq("id", selected_id).eq("project_id", project_id)
+                    .eq("user_id", user_id).limit(1).execute()).data or []
+            source_text = str(rows[0].get("manuscript_content") or "") if rows else ""
+        elif selected_type == "project_session":
+            rows = (supabase.table("writersblock_project_drafts")
+                    .select("id, project_id, user_id, draft_type, draft_content")
+                    .eq("id", selected_id).eq("project_id", project_id)
+                    .eq("user_id", user_id).eq("draft_type", "project_session")
+                    .limit(1).execute()).data or []
+            try:
+                snapshot = json.loads(rows[0].get("draft_content") or "{}") if rows else {}
+            except (TypeError, ValueError):
+                snapshot = {}
+            source_text = get_best_saved_manuscript_source(snapshot) if isinstance(snapshot, dict) and snapshot else ""
+            if not source_text and isinstance(snapshot, dict):
+                source_text = str(snapshot.get("story_seed") or "")
+        else:
+            raise ValueError("Unrecognized saved version type; nothing was assigned.")
+        if not rows:
+            raise ValueError("This version does not belong to the open project. No series link was changed.")
+        selected_info = {
+            "series_source_type": selected_type,
+            "series_source_id": selected_id,
+            "series_source_words": count_words(source_text),
+            "series_source_label": str(selected_version.get("label") or "")[:180],
+        }
+
+    same_series = (make_series_key(name) == str(prior.get("series_key") or ""))
+    same_source = bool(selected_info) and all(
+        str(prior.get(key) or "") == str(value or "")
+        for key, value in selected_info.items()
+        if key in ("series_source_type", "series_source_id")
+    )
+    if name and same_series and same_source:
+        return False
+    if not name and not old_name:
         return False
     old_data = {"series_name": name, "series_key": make_series_key(name) if name else "",
                 "series_book_number": 0 if not name else len(ordered_series_members(name)) + 1,
@@ -4949,6 +5102,10 @@ def assign_saved_project_to_series(project_id, series_name):
                 "previous_series_name": old_name,
                 "confirmed_manual_series_assignment": True,
                 "saved_at": datetime.now(timezone.utc).isoformat()}
+    old_data.update(selected_info)
+    # A version change must not shuffle a project to a different book number.
+    if same_series and old_name:
+        old_data["series_book_number"] = int(prior.get("series_book_number") or 1)
     result = (supabase.table("writersblock_project_drafts")
               .insert({"project_id": project_id, "user_id": user_id,
                        "draft_type": "series_metadata", "draft_title": "Series Membership",
@@ -5159,6 +5316,12 @@ def save_series_metadata_for_project(project_id=None):
         "project_title": get_project_title_for_display(),
         "saved_at": datetime.now(timezone.utc).isoformat(),
     }
+    previous = get_series_metadata_by_project().get(str(project_id)) or {}
+    if make_series_key(previous.get("series_name")) == series_key:
+        for source_field in ("series_source_type", "series_source_id",
+                             "series_source_words", "series_source_label"):
+            if source_field in previous:
+                metadata[source_field] = previous[source_field]
 
     return (
         supabase.table("writersblock_project_drafts")
@@ -5400,6 +5563,46 @@ def get_series_reference_candidates():
             "version_number": int(saved_row.get("version_number") or snapshot.get("manuscript_version") or 1),
         })
         seen_session_projects.add(project_id)
+
+    # The author's chosen saved version is the ONLY continuity source for a
+    # pinned book; never silently substitute the most recent (possibly shorter)
+    # revision. Older series members without a selection retain legacy behavior.
+    for _p_id, _meta in metadata_by_project.items():
+        _kind = str(_meta.get("series_source_type") or "")
+        _v_id = str(_meta.get("series_source_id") or "")
+        if not _kind or not _v_id or str(_p_id) == str(current_project_id or ""):
+            continue
+        _matched = None
+        if _kind == "manuscript_version":
+            _matched = next((r for r in manuscript_versions
+                             if str(r.get("id") or "") == _v_id and str(r.get("project_id") or "") == str(_p_id)), None)
+            _content = str((_matched or {}).get("manuscript_content") or "")
+        elif _kind == "project_session":
+            _matched = next((r for r in saved_sessions
+                             if str(r.get("id") or "") == _v_id and str(r.get("project_id") or "") == str(_p_id)), None)
+            try:
+                _snapshot = json.loads((_matched or {}).get("draft_content") or "{}")
+            except (ValueError, TypeError):
+                _snapshot = {}
+            _content = get_best_saved_manuscript_source(_snapshot) if isinstance(_snapshot, dict) and _snapshot else ""
+            if not _content and isinstance(_snapshot, dict):
+                _content = str(_snapshot.get("story_seed") or "")
+        else:
+            continue
+        # If selected ID is missing, omit the reference instead of selecting
+        # an unrelated version with a similar title.
+        candidates = [c for c in candidates if str(c.get("project_id") or "") != str(_p_id)]
+        if _matched and _content.strip():
+            _title = str(get_project_title_from_project_id(_p_id) or _meta.get("project_title") or "Untitled Project")
+            candidates.append({
+                "id": f"{_kind}:{_v_id}", "project_id": _p_id,
+                "label": f"{_meta.get('series_name') or ''} — {_title} — confirmed saved version — {count_words(_content):,} words",
+                "title": _title, "book_number": int(_meta.get("series_book_number") or 0),
+                "series_name": str(_meta.get("series_name") or ""),
+                "series_key": str(_meta.get("series_key") or ""),
+                "text": _content, "created_at": str(_matched.get("created_at") or ""),
+                "version_number": int(_matched.get("version_number") or 1),
+            })
 
     candidates.sort(
         key=lambda item: (
@@ -6784,6 +6987,27 @@ with st.sidebar.container(border=True):
             st.session_state.get("project_version_name") or "Original"
         ) or "Original"
         st.caption(f"Version: {current_version_name}")
+        _loaded_id = str(st.session_state.get("_wbs_loaded_saved_session_id") or "")
+        _manuscript_id = str(st.session_state.get("_wbs_loaded_manuscript_version_id") or "")
+        _loaded_words = None
+        for _item in _saved_status_items:
+            _row = _item.get("row") or {}
+            if str(_row.get("project_id") or "") != str(get_active_project_id() or ""):
+                continue
+            if _item.get("type") == "manuscript_version" and _manuscript_id and str(_row.get("id") or "") == _manuscript_id:
+                _loaded_words = count_words(_row.get("manuscript_content") or "")
+                break
+            if _item.get("type") == "project_session" and _loaded_id and str(_row.get("id") or "") == _loaded_id:
+                try:
+                    _snap = json.loads(_row.get("draft_content") or "{}")
+                except (ValueError, TypeError):
+                    _snap = {}
+                _text = get_best_saved_manuscript_source(_snap) if isinstance(_snap, dict) and _snap else ""
+                if not _text and isinstance(_snap, dict):
+                    _text = str(_snap.get("story_seed") or "")
+                _loaded_words = count_words(_text)
+        if _loaded_words is not None:
+            st.caption(f"Loaded Version Word Total: {_loaded_words:,}")
         if st.session_state.get("project_scope") == "Book in a Series":
             st.caption(
                 f"{st.session_state.get('series_name') or 'Unnamed Series'} — "
@@ -7035,6 +7259,7 @@ if st.session_state.project_stage == "Intake":
                 unsafe_allow_html=True,
             )
             render_confirmed_project_rename("step_1_concept")
+            render_save_open_project_to_series()
         else:
             st.session_state.project_title = st.text_input(
                 _project_title_label,
@@ -7069,9 +7294,7 @@ if st.session_state.project_stage == "Intake":
             st.session_state.pop("wbs_simple_series_new_name", None)
 
         project_scope_labels = concept_ui.get("scope_labels") or {}
-        scope_col, action_col = st.columns([3.2, 2], gap="small")
-        with scope_col:
-            chosen_scope = st.radio(
+        chosen_scope = st.radio(
                 "Project Type:", project_scope_options, horizontal=True,
                 key="project_scope_selector",
                 format_func=lambda v: project_scope_labels.get(v, v),
@@ -7117,75 +7340,9 @@ if st.session_state.project_stage == "Intake":
                 else:
                     st.caption("Enter a series name before saving the project.")
             else:
-                already_exists = (bool(selected_series) and
-                                  make_series_key(selected_series) ==
-                                  make_series_key(registered_series) and bool(registered_series))
-                # Checkbox is next to the 'In a Series' choice. Changing a
-                # dropdown alone must never mutate any saved project.
-                with action_col:
-                    if already_exists:
-                        st.caption("Project already exists in this series.")
-                    else:
-                        st.checkbox(
-                            "Add open project to selected series",
-                            key="wbs_confirm_series_link",
-                            help="Only updates this project's series membership. Manuscripts and versions are unchanged.")
-                if already_exists:
-                    st.session_state["wbs_confirm_series_link"] = False
-                elif selected_series:
-                    if st.button(
-                        "Confirm Series Assignment",
-                        key="wbs_confirm_simple_series_add",
-                        disabled=not st.session_state.get("wbs_confirm_series_link"),
-                    ):
-                        # Verify that the project/title and selected series are
-                        # still the same as the writer intended before writing.
-                        active_id = str(get_active_project_id() or "")
-                        verified_title = get_project_title_from_project_id(active_id)
-                        if (active_id != current_project_id or not verified_title or
-                                verified_title != get_project_title()):
-                            st.error("Project identity changed. Nothing was assigned.")
-                        else:
-                            try:
-                                changed = assign_saved_project_to_series(active_id, selected_series)
-                            except Exception as exc:
-                                st.error(f"Series assignment was not completed: {exc}")
-                            else:
-                                if not changed:
-                                    st.info("Project already exists in this series.")
-                                else:
-                                    st.session_state.project_scope = "Book in a Series"
-                                    st.session_state.series_name = selected_series
-                                    st.session_state.series_key = make_series_key(selected_series)
-                                    st.success(f"Project assigned to {selected_series}. No story version was created.")
-                                    st.rerun()
-                else:
-                    st.caption("Select or enter a series name to assign this project.")
-        elif current_project_id and registered_series:
-            # Returning to standalone is also a deliberate metadata-only
-            # change; a radio click alone never silently removes a series link.
-            with action_col:
-                st.checkbox("Confirm removal from the current series",
-                            key="wbs_confirm_series_removal")
-            if st.button("Confirm Standalone Project",
-                         key="wbs_confirm_simple_series_remove",
-                         disabled=not st.session_state.get("wbs_confirm_series_removal")):
-                active_id = str(get_active_project_id() or "")
-                verified_title = get_project_title_from_project_id(active_id)
-                if active_id != current_project_id or not verified_title or verified_title != get_project_title():
-                    st.error("Project identity changed. No series link was removed.")
-                else:
-                    try:
-                        changed = assign_saved_project_to_series(active_id, "")
-                    except Exception as exc:
-                        st.error(f"Series removal was not completed: {exc}")
-                    else:
-                        if changed:
-                            st.session_state.project_scope = "Standalone Book"
-                            st.session_state.series_name = ""
-                            st.session_state.series_key = ""
-                            st.success("Project changed to standalone. Saved story versions are unchanged.")
-                            st.rerun()
+                # Saved projects are changed ONLY with the version-aware action
+                # directly below Rename Project, never from an unconfirmed radio.
+                pass
         elif not current_project_id:
             st.session_state.series_name = ""
             st.session_state.series_key = ""
