@@ -5819,6 +5819,126 @@ with st.sidebar.expander(
 
 st.sidebar.markdown("---")
 
+# WBS 2026-10-24: Quill and new-story state must not leak into another project.
+def wbs_clear_new_project_ui_state():
+    """Clear old Quill dialogue and cached concept widgets; keep the login intact."""
+    reset_prefixes = (
+        "wbs_quill_", "quill_", "_wbs_quill_", "format_field_",
+        "starting_source_", "wbs_quill_starting_", "save_as_version_name_",
+    )
+    reset_exact = {
+        "quill_chat_history", "quill_last_response", "quill_conversation",
+        "quill_last_spoken", "quill_message_input", "project_version_name",
+    }
+    for state_key in list(st.session_state.keys()):
+        key_text = str(state_key).lower()
+        if key_text in reset_exact or key_text.startswith(reset_prefixes):
+            st.session_state.pop(state_key, None)
+    st.session_state.format_template_values = {}
+    st.session_state.quill_starting_direction = ""
+    st.session_state.pop("wbs_pending_stage_change", None)
+    st.session_state.pop("_wbs_last_saved_work_signature", None)
+    st.session_state.pop("_wbs_last_saved_project_id", None)
+    st.session_state.pop("_wbs_active_saved_session_row_id", None)
+    st.session_state.pop("_wbs_loaded_saved_session_id", None)
+    st.session_state.pop("_wbs_loaded_quill_concept", None)
+
+if st.sidebar.button("⚠️ Start New Project", key="global_reset", use_container_width=True, type="secondary"):
+    wbs_clear_new_project_ui_state()
+    st.session_state.pop("_wbs_unlocked_saved_stage", None)
+    st.session_state.project_stage = "Intake"
+    st.session_state.project_title = ""
+    st.session_state.project_version_name = "Original"
+    st.session_state.concept_change_areas = []
+    st.session_state.pop("_wbs_loaded_concept_version_baseline", None)
+    st.session_state.project_scope = "Standalone Book"
+    st.session_state.series_key = ""
+    st.session_state.series_name = ""
+    st.session_state.series_book_number = 1
+    st.session_state.series_continuity_mode = "Strict"
+    st.session_state.series_reference_ids = []
+    st.session_state.series_canon_notes = ""
+    st.session_state.series_selection_signature = ""
+    st.session_state.pop("series_reference_selector", None)
+    st.session_state.pop("series_choice_selector", None)
+    st.session_state.pop("series_name_input", None)
+    st.session_state.pop("series_book_number_input", None)
+    st.session_state.pop("series_book_number_auto_signature", None)
+    st.session_state.pop("custom_plot_line_input", None)
+    st.session_state.story_seed = (
+        "An antique shop owner buys a heavy iron safe that cannot be opened, "
+        "only to realize that every night, the ticking sounds coming from inside it get faster."
+    )
+    st.session_state.starting_source_mode = "Story Idea"
+    st.session_state.version_source_mode = "Custom Plot Line"
+    st.session_state.saved_version_source_text = ""
+    st.session_state.saved_version_source_name = ""
+    st.session_state.saved_version_source_word_count = 0
+    st.session_state.imported_source_text = ""
+    st.session_state.imported_source_name = ""
+    st.session_state.imported_source_word_count = 0
+    st.session_state.pop("concept_existing_draft_upload", None)
+    st.session_state.pop("wbs_locked_format_id", None)
+    st.session_state.pop("_wbs_locked_project_id", None)
+    st.session_state.pop("_wbs_loaded_project_id", None)
+    st.session_state.pop("_wbs_loaded_project_title", None)
+    st.session_state.pop("_wbs_loaded_saved_session_id", None)
+    st.session_state.pop("_wbs_loaded_manuscript_version_id", None)
+    st.session_state.pop("_wbs_draft_scope_id", None)
+    st.session_state.active_format_id = "novel_prose_novella"
+    st.session_state.format_type = "Novel / Prose"
+    st.session_state.active_format_template = get_wbs_format_template("novel_prose_novella")
+    st.session_state.quill_format_instructions = get_wbs_quill_instructions("novel_prose_novella")
+    st.session_state.quill_format_name = get_wbs_format_display_name("novel_prose_novella")
+    st.session_state.pop("wbs_format_template_selector", None)
+    st.session_state.dialogue_style = "Story-Driven / Automatic"
+    st.session_state.audiobook_length = "30 Minutes"
+    st.session_state.audiobook_target_word_count = 4000
+    st.session_state.audiobook_production_script = ""
+    st.session_state.audiobook_production_source_signature = ""
+    st.session_state.audiobook_production_cue_level = "Voices + Minimal SFX"
+    st.session_state.audiobook_production_preview_id = 0
+    st.session_state.tone_style = "Gritty Noir Mystery"
+    st.session_state.author_style = ""
+    st.session_state.sandbox_slates = None
+    st.session_state.chosen_option = None
+    st.session_state.chosen_option_text = None
+    st.session_state.plot_outline = None
+    st.session_state.current_draft_output = ""
+    st.session_state.rolling_lore_book = ""
+    st.session_state.completed_beats = []
+    st.session_state.scene_blocks = {}
+    st.session_state.current_processing_beat = 1
+    st.session_state.revision_report = ""
+    st.session_state.rewritten_manuscript = ""
+    st.session_state.manuscript_version = 0
+    st.session_state.current_manuscript_save_status = ""
+    st.session_state.current_manuscript_save_stage = ""
+    st.session_state.current_manuscript_save_version = 0
+    st.session_state.rewrite_applied_message = ""
+    st.session_state.current_project_id = None
+    st.session_state.revision_report = ""
+    st.session_state.export_view = False
+    st.session_state.final_output_format = ""
+    st.session_state.final_output_text = ""
+    st.session_state.final_output_source_signature = ""
+    st.session_state.final_output_preview_id = 0
+    st.session_state.final_output_saved_signature = ""
+    st.session_state.project_integrity_report = ""
+    st.session_state.project_integrity_source_signature = ""
+    st.session_state.project_integrity_status = ""
+    st.session_state.show_saved_version_manager = False
+    st.session_state.project_saved_notice = False
+    st.session_state.picture_book_layout_spreads = []
+    st.session_state.picture_book_layout_source_signature = ""
+    st.session_state.picture_book_layout_preview_id = 0
+    st.session_state.picture_book_page_size = DEFAULT_PICTURE_BOOK_PAGE_SIZE
+    st.session_state.rewrite_preview_id = 0
+    st.session_state.rewrite_target_length = "Keep Current Length"
+    st.rerun()
+
+st.sidebar.markdown("---")
+
 # Video Director is intentionally excluded from the public writing edition.
 with st.sidebar.container(border=True):
     st.markdown("**📊 Project Status**")
@@ -6371,124 +6491,6 @@ elif can_navigate_to_guardrail and can_use_safety:
         wbs_request_stage_change("Isolation Guardrail", export_view=True)
 else:
     st.sidebar.button("🔒 Saved Version Manager", key="sidebar_saved_version_manager_locked", disabled=True, use_container_width=True, type="secondary")
-
-# WBS 2026-10-24: Quill and new-story state must not leak into another project.
-def wbs_clear_new_project_ui_state():
-    """Clear old Quill dialogue and cached concept widgets; keep the login intact."""
-    reset_prefixes = (
-        "wbs_quill_", "quill_", "_wbs_quill_", "format_field_",
-        "starting_source_", "wbs_quill_starting_", "save_as_version_name_",
-    )
-    reset_exact = {
-        "quill_chat_history", "quill_last_response", "quill_conversation",
-        "quill_last_spoken", "quill_message_input", "project_version_name",
-    }
-    for state_key in list(st.session_state.keys()):
-        key_text = str(state_key).lower()
-        if key_text in reset_exact or key_text.startswith(reset_prefixes):
-            st.session_state.pop(state_key, None)
-    st.session_state.format_template_values = {}
-    st.session_state.quill_starting_direction = ""
-    st.session_state.pop("wbs_pending_stage_change", None)
-    st.session_state.pop("_wbs_last_saved_work_signature", None)
-    st.session_state.pop("_wbs_last_saved_project_id", None)
-    st.session_state.pop("_wbs_active_saved_session_row_id", None)
-    st.session_state.pop("_wbs_loaded_saved_session_id", None)
-    st.session_state.pop("_wbs_loaded_quill_concept", None)
-
-if st.sidebar.button("⚠️ Start New Project", key="global_reset", use_container_width=True, type="secondary"):
-    wbs_clear_new_project_ui_state()
-    st.session_state.pop("_wbs_unlocked_saved_stage", None)
-    st.session_state.project_stage = "Intake"
-    st.session_state.project_title = ""
-    st.session_state.project_version_name = "Original"
-    st.session_state.concept_change_areas = []
-    st.session_state.pop("_wbs_loaded_concept_version_baseline", None)
-    st.session_state.project_scope = "Standalone Book"
-    st.session_state.series_key = ""
-    st.session_state.series_name = ""
-    st.session_state.series_book_number = 1
-    st.session_state.series_continuity_mode = "Strict"
-    st.session_state.series_reference_ids = []
-    st.session_state.series_canon_notes = ""
-    st.session_state.series_selection_signature = ""
-    st.session_state.pop("series_reference_selector", None)
-    st.session_state.pop("series_choice_selector", None)
-    st.session_state.pop("series_name_input", None)
-    st.session_state.pop("series_book_number_input", None)
-    st.session_state.pop("series_book_number_auto_signature", None)
-    st.session_state.pop("custom_plot_line_input", None)
-    st.session_state.story_seed = (
-        "An antique shop owner buys a heavy iron safe that cannot be opened, "
-        "only to realize that every night, the ticking sounds coming from inside it get faster."
-    )
-    st.session_state.starting_source_mode = "Story Idea"
-    st.session_state.version_source_mode = "Custom Plot Line"
-    st.session_state.saved_version_source_text = ""
-    st.session_state.saved_version_source_name = ""
-    st.session_state.saved_version_source_word_count = 0
-    st.session_state.imported_source_text = ""
-    st.session_state.imported_source_name = ""
-    st.session_state.imported_source_word_count = 0
-    st.session_state.pop("concept_existing_draft_upload", None)
-    st.session_state.pop("wbs_locked_format_id", None)
-    st.session_state.pop("_wbs_locked_project_id", None)
-    st.session_state.pop("_wbs_loaded_project_id", None)
-    st.session_state.pop("_wbs_loaded_project_title", None)
-    st.session_state.pop("_wbs_loaded_saved_session_id", None)
-    st.session_state.pop("_wbs_loaded_manuscript_version_id", None)
-    st.session_state.pop("_wbs_draft_scope_id", None)
-    st.session_state.active_format_id = "novel_prose_novella"
-    st.session_state.format_type = "Novel / Prose"
-    st.session_state.active_format_template = get_wbs_format_template("novel_prose_novella")
-    st.session_state.quill_format_instructions = get_wbs_quill_instructions("novel_prose_novella")
-    st.session_state.quill_format_name = get_wbs_format_display_name("novel_prose_novella")
-    st.session_state.pop("wbs_format_template_selector", None)
-    st.session_state.dialogue_style = "Story-Driven / Automatic"
-    st.session_state.audiobook_length = "30 Minutes"
-    st.session_state.audiobook_target_word_count = 4000
-    st.session_state.audiobook_production_script = ""
-    st.session_state.audiobook_production_source_signature = ""
-    st.session_state.audiobook_production_cue_level = "Voices + Minimal SFX"
-    st.session_state.audiobook_production_preview_id = 0
-    st.session_state.tone_style = "Gritty Noir Mystery"
-    st.session_state.author_style = ""
-    st.session_state.sandbox_slates = None
-    st.session_state.chosen_option = None
-    st.session_state.chosen_option_text = None
-    st.session_state.plot_outline = None
-    st.session_state.current_draft_output = ""
-    st.session_state.rolling_lore_book = ""
-    st.session_state.completed_beats = []
-    st.session_state.scene_blocks = {}
-    st.session_state.current_processing_beat = 1
-    st.session_state.revision_report = ""
-    st.session_state.rewritten_manuscript = ""
-    st.session_state.manuscript_version = 0
-    st.session_state.current_manuscript_save_status = ""
-    st.session_state.current_manuscript_save_stage = ""
-    st.session_state.current_manuscript_save_version = 0
-    st.session_state.rewrite_applied_message = ""
-    st.session_state.current_project_id = None
-    st.session_state.revision_report = ""
-    st.session_state.export_view = False
-    st.session_state.final_output_format = ""
-    st.session_state.final_output_text = ""
-    st.session_state.final_output_source_signature = ""
-    st.session_state.final_output_preview_id = 0
-    st.session_state.final_output_saved_signature = ""
-    st.session_state.project_integrity_report = ""
-    st.session_state.project_integrity_source_signature = ""
-    st.session_state.project_integrity_status = ""
-    st.session_state.show_saved_version_manager = False
-    st.session_state.project_saved_notice = False
-    st.session_state.picture_book_layout_spreads = []
-    st.session_state.picture_book_layout_source_signature = ""
-    st.session_state.picture_book_layout_preview_id = 0
-    st.session_state.picture_book_page_size = DEFAULT_PICTURE_BOOK_PAGE_SIZE
-    st.session_state.rewrite_preview_id = 0
-    st.session_state.rewrite_target_length = "Keep Current Length"
-    st.rerun()
 
 # ==========================================
 # PHASE 1: CONCEPT DEVELOPMENT
