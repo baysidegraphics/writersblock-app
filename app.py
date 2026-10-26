@@ -4959,218 +4959,8 @@ def assign_saved_project_to_series(project_id, series_name):
     return True
 
 
-def _wbs_choose_one_series(checked_key, series_keys):
-    """One destination at a time, even though destinations use checkboxes."""
-    if st.session_state.get(checked_key):
-        for other in series_keys:
-            if other != checked_key:
-                st.session_state[other] = False
-        # Any new destination requires a new affirmative confirmation.
-        st.session_state["wbs_series_confirm_assignment"] = False
 
 
-def render_simple_series_library():
-    """Two-box series assignment + independent Book order, for every format.
-
-    Only metadata records are written following explicit confirmation. Never
-    save/rename the master project or manuscript while managing a series.
-    """
-    if st.session_state.get("demo_mode") or not get_current_user_id():
-        return
-
-    with st.expander("Series Library — Assign and Order Books", expanded=False):
-        st.caption("Saved Projects / Versions keeps its existing date order. "
-                   "Series Book 1, 2, 3... order is managed separately here.")
-        projects = sorted(
-            (p for p in get_projects_for_import() if p.get("id")),
-            key=lambda p: (str(p.get("created_at") or ""), str(p.get("id")))
-        )
-        if not projects:
-            st.caption("Save a project first to make it available for assignment.")
-            return
-        project_by_id = {str(p["id"]): p for p in projects}
-        membership = get_series_metadata_by_project()
-        series_names = get_existing_series_names()
-        # The same title can belong to several distinct historical project IDs.
-        # Show a disambiguator rather than silently choosing one of them.
-        title_counts = {}
-        for p in projects:
-            title = str(p.get("project_title") or "Untitled Project").casefold()
-            title_counts[title] = title_counts.get(title, 0) + 1
-
-        def label_project(pid):
-            p = project_by_id[pid]
-            title = str(p.get("project_title") or "Untitled Project").strip()
-            created = str(p.get("created_at") or "")[:10] or "undated"
-            label = f"{title} — {created}"
-            if title_counts.get(title.casefold(), 0) > 1:
-                label += f" — ID {pid[:8]}"
-            assigned = str((membership.get(pid) or {}).get("series_name") or "").strip()
-            if assigned:
-                label += f" (in {assigned})"
-            return label
-
-        st.markdown("**Choose saved projects and one destination series.**")
-        projects_col, series_col = st.columns([1.4, 1], gap="medium")
-        selected_ids = []
-        with projects_col:
-            st.markdown("**Select Projects to be Assigned**")
-            with st.container(height=295, border=True):
-                for p in projects:
-                    pid = str(p["id"])
-                    if st.checkbox(label_project(pid), key=f"wbs_series_project_check_{pid}"):
-                        selected_ids.append(pid)
-
-        dest_keys = [f"wbs_series_destination_{make_series_key(n)}" for n in series_names]
-        create_key = "wbs_series_destination_new"
-        all_dest_keys = dest_keys + [create_key]
-        selected_series_name = None
-        with series_col:
-            st.markdown("**Assign to Series**")
-            with st.container(height=295, border=True):
-                # Preserve the loaded series as the *viewing* default, not as
-                # permission to modify a project. Callback enforces one check.
-                context = f"{get_active_project_id() or ''}:{st.session_state.get('series_name') or ''}"
-                if st.session_state.get("_wbs_series_destination_context") != context:
-                    for key in all_dest_keys:
-                        st.session_state[key] = False
-                    initial = str(st.session_state.get("series_name") or "").strip()
-                    for n, key in zip(series_names, dest_keys):
-                        if n.casefold() == initial.casefold():
-                            st.session_state[key] = True
-                            break
-                    st.session_state["_wbs_series_destination_context"] = context
-                for name, key in zip(series_names, dest_keys):
-                    if st.checkbox(name, key=key, on_change=_wbs_choose_one_series,
-                                   args=(key, all_dest_keys)):
-                        selected_series_name = name
-                new_selected = st.checkbox(
-                    "New Series", key=create_key,
-                    on_change=_wbs_choose_one_series, args=(create_key, all_dest_keys)
-                )
-                if new_selected:
-                    proposed = st.text_input("New Series Name", key="wbs_series_new_series_name", max_chars=80).strip()
-                    if proposed and any(proposed.casefold() == n.casefold() for n in series_names):
-                        st.warning("That series already exists. Select its checkbox above.")
-                    else:
-                        selected_series_name = proposed or None
-        # Never guess a destination if a stale session somehow contains multiple
-        # selections. The writer must choose exactly one series.
-        if sum(bool(st.session_state.get(k)) for k in all_dest_keys) != 1:
-            selected_series_name = None
-
-        changed_ids = [pid for pid in selected_ids
-                       if selected_series_name and
-                       str((membership.get(pid) or {}).get("series_key") or "")
-                       != make_series_key(selected_series_name)]
-        signature = (tuple(sorted(selected_ids)), str(selected_series_name or ""))
-        if st.session_state.get("_wbs_series_confirm_signature") != signature:
-            st.session_state["_wbs_series_confirm_signature"] = signature
-            st.session_state["wbs_series_confirm_assignment"] = False
-        if selected_ids and selected_series_name:
-            st.caption(f"{len(changed_ids)} selected project(s) would be assigned to "
-                       f"{selected_series_name}. Story text and saved versions stay unchanged.")
-            st.checkbox("Confirm assignment to the selected series",
-                        key="wbs_series_confirm_assignment")
-        if st.button("Assign Selected Projects to Series", key="wbs_series_assign_selected",
-                     disabled=not (changed_ids and selected_series_name and
-                                   st.session_state.get("wbs_series_confirm_assignment")),
-                     use_container_width=True):
-            updated = []
-            try:
-                # Re-check ownership and membership for each project; do not
-                # silently reassign a different list from a previous rerun.
-                if signature != (tuple(sorted(selected_ids)), str(selected_series_name or "")):
-                    raise ValueError("Selection changed. Please review the assignment again.")
-                for pid in changed_ids:
-                    if assign_saved_project_to_series(pid, selected_series_name):
-                        updated.append(pid)
-            except Exception as exc:
-                st.error(f"{len(updated)} assigned before an error: {exc}")
-            else:
-                for pid in selected_ids:
-                    st.session_state.pop(f"wbs_series_project_check_{pid}", None)
-                st.session_state.pop("wbs_series_confirm_assignment", None)
-                if new_selected:
-                    st.session_state.pop(create_key, None)
-                    st.session_state[f"wbs_series_destination_{make_series_key(selected_series_name)}"] = True
-                st.success(f"Assigned {len(updated)} saved project(s) to {selected_series_name}.")
-                st.rerun()
-
-        st.divider()
-        st.markdown("**Books Assigned to the Selected Series**")
-        # The selected destination is ALSO the series whose book order is shown;
-        # no second dropdown containing unrelated books.
-        if not selected_series_name:
-            st.caption("Select one series checkbox above to see its books.")
-            return
-        book_order = ordered_series_members(selected_series_name, membership)
-        if not book_order:
-            st.caption("No saved projects assigned to this series yet.")
-            return
-        for index, pid in enumerate(book_order):
-            p = project_by_id.get(pid)
-            if not p:
-                st.warning(f"Book {index + 1} references a saved project not currently available.")
-                continue
-            label = label_project(pid).split(" (in ", 1)[0]
-            cols = st.columns([6, 0.9, 0.9])
-            cols[0].write(f"**Book {index + 1} — {label}**")
-            if cols[1].button("↑", key=f"wbs_series_order_up_{make_series_key(selected_series_name)}_{pid}",
-                              disabled=index == 0, help="Move up one book"):
-                new_order = list(book_order)
-                new_order[index - 1], new_order[index] = new_order[index], new_order[index - 1]
-                try:
-                    save_series_book_order(selected_series_name, new_order)
-                except (ValueError, RuntimeError) as exc:
-                    st.error(str(exc))
-                else:
-                    st.rerun()
-            if cols[2].button("↓", key=f"wbs_series_order_down_{make_series_key(selected_series_name)}_{pid}",
-                              disabled=index == len(book_order) - 1,
-                              help="Move down one book"):
-                new_order = list(book_order)
-                new_order[index + 1], new_order[index] = new_order[index], new_order[index + 1]
-                try:
-                    save_series_book_order(selected_series_name, new_order)
-                except (ValueError, RuntimeError) as exc:
-                    st.error(str(exc))
-                else:
-                    st.rerun()
-
-        # Old data may have mistakenly assigned duplicate-titled project IDs.
-        # Correct only explicit writer-selected links. Never delete any project.
-        with st.expander("Correct Series Assignments (Remove Unwanted Links)", expanded=False):
-            st.caption("Only removes the series link. It does not delete the saved project, "
-                       "manuscript, or versions. Use this to remove old incorrect entries.")
-            unlink_ids = []
-            for pid in book_order:
-                if st.checkbox(label_project(pid).split(" (in ", 1)[0],
-                               key=f"wbs_series_unlink_{make_series_key(selected_series_name)}_{pid}"):
-                    unlink_ids.append(pid)
-            unlink_signature = (tuple(sorted(unlink_ids)), make_series_key(selected_series_name))
-            if st.session_state.get("_wbs_series_unlink_signature") != unlink_signature:
-                st.session_state["_wbs_series_unlink_signature"] = unlink_signature
-                st.session_state["wbs_series_unlink_confirm"] = False
-            if unlink_ids:
-                st.checkbox("Confirm removing selected books from this series",
-                            key="wbs_series_unlink_confirm")
-            if st.button("Remove Selected Series Links", key="wbs_series_unlink_action",
-                         disabled=not (unlink_ids and st.session_state.get("wbs_series_unlink_confirm")),
-                         use_container_width=True):
-                removed = []
-                try:
-                    for pid in unlink_ids:
-                        if assign_saved_project_to_series(pid, ""):
-                            removed.append(pid)
-                except Exception as exc:
-                    st.error(f"{len(removed)} links removed before an error: {exc}")
-                else:
-                    for pid in unlink_ids:
-                        st.session_state.pop(f"wbs_series_unlink_{make_series_key(selected_series_name)}_{pid}", None)
-                    st.session_state.pop("wbs_series_unlink_confirm", None)
-                    st.success(f"Removed {len(removed)} series link(s). No books deleted.")
-                    st.rerun()
 
 
 def get_series_metadata_by_project():
@@ -6420,6 +6210,11 @@ if st.sidebar.button("⚠️ Start New Project", key="global_reset", use_contain
     st.session_state.pop("series_reference_selector", None)
     st.session_state.pop("series_choice_selector", None)
     st.session_state.pop("series_name_input", None)
+    st.session_state.pop("_wbs_simple_series_context", None)
+    st.session_state.pop("wbs_simple_series_choice", None)
+    st.session_state.pop("wbs_simple_series_new_name", None)
+    st.session_state.pop("wbs_confirm_series_link", None)
+    st.session_state.pop("wbs_confirm_series_removal", None)
     st.session_state.pop("series_book_number_input", None)
     st.session_state.pop("series_book_number_auto_signature", None)
     st.session_state.pop("custom_plot_line_input", None)
@@ -7250,97 +7045,167 @@ if st.session_state.project_stage == "Intake":
 
         st.markdown("### " + str(concept_ui.get('project_connection_heading') or 'Project Relationship'))
 
+        # Simple series membership. No bulk assignment, book-order UI, or manuscript writes.
+        # The Project Type selection is a proposal for saved projects; it takes
+        # effect ONLY after explicit confirmation (metadata-only). For a new
+        # project the original master-save flow still creates the series link.
         project_scope_options = ["Standalone Book", "Book in a Series"]
-        current_project_scope = str(st.session_state.get("project_scope", "Standalone Book"))
-        # Confirmed membership is authoritative across ALL saved revisions.
-        # An older project-session snapshot must not undo a later Series Library
-        # assignment or removal when the saved project is reopened.
-        if get_active_project_id():
-            _active_pid = str(get_active_project_id())
-            _latest_link = next((m for m in get_series_metadata_rows()
-                                 if str(m.get("_project_id") or "") == _active_pid), None)
-            if _latest_link:
-                if _latest_link.get("series_membership_removed"):
-                    st.session_state.project_scope = "Standalone Book"
-                    st.session_state.series_name = ""
-                    st.session_state.series_key = ""
-                elif str(_latest_link.get("series_name") or "").strip():
-                    st.session_state.project_scope = "Book in a Series"
-                    st.session_state.series_name = str(_latest_link["series_name"])
-                    st.session_state.series_key = make_series_key(st.session_state.series_name)
-                current_project_scope = st.session_state.project_scope
-            st.session_state["project_scope_selector"] = current_project_scope
+        current_project_id = str(get_active_project_id() or "")
+        membership = get_series_metadata_by_project() if get_current_user_id() else {}
+        current_member = membership.get(current_project_id) or {}
+        registered_series = str(current_member.get("series_name") or "").strip()
+        saved_scope = "Book in a Series" if registered_series else "Standalone Book"
+        selected_scope_default = (saved_scope if current_project_id else
+                                  str(st.session_state.get("project_scope") or "Standalone Book"))
+        context = f"{current_project_id or 'new'}:{registered_series}"
+        # A project load resets the controls once. A normal Streamlit rerun must
+        # not erase the writer's proposed selection or checkbox state.
+        if st.session_state.get("_wbs_simple_series_context") != context:
+            st.session_state["_wbs_simple_series_context"] = context
+            st.session_state["project_scope_selector"] = selected_scope_default
+            st.session_state["wbs_confirm_series_link"] = False
+            st.session_state["wbs_confirm_series_removal"] = False
+            st.session_state.pop("wbs_simple_series_choice", None)
+            st.session_state.pop("wbs_simple_series_new_name", None)
 
-        scope_labels = concept_ui.get("scope_labels") or {}
-        st.session_state.project_scope = st.radio(
-            "Project Type:",
-            project_scope_options,
-            index=project_scope_options.index(current_project_scope)
-            if current_project_scope in project_scope_options else 0,
-            horizontal=True,
-            key="project_scope_selector",
-            format_func=lambda value: scope_labels.get(value, value),
-            disabled=bool(get_active_project_id()),
-        )
+        project_scope_labels = concept_ui.get("scope_labels") or {}
+        scope_col, action_col = st.columns([3.2, 2], gap="small")
+        with scope_col:
+            chosen_scope = st.radio(
+                "Project Type:", project_scope_options, horizontal=True,
+                key="project_scope_selector",
+                format_func=lambda v: project_scope_labels.get(v, v),
+            )
+        # For existing projects the recorded membership is authoritative even
+        # when the user previews the other radio button. This protects version
+        # saves, navigation, and Quill continuity from unsaved changes.
+        if current_project_id:
+            st.session_state.project_scope = saved_scope
+            st.session_state.series_name = registered_series
+            st.session_state.series_key = make_series_key(registered_series)
+            if registered_series:
+                st.session_state.series_book_number = int(current_member.get("series_book_number") or 1)
+        else:
+            st.session_state.project_scope = chosen_scope
 
-        if st.session_state.project_scope == "Book in a Series":
+        if chosen_scope == "Book in a Series":
             known_series = get_existing_series_names()
-            current_series = str(st.session_state.get("series_name") or "").strip()
-            choices = known_series + ["Create New Series"]
-            default_choice = current_series if current_series in known_series else "Create New Series"
-            if get_active_project_id():
-                st.session_state["series_choice_selector"] = default_choice
-            with st.container():
-                choice = st.selectbox("Select Series:", choices,
-                                      index=choices.index(default_choice),
-                                      key="series_choice_selector",
-                                      disabled=bool(get_active_project_id()))
-                if choice == "Create New Series":
-                    selected_name = st.text_input("Series Name:",
-                                                  value=current_series if current_series not in known_series else "",
-                                                  key="series_name_input",
-                                                  disabled=bool(get_active_project_id())).strip()
+            choice_options = list(known_series) + ["Create New Series"]
+            existing_name = (registered_series if current_project_id else
+                             str(st.session_state.get("series_name") or "").strip())
+            if "wbs_simple_series_choice" not in st.session_state:
+                st.session_state["wbs_simple_series_choice"] = (
+                    existing_name if existing_name in known_series else "Create New Series")
+            with st.columns([1, 1], gap="small")[0]:
+                selected_choice = st.selectbox(
+                    "Select Series:", choice_options, key="wbs_simple_series_choice")
+                if selected_choice == "Create New Series":
+                    selected_series = st.text_input(
+                        "New Series Name:", key="wbs_simple_series_new_name",
+                        max_chars=80).strip()
                 else:
-                    selected_name = choice
-            st.session_state.series_name = selected_name
-            st.session_state.series_key = make_series_key(selected_name)
+                    selected_series = selected_choice
+            if not current_project_id:
+                # Initial master project save has always included its series
+                # metadata; retain that behavior, without making a new version.
+                st.session_state.series_name = selected_series
+                st.session_state.series_key = make_series_key(selected_series)
+                st.session_state.series_continuity_mode = "Strict"
+                if selected_series:
+                    st.session_state.series_book_number = get_next_series_book_number(selected_series)
+                    st.caption("This new project will join the selected series when you save its master project.")
+                else:
+                    st.caption("Enter a series name before saving the project.")
+            else:
+                already_exists = (bool(selected_series) and
+                                  make_series_key(selected_series) ==
+                                  make_series_key(registered_series) and bool(registered_series))
+                # Checkbox is next to the 'In a Series' choice. Changing a
+                # dropdown alone must never mutate any saved project.
+                with action_col:
+                    if already_exists:
+                        st.caption("Project already exists in this series.")
+                    else:
+                        st.checkbox(
+                            "Add open project to selected series",
+                            key="wbs_confirm_series_link",
+                            help="Only updates this project's series membership. Manuscripts and versions are unchanged.")
+                if already_exists:
+                    st.session_state["wbs_confirm_series_link"] = False
+                elif selected_series:
+                    if st.button(
+                        "Confirm Series Assignment",
+                        key="wbs_confirm_simple_series_add",
+                        disabled=not st.session_state.get("wbs_confirm_series_link"),
+                    ):
+                        # Verify that the project/title and selected series are
+                        # still the same as the writer intended before writing.
+                        active_id = str(get_active_project_id() or "")
+                        verified_title = get_project_title_from_project_id(active_id)
+                        if (active_id != current_project_id or not verified_title or
+                                verified_title != get_project_title()):
+                            st.error("Project identity changed. Nothing was assigned.")
+                        else:
+                            try:
+                                changed = assign_saved_project_to_series(active_id, selected_series)
+                            except Exception as exc:
+                                st.error(f"Series assignment was not completed: {exc}")
+                            else:
+                                if not changed:
+                                    st.info("Project already exists in this series.")
+                                else:
+                                    st.session_state.project_scope = "Book in a Series"
+                                    st.session_state.series_name = selected_series
+                                    st.session_state.series_key = make_series_key(selected_series)
+                                    st.success(f"Project assigned to {selected_series}. No story version was created.")
+                                    st.rerun()
+                else:
+                    st.caption("Select or enter a series name to assign this project.")
+        elif current_project_id and registered_series:
+            # Returning to standalone is also a deliberate metadata-only
+            # change; a radio click alone never silently removes a series link.
+            with action_col:
+                st.checkbox("Confirm removal from the current series",
+                            key="wbs_confirm_series_removal")
+            if st.button("Confirm Standalone Project",
+                         key="wbs_confirm_simple_series_remove",
+                         disabled=not st.session_state.get("wbs_confirm_series_removal")):
+                active_id = str(get_active_project_id() or "")
+                verified_title = get_project_title_from_project_id(active_id)
+                if active_id != current_project_id or not verified_title or verified_title != get_project_title():
+                    st.error("Project identity changed. No series link was removed.")
+                else:
+                    try:
+                        changed = assign_saved_project_to_series(active_id, "")
+                    except Exception as exc:
+                        st.error(f"Series removal was not completed: {exc}")
+                    else:
+                        if changed:
+                            st.session_state.project_scope = "Standalone Book"
+                            st.session_state.series_name = ""
+                            st.session_state.series_key = ""
+                            st.success("Project changed to standalone. Saved story versions are unchanged.")
+                            st.rerun()
+        elif not current_project_id:
+            st.session_state.series_name = ""
+            st.session_state.series_key = ""
+        else:
+            st.session_state.series_name = ""
+            st.session_state.series_key = ""
+
+        # Automatic series continuity still uses confirmed earlier projects.
+        if st.session_state.project_scope == "Book in a Series" and st.session_state.get("series_name"):
             st.session_state.series_continuity_mode = "Strict"
-            membership = get_series_metadata_by_project()
-            current_project_id = str(get_active_project_id() or "")
-            current_member = membership.get(current_project_id) or {}
-            current_in_series = (bool(current_project_id) and
-                                 str(current_member.get("series_key") or "") == st.session_state.series_key)
-            if current_in_series:
-                st.session_state.series_book_number = int(current_member["series_book_number"])
-            else:
-                st.session_state.series_book_number = len(ordered_series_members(selected_name, membership)) + 1
-            if current_in_series:
-                st.caption(f"Current position: Book {st.session_state.series_book_number} — "
-                           "reorder in Series Library below.")
-            else:
-                st.caption("A new book is placed after the current books when its project is saved. "
-                           "You can reorder it in Series Library.")
-            st.caption("Continuity Protection: Strict — automatic")
-            # Only prior BOOKS in this same series can become automatic references.
             candidates = get_series_reference_candidates()
             project_ids = get_unambiguous_series_project_ids(
-                st.session_state.series_key, before_number=st.session_state.series_book_number)
-            automatic_ids = [c["id"] for c in candidates if str(c.get("project_id")) in project_ids]
-            st.session_state.series_reference_ids = automatic_ids
+                st.session_state.series_key,
+                before_number=st.session_state.get("series_book_number") or 1)
+            st.session_state.series_reference_ids = [
+                c["id"] for c in candidates if str(c.get("project_id")) in project_ids]
             st.session_state.series_selection_signature = (
-                f"{st.session_state.series_key}:{st.session_state.series_book_number}")
-            st.session_state.pop("series_reference_selector", None)
-            st.caption("Continuity references use earlier saved books where text is available. "
-                       "Saved projects and series order are managed separately below.")
-            st.session_state.series_canon_notes = ""
-            st.session_state.pop("series_canon_notes_input", None)
+                f"{st.session_state.series_key}:{st.session_state.get('series_book_number') or 1}")
         else:
-            st.session_state.series_key = ""
             st.session_state.series_reference_ids = []
-
-        # Series library is independent of current project type; it can link
-        # previously saved standalone projects without altering their manuscript.
-        render_simple_series_library()
 
         # Render the selected format's independent development fields.
         # Common WritersBlock controls (title, source/premise, dialogue style) remain shared.
