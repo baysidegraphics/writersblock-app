@@ -4699,104 +4699,171 @@ def get_loaded_project_series_versions(project_id):
 
 
 def get_assigned_series_projects_for_display(series_name):
-    """Read-only: one row per project ID, using the writer-selected saved revision.
+    """Read-only: one book per distinct author-recognized project, not all history.
 
-    Series membership is additive; never mutate or infer it from manuscript text.
-    Historical assignments without an explicit revision are shown using the most
-    recently saved revision, clearly marked as NOT a confirmed series source.
+    Legacy saved sessions can contain accidental series links and duplicate project
+    IDs. Those records remain intact; they do not automatically become approved
+    book references. An exact saved source is authoritative only after explicit
+    Save Project to Series confirmation.
     """
     series_key = make_series_key(series_name)
     if not series_key or not get_current_user_id():
         return []
-    memberships = {
-        str(project_id): metadata
-        for project_id, metadata in get_series_metadata_by_project().items()
-        if str(metadata.get("series_key") or "") == series_key
-    }
-    if not memberships:
+    membership = {str(pid): dict(meta) for pid, meta in get_series_metadata_by_project().items()
+                  if str(meta.get("series_key") or "") == series_key}
+    projects = {str(row.get("id")): row for row in get_projects_for_import() if row.get("id")}
+    membership = {pid: meta for pid, meta in membership.items() if pid in projects}
+    if not membership:
         return []
-    # Owner-filtered project and saved-version queries. Never include another
-    # project's record merely because the titles happen to match.
-    projects = {str(row.get("id")): row for row in get_projects_for_import()
-                if row.get("id")}
-    candidates = {}
-    exact_versions = {}
+
+    # Oakhaven's five historical book titles were expressly confirmed by its
+    # owner. This is presentation-only: DO NOT alter, delete, or attach records.
+    # Other series work generically from their own saved memberships.
+    recognized_titles = (
+        "It's Not Safe", "Return To Sender", "The Dead Letters Covenant",
+        "Chronos' Grasp", "Blood Of The Ancients",
+    ) if str(series_name or "").strip().casefold() == "oakhaven" else ()
+
+    saved_versions = {}
     for item in get_saved_projects_versions_dropdown_items():
         row = item.get("row") or {}
         pid = str(row.get("project_id") or "")
+        if pid not in membership:
+            continue
         kind = str(item.get("type") or "")
-        row_id = str(row.get("id") or "")
-        if pid not in memberships or pid not in projects or not row_id:
+        rid = str(row.get("id") or "")
+        if kind not in ("manuscript_version", "project_session") or not rid:
             continue
-        entry = {"row": row, "item": item, "type": kind}
-        candidates.setdefault(pid, []).append(entry)
-        exact_versions[(pid, kind, row_id)] = entry
+        saved_versions.setdefault(pid, []).append((kind, rid, row, item))
+
+    grouped = {}
+    for pid, meta in membership.items():
+        title = str(projects[pid].get("project_title") or meta.get("project_title") or "Untitled Project").strip()
+        group_key = title.casefold()
+        if recognized_titles and group_key not in {t.casefold() for t in recognized_titles}:
+            continue  # Legacy extras are not an approved Oakhaven book reference.
+        options = saved_versions.get(pid) or []
+        chosen = next((entry for entry in options
+                       if entry[0] == str(meta.get("series_source_type") or "")
+                       and entry[1] == str(meta.get("series_source_id") or "")), None)
+        pinned = chosen is not None
+        if chosen is None and options:
+            chosen = max(options, key=lambda entry: (str(entry[2].get("created_at") or ""), entry[1]))
+        candidate = {"project_id": pid, "title": title, "meta": meta,
+                     "selected": chosen, "confirmed": pinned,
+                     "creation": str(projects[pid].get("created_at") or "")}
+        grouped.setdefault(group_key, []).append(candidate)
+
+    preferred = []
+    for title_key, candidates in grouped.items():
+        # Duplicate project names are old ambiguous records; do not present them
+        # as additional books. Prefer a manually selected saved revision.
+        winner = sorted(candidates, key=lambda c: (
+            0 if c["confirmed"] else 1,
+            c["creation"], c["project_id"]))[0]
+        preferred.append(winner)
+
+    # Only an explicitly saved series order overrides the owner's initial five-
+    # book Oakhaven sequence. Ordering never changes the manuscript version.
+    current_order = get_series_order_overrides().get(series_key)
+    if current_order:
+        positions = {pid: index for index, pid in enumerate(current_order)}
+        preferred.sort(key=lambda c: (positions.get(c["project_id"], 100000), c["creation"], c["project_id"]))
+    elif recognized_titles:
+        ranks = {name.casefold(): i for i, name in enumerate(recognized_titles)}
+        preferred.sort(key=lambda c: (ranks.get(c["title"].casefold(), 10000), c["creation"]))
+    else:
+        preferred.sort(key=lambda c: (int(c["meta"].get("series_book_number") or 10000), c["creation"], c["project_id"]))
+
     displayed = []
-    for pid, meta in memberships.items():
-        if pid not in projects:
-            continue
-        preferred_key = (pid, str(meta.get("series_source_type") or ""),
-                         str(meta.get("series_source_id") or ""))
-        chosen = exact_versions.get(preferred_key)
-        confirmed = chosen is not None
-        if chosen is None:
-            options = candidates.get(pid) or []
-            chosen = max(options, key=lambda entry: (
-                str(entry["row"].get("created_at") or ""),
-                str(entry["row"].get("id") or ""))) if options else None
-        title = str(projects[pid].get("project_title") or meta.get("project_title") or "Untitled Project")
-        suffix = ""
-        if chosen is not None:
-            row = chosen["row"]
-            label = str(chosen["item"].get("label") or "")
-            match = re.search(r" — (V-\d+[A-Z]*)(?: —|$)", label)
+    for book_number, entry in enumerate(preferred, 1):
+        choice = entry["selected"]
+        if choice:
+            kind, rid, row, item = choice
+            match = re.search(r" — (V-\d+[A-Z]*)(?: —|$)", str(item.get("label") or ""))
             revision = match.group(1) if match else (
                 f"V-{row.get('version_number')}" if row.get("version_number") else "Version unknown")
-            saved_at = str(row.get("created_at") or "")
             try:
-                parsed = datetime.fromisoformat(saved_at.replace("Z", "+00:00"))
-                saved_date = parsed.strftime("%m/%d/%Y")
-            except (ValueError, TypeError):
+                saved_date = datetime.fromisoformat(str(row.get("created_at") or "").replace("Z", "+00:00")).strftime("%m/%d/%Y")
+            except (TypeError, ValueError):
                 saved_date = "Date unavailable"
-            if chosen["type"] == "manuscript_version":
-                source_text = str(row.get("manuscript_content") or "")
+            if kind == "manuscript_version":
+                words = count_words(row.get("manuscript_content") or "")
             else:
                 try:
                     snapshot = json.loads(row.get("draft_content") or "{}")
                 except (TypeError, ValueError):
                     snapshot = {}
-                source_text = get_best_saved_manuscript_source(snapshot) if isinstance(snapshot, dict) else ""
-                if not source_text and isinstance(snapshot, dict):
-                    source_text = str(snapshot.get("story_seed") or "")
-            word_total = f"{count_words(source_text):,} words"
-            if not confirmed:
-                suffix = " (latest saved; series revision not confirmed)"
+                text = get_best_saved_manuscript_source(snapshot) if isinstance(snapshot, dict) else ""
+                if not text and isinstance(snapshot, dict):
+                    text = str(snapshot.get("story_seed") or "")
+                words = count_words(text)
+            source_type, source_id = kind, rid
         else:
-            revision = "Version unavailable"
-            saved_date = "Date unavailable"
-            word_total = "Words unavailable"
-            suffix = " (no saved revision found)"
+            revision, saved_date, words, source_type, source_id = "Unselected", "Date unavailable", 0, "", ""
+        label = f"Book {book_number} — {entry['title']} — {revision} — {saved_date} — {words:,} words"
         displayed.append({
-            "project_id": pid,
-            "book_number": int(meta.get("series_book_number") or 0),
-            "title": title, "revision": revision, "date": saved_date,
-            "words": word_total, "confirmed": confirmed, "suffix": suffix,
+            "project_id": entry["project_id"], "book_number": book_number,
+            "title": entry["title"], "revision": revision, "date": saved_date,
+            "words": words, "confirmed": entry["confirmed"], "label": label,
+            "source_type": source_type, "source_id": source_id,
+            "note": ("Confirmed series version" if entry["confirmed"]
+                     else "Historical series link — displayed revision is ONLY a preview; confirm it from the loaded project to select it for the series"),
         })
-    displayed.sort(key=lambda v: (v["book_number"] if v["book_number"] > 0 else 99999,
-                                  v["title"].casefold(), v["project_id"]))
-    # Different projects can legitimately share a title. Disambiguate visibly.
-    title_counts = {}
-    for entry in displayed:
-        key = entry["title"].casefold()
-        title_counts[key] = title_counts.get(key, 0) + 1
-    for entry in displayed:
-        if title_counts[entry["title"].casefold()] > 1:
-            entry["title"] += f" [ID {entry['project_id'][:8]}]"
-        entry["label"] = (
-            f"Book {entry['book_number'] or '?'} — {entry['title']} — "
-            f"{entry['revision']} — {entry['date']} — {entry['words']}{entry['suffix']}"
-        )
     return displayed
+
+
+def get_series_reference_preview_text(member):
+    """Return an existing saved book for PREVIEW ONLY, never load its project."""
+    if not member or not get_current_user_id():
+        return ""
+    pid, kind, rid = (str(member.get(key) or "")
+                      for key in ("project_id", "source_type", "source_id"))
+    if not pid or not rid or kind not in ("manuscript_version", "project_session"):
+        return ""
+    for item in get_saved_projects_versions_dropdown_items():
+        row = item.get("row") or {}
+        if (str(row.get("project_id") or "") != pid or
+            str(row.get("id") or "") != rid or
+            item.get("type") != kind):
+            continue
+        if kind == "manuscript_version":
+            return str(row.get("manuscript_content") or "")
+        try:
+            data = json.loads(row.get("draft_content") or "{}")
+        except (ValueError, TypeError):
+            return ""
+        if isinstance(data, dict):
+            return get_best_saved_manuscript_source(data) or str(data.get("story_seed") or "")
+    return ""
+
+
+def change_series_reference_book_number(series_name, visible_members, selected_pid, requested_number):
+    """Reorder ONLY books shown to the writer; preserve all other legacy links.
+
+    A single append-only series_order record is the sole database mutation.
+    Existing projects, versions and manuscripts are never updated or deleted.
+    """
+    visible_ids = [str(x.get("project_id")) for x in visible_members]
+    if not selected_pid or selected_pid not in visible_ids:
+        raise ValueError("Selected book is no longer in this series.")
+    if len(visible_ids) != len(set(visible_ids)):
+        raise ValueError("Duplicate book records; series order was not changed.")
+    target = int(requested_number)
+    if not 1 <= target <= len(visible_ids):
+        raise ValueError("Choose a valid book number.")
+    updated = [pid for pid in visible_ids if pid != selected_pid]
+    updated.insert(target - 1, selected_pid)
+    if updated == visible_ids:
+        return False
+    # The membership catalog may include unconfirmed duplicate/legacy entries.
+    # Preserve their relative order after the visible approved books.
+    full_ids = ordered_series_members(series_name)
+    if not set(visible_ids).issubset(set(full_ids)):
+        raise ValueError("Series membership has changed. Reload before changing book order.")
+    proposed = updated + [pid for pid in full_ids if pid not in visible_ids]
+    save_series_book_order(series_name, proposed)
+    return True
 
 
 def render_save_open_project_to_series():
@@ -4820,7 +4887,7 @@ def render_save_open_project_to_series():
         st.caption("Only the open project's saved versions are eligible. Your manuscript and version history are not changed.")
         known_series = get_existing_series_names()
         series_options = list(known_series) + ["Create New Series", "Standalone (Remove series link)"]
-        series_col, projects_col = st.columns(2, gap="small")
+        series_col, projects_col = st.columns([1, 3], gap="medium")
         with series_col:
             selection = st.selectbox(
                 "Select Series:", series_options,
@@ -4832,18 +4899,61 @@ def render_save_open_project_to_series():
             destination = ""
         else:
             destination = selection
+        members = get_assigned_series_projects_for_display(destination) if destination else []
         with projects_col:
-            members = get_assigned_series_projects_for_display(destination) if destination else []
             if members:
-                member_labels = [member["label"] for member in members]
-                member_idx = st.selectbox(
-                    "Series Projects:", range(len(members)),
-                    format_func=lambda idx: member_labels[idx],
+                # Use stable project identity in widget keys; reruns after selecting
+                # another series cannot reuse a different series' previous row.
+                member_ids = [entry["project_id"] for entry in members]
+                selected_pid = st.selectbox(
+                    "Series Projects:", member_ids,
+                    format_func=lambda pid: next(m["label"] for m in members if m["project_id"] == pid),
                     key=f"{ui_prefix}_members_{make_series_key(destination)}")
-                st.caption(member_labels[member_idx])
             else:
-                st.selectbox("Series Projects:", ["No projects assigned to this series"],
+                selected_pid = None
+                st.selectbox("Series Projects:", ["No projects selected for this series"],
                              disabled=True, key=f"{ui_prefix}_members_empty")
+        member = next((m for m in members if m["project_id"] == selected_pid), None)
+        if member:
+            st.caption(member["label"])  # Full text wraps, even if a selectbox truncates.
+            if not member["confirmed"]:
+                st.caption(member["note"])
+            if st.checkbox("View Selected Saved Book (read-only)",
+                           key=f"{ui_prefix}_preview_{make_series_key(destination)}_{selected_pid}"):
+                preview = get_series_reference_preview_text(member)
+                if preview:
+                    st.text_area("Saved Book Preview — no changes permitted", value=preview,
+                                 height=240, disabled=True,
+                                 key=f"{ui_prefix}_preview_text_{selected_pid}_{member['source_id']}")
+                else:
+                    st.caption("No readable text is available from this saved revision. The saved project has not been changed.")
+
+            # Assign a different BOOK number without changing the chosen saved
+            # revision, its title or date. Explicit confirmation is required.
+            new_book_number = st.selectbox(
+                "Change Book Number:", list(range(1, len(members) + 1)),
+                format_func=lambda num: f"Book {num}",
+                index=member["book_number"] - 1,
+                key=f"{ui_prefix}_book_num_{make_series_key(destination)}_{selected_pid}")
+            if new_book_number != member["book_number"]:
+                order_token = hashlib.sha256(
+                    f"{destination}:{selected_pid}:{new_book_number}:{[m['project_id'] for m in members]}".encode("utf-8")
+                ).hexdigest()[:12]
+                order_confirm = st.checkbox(
+                    f"Confirm move of {member['title']} to Book {new_book_number}",
+                    key=f"{ui_prefix}_order_confirm_{order_token}", value=False)
+                if st.button("Update Book Order", disabled=not order_confirm,
+                             key=f"{ui_prefix}_order_save_{order_token}"):
+                    try:
+                        changed = change_series_reference_book_number(
+                            destination, members, selected_pid, new_book_number)
+                    except Exception as exc:
+                        st.error(f"Book order was not changed: {exc}")
+                    else:
+                        if changed:
+                            st.success("Book order updated. Saved project versions were not changed.")
+                            st.rerun()
+        st.divider()
         labels = [f"{v['label']} — {v['words']:,} words" for v in versions]
         loaded_id = str(st.session_state.get("_wbs_loaded_saved_session_id") or "")
         loaded_manuscript_id = str(st.session_state.get("_wbs_loaded_manuscript_version_id") or "")
