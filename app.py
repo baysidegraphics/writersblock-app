@@ -1192,6 +1192,12 @@ def load_saved_project_session_to_state(saved_session_row):
     # Reset absent older keys to project-safe defaults; license and account state
     # are never touched. Preserve the saved version/Quill/Stage 3 fields.
     normalized_raw = dict(snapshot)
+    # Project title is master metadata owned by this project ID, not by an
+    # earlier snapshot's UI widget or another open project. Read only: the
+    # actual parent record always wins after explicit project renames.
+    parent_project_title = get_project_title_from_project_id(load_project_id)
+    if parent_project_title:
+        normalized_raw["project_title"] = parent_project_title
     normalized_raw["format_template_values"] = {restored_format_id: dict(per_format.get(restored_format_id) or {})}
     try:
         verified = prepare_saved_snapshot(normalized_raw, load_project_id, restored_format_id)
@@ -6676,12 +6682,33 @@ if st.session_state.project_stage == "Intake":
                 st.info("Series relationship recovered from this project's saved records; "
                         "no changes were written to the database.")
 
-            st.session_state.project_title = st.text_input(
+            # This is a saved project's MASTER title, never an editable concept
+            # field. The writer can change it only with the separate Rename
+            # Project action. Do not feed a stale widget value back into state:
+            # doing so changed "Return To Sender" to the previous project title
+            # while leaving its manuscript/project ID untouched.
+            _active_title_project_id = str(get_active_project_id() or "")
+            _title_anchor = (
+                str(st.session_state.get("_wbs_loaded_project_title") or "").strip()
+                if str(st.session_state.get("_wbs_loaded_project_id") or "")
+                == _active_title_project_id else ""
+            )
+            if _title_anchor and st.session_state.get("project_title") != _title_anchor:
+                st.session_state.project_title = _title_anchor
+            _display_master_title = _title_anchor or get_project_title()
+            _display_title_key = (
+                "wbs_saved_master_title_view_"
+                + hashlib.sha256(
+                    (_active_title_project_id + "|" + _display_master_title).encode("utf-8")
+                ).hexdigest()[:16]
+            )
+            st.text_input(
                 _project_title_label,
-                value=st.session_state.get("project_title", ""),
-                placeholder="Example: It's Not Safe",
-                key="saved_project_title_input",
-            ).strip()
+                value=_display_master_title,
+                key=_display_title_key,
+                disabled=True,
+                help="Use Rename Project to change the master project title."
+            )
         else:
             st.session_state.project_title = st.text_input(
                 _project_title_label,
