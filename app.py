@@ -4828,20 +4828,64 @@ def get_series_metadata_rows():
 
 
 def get_series_metadata_by_project():
-    return {
-        row.get("_project_id"): row
+    """Read-only membership index, including legacy project-session assignments.
+
+    Some older projects recorded the series only in their project_session JSON,
+    before a separate series_metadata record existed. We may use an explicit
+    saved relationship as evidence, but NEVER infer membership from a title,
+    story text, or a different project's saved settings.
+    """
+    membership = {
+        str(row.get("_project_id")): row
         for row in get_series_metadata_rows()
-        if row.get("_project_id")
+        if row.get("_project_id") and str(row.get("series_name") or "").strip()
     }
+    # The query returns latest first. Inspect only the most recent saved
+    # session for each as-yet-unindexed project; do not resurrect an obsolete
+    # series assignment from an older version of the same project.
+    inspected = set(membership)
+    try:
+        sessions = get_saved_project_sessions_for_dropdown()
+    except Exception:
+        sessions = []
+    for row in sessions:
+        project_id = str(row.get("project_id") or "").strip()
+        if not project_id or project_id in inspected:
+            continue
+        inspected.add(project_id)
+        try:
+            snapshot = json.loads(row.get("draft_content") or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(snapshot, dict):
+            continue
+        name = str(snapshot.get("series_name") or "").strip()
+        scope = str(snapshot.get("project_scope") or "").strip()
+        try:
+            number = int(snapshot.get("series_book_number") or 0)
+        except (TypeError, ValueError):
+            number = 0
+        if scope != "Book in a Series" or not name or number < 1:
+            continue
+        membership[project_id] = {
+            "_project_id": project_id,
+            "_source": "saved_project_session",
+            "series_name": name,
+            "series_key": make_series_key(name),
+            "series_book_number": number,
+            "series_canon_notes": str(snapshot.get("series_canon_notes") or ""),
+            "project_title": str(snapshot.get("project_title") or ""),
+        }
+    return membership
 
 
 def get_existing_series_names():
-    names = []
-    for metadata in get_series_metadata_rows():
+    names = {}
+    for metadata in get_series_metadata_by_project().values():
         series_name = str(metadata.get("series_name") or "").strip()
-        if series_name and series_name not in names:
-            names.append(series_name)
-    return sorted(names, key=str.lower)
+        if series_name:
+            names.setdefault(series_name.casefold(), series_name)
+    return sorted(names.values(), key=str.lower)
 
 
 def get_next_series_book_number(series_name, exclude_project_id=None):
@@ -4850,7 +4894,7 @@ def get_next_series_book_number(series_name, exclude_project_id=None):
         return 1
 
     book_numbers = []
-    for metadata in get_series_metadata_rows():
+    for metadata in get_series_metadata_by_project().values():
         if str(metadata.get("series_key") or "") != series_key:
             continue
 
@@ -4872,7 +4916,7 @@ def get_next_series_book_number(series_name, exclude_project_id=None):
 def get_inherited_series_canon_notes(series_key, current_book_number):
     inherited = []
     seen = set()
-    for metadata in get_series_metadata_rows():
+    for metadata in get_series_metadata_by_project().values():
         if str(metadata.get("series_key") or "") != str(series_key or ""):
             continue
         book_number = int(metadata.get("series_book_number") or 0)
@@ -5047,6 +5091,18 @@ def get_series_reference_candidates():
             or snapshot.get("manuscript_text")
             or ""
         ).strip()
+        # Saved Concept/Plot Architecture projects may not yet have a draft.
+        # Include their approved concept as a REFERENCE only; never present it
+        # as a completed manuscript or change its saved content.
+        reference_kind = "Saved Project"
+        if not manuscript_text:
+            manuscript_text = str(
+                snapshot.get("story_seed")
+                or snapshot.get("chosen_option_text")
+                or snapshot.get("plot_outline")
+                or ""
+            ).strip()
+            reference_kind = "Saved Concept"
         if not manuscript_text:
             continue
 
@@ -5063,7 +5119,7 @@ def get_series_reference_candidates():
 
         candidates.append({
             "id": f"session:{saved_row.get('id')}",
-            "label": f"{prefix}{title} — Saved Project — {count_words(manuscript_text):,} words",
+            "label": f"{prefix}{title} — {reference_kind} — {count_words(manuscript_text):,} words",
             "project_id": project_id,
             "title": title,
             "book_number": book_number,
@@ -6807,13 +6863,42 @@ if st.session_state.project_stage == "Intake":
                 if not str(candidate.get("series_key") or "").strip()
             ]
 
+            known_members = []
+            candidate_by_project = {str(candidate["project_id"]): candidate for candidate in candidates}
+            for member_project_id, member_metadata in get_series_metadata_by_project().items():
+                if (str(member_project_id) == str(get_active_project_id() or "")
+                        or not st.session_state.series_key
+                        or str(member_metadata.get("series_key") or "") != st.session_state.series_key):
+                    continue
+                member_number = int(member_metadata.get("series_book_number") or 0)
+                if member_number < 1:
+                    continue
+                reference = candidate_by_project.get(str(member_project_id))
+                member_title = str(
+                    (reference or {}).get("title")
+                    or member_metadata.get("project_title")
+                    or get_project_title_from_project_id(member_project_id)
+                    or "Untitled Project"
+                )
+                known_members.append((member_number, member_title, reference is not None))
+            if known_members:
+                st.markdown("**Other Saved Projects Already in This Series:**")
+                for member_number, member_title, has_reference in sorted(known_members):
+                    suffix = "" if has_reference else " (no saved story text available)"
+                    st.write(f"✓ Series #{member_number}: {member_title}{suffix}")
+
             if unassigned_candidates and st.session_state.series_name:
-                st.markdown("**Add Previously Created Projects to This Series (One-Time Setup):**")
+                st.markdown("**Unassigned Saved Projects — Manual Series Setup:**")
+                st.caption(
+                    "These projects are NOT verified members of this series. "
+                    "Select a project only if you know it belongs here; "
+                    "unrelated projects are never attached automatically."
+                )
                 setup_label_to_candidate = {
                     candidate["label"]: candidate for candidate in unassigned_candidates
                 }
                 selected_existing_labels = st.multiselect(
-                    "Existing Saved Projects:",
+                    "Unassigned Saved Projects:",
                     options=list(setup_label_to_candidate.keys()),
                     key="series_existing_book_selector",
                     help=(
