@@ -801,7 +801,8 @@ def get_manuscript_branch_name(version):
     return clean_project_version_name(first) or "Original"
 
 
-def get_latest_saved_project_session_for_project(project_id, version_name=None):
+def get_latest_saved_project_session_for_project(project_id, version_name=None,
+                                                checkpoint_created_at=None):
     """Return the newest saved project-state snapshot for one project/branch."""
     user_id = get_current_user_id()
     if not user_id or not project_id:
@@ -813,13 +814,18 @@ def get_latest_saved_project_session_for_project(project_id, version_name=None):
         .eq("draft_type", "project_session")
         .eq("project_id", project_id)
         .order("created_at", desc=True)
-        .limit(100)
+        .limit(500)
     )
     if user_id:
         query = query.eq("user_id", user_id)
 
     result = query.execute()
     rows = list(result.data or [])
+    if checkpoint_created_at:
+        # Choosing the newest session overall leaks subsequent concept edits into
+        # an older manuscript V-n. Never travel forward in time during restore.
+        rows = [row for row in rows if str(row.get("created_at") or "")
+                <= str(checkpoint_created_at)]
     if not rows:
         return None
 
@@ -841,6 +847,152 @@ def get_latest_saved_project_session_for_project(project_id, version_name=None):
     return rows[0] if not requested_name else None
 
 
+def _wbs_restore_missing_concept_fields(saved_snapshot, project_id, as_of=None):
+    """Read-only recovery from THIS project's historical records, never session defaults.
+
+    A manuscript checkpoint does not persist its Concept form separately.  Old
+    project sessions may predate today's template or series fields.  Consult
+    same-user/same-project historical snapshots and series metadata; never
+    invent choices when the information was not recorded.
+    """
+    recovered = dict(saved_snapshot)
+    audit = {"recovered_setup": False, "recovered_series": False,
+             "series_conflict": False, "history_unavailable": False}
+    user_id = get_current_user_id()
+    if not user_id or not project_id:
+        return recovered, audit
+
+    saved_fmt = str(recovered.get("active_format_id") or "").strip()
+    if saved_fmt not in WBS_FORMAT_IDS:
+        saved_fmt = WBS_TEMPLATE_ID_BY_LEGACY_FORMAT.get(str(recovered.get("format_type") or ""), "")
+    def _fmt_match(candidate):
+        value = str(candidate.get("active_format_id") or "")
+        if not value:
+            value = WBS_TEMPLATE_ID_BY_LEGACY_FORMAT.get(str(candidate.get("format_type") or ""), "")
+        return value == saved_fmt
+
+    # Do not use a future branch/session to reconstruct an earlier checkpoint.
+    historical = []
+    target_branch = clean_project_version_name(recovered.get("project_version_name") or "Original").casefold()
+    try:
+        history_query = (supabase.table("writersblock_project_drafts")
+                         .select("id, project_id, user_id, draft_content, created_at")
+                         .eq("project_id", project_id).eq("user_id", user_id)
+                         .eq("draft_type", "project_session")
+                         .order("created_at", desc=True).limit(500))
+        for row in history_query.execute().data or []:
+            when = str(row.get("created_at") or "")
+            if as_of and when and when > str(as_of):
+                continue
+            try:
+                old = json.loads(row.get("draft_content") or "{}")
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(old, dict):
+                continue
+            if old.get("current_project_id") and str(old["current_project_id"]) != str(project_id):
+                continue
+            if not _fmt_match(old):
+                continue
+            old_branch = clean_project_version_name(old.get("project_version_name") or "Original").casefold()
+            if old_branch != target_branch:
+                continue
+            historical.append((when, old))
+    except Exception:
+        audit["history_unavailable"] = True
+    historical.sort(key=lambda item: item[0], reverse=True)
+
+    # Only retrieve saved choices, not the current template's default values.
+    all_values = recovered.get("format_template_values")
+    all_values = dict(all_values) if isinstance(all_values, dict) else {}
+    present = all_values.get(saved_fmt)
+    present = dict(present) if isinstance(present, dict) else {}
+    for _, old in historical:
+        old_all = old.get("format_template_values")
+        old_setup = old_all.get(saved_fmt) if isinstance(old_all, dict) else None
+        if not isinstance(old_setup, dict):
+            continue
+        for field, value in old_setup.items():
+            if field not in present and value is not None and str(value).strip():
+                present[field] = value
+                audit["recovered_setup"] = True
+    if saved_fmt:
+        all_values[saved_fmt] = present
+    recovered["format_template_values"] = all_values
+
+    # These independent development controls were saved before format templates.
+    for field in ("dialogue_style", "tone_style", "author_style", "audiobook_length",
+                  "audiobook_target_word_count", "picture_book_word_target"):
+        if recovered.get(field) not in (None, ""):
+            continue
+        for _, old in historical:
+            value = old.get(field)
+            if value not in (None, ""):
+                recovered[field] = value
+                audit["recovered_setup"] = True
+                break
+
+    # Prefer the selected saved snapshot's exact series identity. When it lacks
+    # series fields, an explicit series_metadata row for the SAME project may
+    # supply the relationship. No cross-project or auto-number lookups.
+    series_name = str(recovered.get("series_name") or "").strip()
+    series_scope = recovered.get("project_scope") == "Book in a Series"
+    if not (series_name and series_scope):
+        # An old snapshot can predate its series assignment. Prefer historical
+        # series metadata, and require unambiguous evidence for its book number.
+        series_evidence = []
+        for _, old in historical:
+            name = str(old.get("series_name") or "").strip()
+            if old.get("project_scope") == "Book in a Series" and name:
+                series_evidence.append(old)
+        try:
+            metadata_query = (supabase.table("writersblock_project_drafts")
+                              .select("id, project_id, user_id, draft_content, created_at")
+                              .eq("project_id", project_id).eq("user_id", user_id)
+                              .eq("draft_type", "series_metadata")
+                              .order("created_at", desc=False).limit(200))
+            for row in metadata_query.execute().data or []:
+                try:
+                    item = json.loads(row.get("draft_content") or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(item, dict) and str(item.get("series_name") or "").strip():
+                    series_evidence.append(item)
+        except Exception:
+            audit["history_unavailable"] = True
+        names = {str(x.get("series_name") or "").strip().casefold() for x in series_evidence}
+        names.discard("")
+        if len(names) == 1:
+            # Favor the oldest evidence for this project; this prevents a later
+            # auto-renumbered metadata record from overwriting an earlier volume.
+            evidence = series_evidence[0]
+            recovered["project_scope"] = "Book in a Series"
+            recovered["series_name"] = str(evidence.get("series_name") or "")
+            if not str(recovered.get("series_key") or ""):
+                recovered["series_key"] = str(evidence.get("series_key") or "")
+            numbers = set()
+            for item in series_evidence:
+                try:
+                    number = int(item.get("series_book_number") or 0)
+                except (ValueError, TypeError):
+                    number = 0
+                if number > 0:
+                    numbers.add(number)
+            if len(numbers) == 1:
+                recovered["series_book_number"] = next(iter(numbers))
+            elif len(numbers) > 1:
+                # Conflicting historical numbers must be flagged, not guessed.
+                audit["series_conflict"] = True
+                # Preserve the saved relationship fields but block the series
+                # control from proposing an arbitrary volume of 1.
+                recovered["project_scope"] = "Standalone Book"
+            audit["recovered_series"] = True
+        elif len(names) > 1:
+            audit["series_conflict"] = True
+
+    return recovered, audit
+
+
 def load_saved_project_session_to_state(saved_session_row):
     if not saved_session_row:
         st.warning("No saved project session found.")
@@ -856,6 +1008,11 @@ def load_saved_project_session_to_state(saved_session_row):
     except (ValueError, TypeError, SavedFormatError) as exc:
         st.error(f"Saved project could not be loaded: {exc}")
         return False
+
+    # Restore only evidence saved for this exact project; all queries read-only.
+    snapshot, restore_audit = _wbs_restore_missing_concept_fields(
+        snapshot, load_project_id, saved_session_row.get("created_at"),
+    )
 
     # Restoring a saved project must use evidence belonging to THIS project,
     # never the previous project's widget or session state.
@@ -975,7 +1132,22 @@ def load_saved_project_session_to_state(saved_session_row):
     st.session_state["_wbs_loaded_project_title"] = str(verified.get("project_title") or "").strip()
     st.session_state["wbs_locked_format_id"] = restored_format_id
     st.session_state["_wbs_locked_project_id"] = str(load_project_id or "")
-    st.session_state["_wbs_concept_recovered_for_review"] = recovered_setup
+    st.session_state["_wbs_concept_recovered_for_review"] = (
+        recovered_setup or restore_audit["recovered_setup"]
+    )
+    st.session_state["_wbs_series_recovered_for_review"] = restore_audit["recovered_series"]
+    st.session_state["_wbs_series_conflict_for_review"] = restore_audit["series_conflict"]
+    st.session_state["_wbs_historical_restore_unavailable"] = restore_audit["history_unavailable"]
+    setup_values = normalized_raw.get("format_template_values") or {}
+    saved_fields = setup_values.get(restored_format_id) or {}
+    template_fields = (get_wbs_format_template(restored_format_id) or {}).get("concept_fields") or []
+    # Defaults shown by Streamlit are not proof of the writer's original choices.
+    missing_fields = [str(f.get("key")) for f in template_fields if isinstance(f, dict)
+                      and f.get("key") and f["key"] not in saved_fields
+                      and f["key"] not in {"project_title", "dialogue_style",
+                                            "story_premise", "premise", "logline",
+                                            "story_idea", "objective", "core_premise"}]
+    st.session_state["_wbs_saved_concept_missing_fields"] = missing_fields
     # Old preview/editor widget state must never spill into another project.
     for cache_key in list(st.session_state.keys()):
         if str(cache_key).startswith(("_wbs_stage3_rewrite_", "_wbs_stage3_edit_", "_wbs_stage3_clean_")):
@@ -5717,6 +5889,7 @@ with st.sidebar.expander("Saved Projects / Versions", expanded=False):
                     saved_project_state = get_latest_saved_project_session_for_project(
                         selected_project_id,
                         version_name=branch_name,
+                        checkpoint_created_at=selected_version.get("created_at"),
                     )
                     if not saved_project_state:
                         st.error(
@@ -6391,10 +6564,18 @@ if st.session_state.project_stage == "Intake":
         st.markdown(f"##### {concept_ui.get('step_subtitle') or 'Build the foundation for your project.'}")
 
         if get_active_project_id():
-            st.caption(
-                "Loaded saved project — original Concept Development settings are shown below. "
-                "Change any setting you want, then Save Project."
-            )
+            st.caption("Loaded saved project — saved Concept Development choices are restored where recorded.")
+            if st.session_state.get("_wbs_saved_concept_missing_fields"):
+                st.warning("Some original Development Setup choices were not recorded in "
+                           "this saved version. Unrecorded fields display current template "
+                           "defaults, NOT verified original settings. No project was saved.")
+            if st.session_state.get("_wbs_series_conflict_for_review"):
+                st.error("Conflicting historical series numbers were found for this project. "
+                         "The series number was not guessed. Do not save until verified.")
+            elif st.session_state.get("_wbs_series_recovered_for_review"):
+                st.info("Series relationship recovered from this project's saved records; "
+                        "no changes were written to the database.")
+
             st.session_state.project_title = st.text_input(
                 concept_ui.get("title_label") or "Project / Story Title:",
                 value=st.session_state.get("project_title", ""),
