@@ -4597,6 +4597,76 @@ def rename_current_project_everywhere(new_title):
         return False, f"Project rename could not be completed: {exc}"
 
 
+def render_confirmed_project_rename(stage_key):
+    """Two-step confirmation required to change an existing project's master title.
+
+    This control never saves a project version. A new project's initial title is
+    edited normally before the master is saved.
+    """
+    project_id = str(get_active_project_id() or "")
+    if not project_id or st.session_state.get("demo_mode"):
+        return
+    safe_stage = re.sub(r"[^A-Za-z0-9_-]+", "_", str(stage_key or "stage"))
+    prefix = f"wbs_rename_{safe_stage}_{project_id}"
+    title = get_project_title_for_display()
+    source_key = f"{prefix}_original"
+    edit_key = f"{prefix}_new"
+    pending_key = f"{prefix}_pending"
+
+    # Reset the proposed title after switching projects or completing a rename.
+    if st.session_state.get(source_key) != title:
+        st.session_state[source_key] = title
+        st.session_state[edit_key] = title
+        st.session_state.pop(pending_key, None)
+
+    pending = st.session_state.get(pending_key)
+    with st.expander("Rename Project", expanded=bool(pending)):
+        proposed = st.text_input("New Project Title:", key=edit_key, max_chars=120)
+        clean = re.sub(r"\s+", " ", str(proposed or "").strip())
+        # A confirmation expires immediately if the title, project, or proposal
+        # differs from what the writer previously reviewed.
+        matches = (
+            isinstance(pending, dict)
+            and pending.get("project_id") == project_id
+            and pending.get("old_title") == title
+            and pending.get("new_title") == clean
+            and clean != title
+        )
+        if matches:
+            st.warning(f'Change project title from "{title}" to "{clean}"? This will update the title on existing saved versions, but will not create a new version.')
+            confirm_col, cancel_col = st.columns(2)
+            with confirm_col:
+                if st.button("Confirm Title Change", key=f"{prefix}_confirm", type="primary", use_container_width=True):
+                    # Independently recheck identity on the final click; never
+                    # confirm a stale title preview from another project.
+                    if str(get_active_project_id() or "") != project_id or get_project_title_for_display() != title:
+                        st.session_state.pop(pending_key, None)
+                        st.error("Project changed during confirmation. Title was not changed.")
+                    else:
+                        ok, message = rename_current_project_everywhere(clean)
+                        if ok:
+                            st.session_state.pop(pending_key, None)
+                            st.success(message)
+                            st.rerun()
+                        else:
+                            st.error(message)
+            with cancel_col:
+                if st.button("Cancel Rename", key=f"{prefix}_cancel", use_container_width=True):
+                    st.session_state.pop(pending_key, None)
+                    st.rerun()
+        else:
+            if pending is not None:
+                st.session_state.pop(pending_key, None)
+                st.caption("The proposed title changed. Review it again before confirming.")
+            if st.button("Review Title Change", key=f"{prefix}_review", disabled=not clean or clean == title, use_container_width=True):
+                st.session_state[pending_key] = {
+                    "project_id": project_id,
+                    "old_title": title,
+                    "new_title": clean,
+                }
+                st.rerun()
+
+
 def render_project_title_banner(stage_key):
     """
     Prominent Current Project banner plus database-safe rename control.
@@ -4623,41 +4693,7 @@ def render_project_title_banner(stage_key):
             )
             return
 
-        rename_key = f"rename_project_title_{safe_stage}_{project_id}"
-        source_key = f"{rename_key}_source"
-
-        # Keep the rename field synchronized after a successful rename or project load.
-        if st.session_state.get(source_key) != current_title:
-            st.session_state[rename_key] = "" if current_title == "Untitled Project" else current_title
-            st.session_state[source_key] = current_title
-
-        col_title, col_button = st.columns([4, 1.35])
-
-        with col_title:
-            proposed_title = st.text_input(
-                "Rename Project:",
-                key=rename_key,
-                placeholder="Enter a new project title",
-                label_visibility="visible",
-            )
-
-        with col_button:
-            st.markdown("<div style='height:1.72rem'></div>", unsafe_allow_html=True)
-            confirm_clicked = st.button(
-                "Rename Project",
-                key=f"confirm_rename_{safe_stage}_{project_id}",
-                type="secondary",
-                use_container_width=True,
-            )
-
-        if confirm_clicked:
-            ok, message = rename_current_project_everywhere(proposed_title)
-
-            if ok:
-                st.success(message)
-                st.rerun()
-            else:
-                st.error(message)
+        render_confirmed_project_rename(stage_key)
 
 
 def make_version_display_label(version):
@@ -6752,19 +6788,14 @@ if st.session_state.project_stage == "Intake":
             if _title_anchor and st.session_state.get("project_title") != _title_anchor:
                 st.session_state.project_title = _title_anchor
             _display_master_title = _title_anchor or get_project_title()
-            _display_title_key = (
-                "wbs_saved_master_title_view_"
-                + hashlib.sha256(
-                    (_active_title_project_id + "|" + _display_master_title).encode("utf-8")
-                ).hexdigest()[:16]
+            st.markdown(f"**{_project_title_label}**")
+            st.markdown(
+                '<div style="background:#262730;color:#ffffff;padding:0.65rem 0.8rem;'
+                'border:1px solid #41444f;border-radius:0.45rem;min-height:2.4rem;">'
+                + html.escape(_display_master_title) + '</div>',
+                unsafe_allow_html=True,
             )
-            st.text_input(
-                _project_title_label,
-                value=_display_master_title,
-                key=_display_title_key,
-                disabled=True,
-                help="Use Rename Project to change the master project title."
-            )
+            render_confirmed_project_rename("step_1_concept")
         else:
             st.session_state.project_title = st.text_input(
                 _project_title_label,
