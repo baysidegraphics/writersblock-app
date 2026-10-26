@@ -2226,13 +2226,29 @@ if "format_template_values" not in st.session_state or not isinstance(
 
 
 def get_active_format_widget_key(field_key):
+    """Bind each development widget to the exact saved revision being edited.
+
+    Project+format isolation alone is insufficient: V-1 and V-2 share those
+    identifiers, so Streamlit can reuse V-2's live widget value after loading
+    V-1 even though the V-1 snapshot itself was restored. The immutable saved
+    session row ID keeps their widget states separate without changing any
+    stored project data or calling the save API.
+    """
     if not st.session_state.get("_wbs_draft_scope_id"):
         st.session_state._wbs_draft_scope_id = uuid.uuid4().hex[:12]
+    saved_revision_id = str(
+        st.session_state.get("_wbs_active_saved_session_row_id")
+        or st.session_state.get("_wbs_loaded_saved_session_id")
+        or ""
+    ).strip()
+    # Unsaved work uses its own fresh draft scope; the saved revision ID only
+    # appears in widget keys, never in format-template values or manuscript text.
+    revision_scope = saved_revision_id or "draft_" + st.session_state._wbs_draft_scope_id
     return project_format_widget_key(
         st.session_state.get("current_project_id"),
         st.session_state._wbs_draft_scope_id,
         st.session_state.get("active_format_id"),
-        str(field_key),
+        f"{field_key}__revision_{revision_scope}",
     )
 
 
