@@ -4871,15 +4871,20 @@ def get_series_metadata_by_project():
     saved relationship as evidence, but NEVER infer membership from a title,
     story text, or a different project's saved settings.
     """
+    # The newest explicit series_metadata row is authoritative, INCLUDING an
+    # intentionally cleared relationship. Do not reconstruct a removed link
+    # from older project_session snapshots.
+    latest_rows = get_series_metadata_rows()
+    inspected = {str(row["_project_id"]) for row in latest_rows if row.get("_project_id")}
     membership = {
-        str(row.get("_project_id")): row
-        for row in get_series_metadata_rows()
-        if row.get("_project_id") and str(row.get("series_name") or "").strip()
+        str(row["_project_id"]): row
+        for row in latest_rows
+        if row.get("_project_id")
+        and not row.get("series_membership_removed")
+        and str(row.get("series_name") or "").strip()
     }
-    # The query returns latest first. Inspect only the most recent saved
-    # session for each as-yet-unindexed project; do not resurrect an obsolete
-    # series assignment from an older version of the same project.
-    inspected = set(membership)
+    # Inspect only the latest saved session for projects without newer
+    # authoritative series metadata; older assignments must not reappear.
     try:
         sessions = get_saved_project_sessions_for_dropdown()
     except Exception:
@@ -4913,6 +4918,34 @@ def get_series_metadata_by_project():
             "project_title": str(snapshot.get("project_title") or ""),
         }
     return membership
+
+
+def get_series_membership_slots(series_key, exclude_project_id=None):
+    """One row per project ID; flag duplicate volume numbers, never guess."""
+    slots = {}
+    for project_id, metadata in get_series_metadata_by_project().items():
+        if str(metadata.get("series_key") or "") != str(series_key or ""):
+            continue
+        if exclude_project_id and str(project_id) == str(exclude_project_id):
+            continue
+        try:
+            number = int(metadata.get("series_book_number") or 0)
+        except (ValueError, TypeError):
+            continue
+        if 1 <= number <= 100:
+            slots.setdefault(number, []).append((str(project_id), metadata))
+    return slots
+
+
+def get_unambiguous_series_project_ids(series_key, before_number=None):
+    """Only unique saved volume numbers may enter automatic continuity."""
+    slots = get_series_membership_slots(series_key)
+    return {
+        project_id
+        for number, entries in slots.items()
+        if len(entries) == 1 and (before_number is None or number < before_number)
+        for project_id, _metadata in entries
+    }
 
 
 def get_existing_series_names():
@@ -5006,38 +5039,100 @@ def save_series_metadata_for_project(project_id=None):
 
 
 def assign_existing_project_to_series(project_id, series_name, book_number, project_title=""):
+    """Explicit membership assignment. Never edit manuscript/version records."""
     user_id = get_current_user_id()
     clean_series_name = str(series_name or "").strip()
     if not user_id or not project_id or not clean_series_name:
-        return None
+        raise ValueError("A signed-in account, saved project, and series are required.")
+    if str(project_id) == str(get_active_project_id() or ""):
+        raise ValueError("Use the Project Relationship controls for the active project.")
+    try:
+        number = int(book_number)
+    except (ValueError, TypeError):
+        raise ValueError("Choose a valid series number.") from None
+    if not 1 <= number <= 100:
+        raise ValueError("Series number must be between 1 and 100.")
+
+    # Verify ownership against the parent table before any write.
+    project = next(
+        (row for row in get_projects_for_import() if str(row.get("id")) == str(project_id)),
+        None,
+    )
+    if not project:
+        raise ValueError("The selected project does not belong to your account.")
 
     series_key = make_series_key(clean_series_name)
+    for other_project_id, metadata in get_series_metadata_by_project().items():
+        if (str(other_project_id) != str(project_id)
+                and str(metadata.get("series_key") or "") == series_key
+                and int(metadata.get("series_book_number") or 0) == number):
+            raise ValueError(
+                f"Series #{number} is already assigned. Correct the conflicting link first; "
+                "no project was modified."
+            )
+
+    old = get_series_metadata_by_project().get(str(project_id)) or {}
+    if str(old.get("series_key") or "") == series_key and int(old.get("series_book_number") or 0) == number:
+        raise ValueError("That project is already assigned to this series and number.")
+
     metadata = {
         "series_key": series_key,
         "series_name": clean_series_name,
-        "series_book_number": int(book_number or 1),
+        "series_book_number": number,
         "series_continuity_mode": "Strict",
         "series_reference_ids": [],
-        "series_canon_notes": "",
-        "project_title": str(project_title or get_project_title_from_project_id(project_id) or "Untitled Project").strip(),
+        "series_canon_notes": str(old.get("series_canon_notes") or ""),
+        "project_title": str(project.get("project_title") or project_title or "Untitled Project"),
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "assigned_from_existing_project": True,
+        "confirmed_manual_series_assignment": True,
     }
-
-    return (
+    result = (
         supabase.table("writersblock_project_drafts")
         .insert({
             "project_id": project_id,
             "user_id": user_id,
-            "draft_title": (
-                f"{clean_series_name} — Book {metadata['series_book_number']} Series Metadata"
-            ),
+            "draft_title": f"{clean_series_name} — Series #{number} Membership",
             "draft_type": "series_metadata",
             "draft_content": json.dumps(metadata),
-            "version_number": metadata["series_book_number"],
-        })
-        .execute()
+            "version_number": number,
+        }).execute()
     )
+    if not getattr(result, "data", None):
+        raise RuntimeError("Series membership was not confirmed saved; no manuscript was changed.")
+    return result
+
+
+def remove_project_from_series(project_id, current_series_name):
+    """Clear membership with a new metadata row; preserve all saved writing."""
+    user_id = get_current_user_id()
+    if not user_id or not project_id or str(project_id) == str(get_active_project_id() or ""):
+        raise ValueError("Select a different saved project from your account.")
+    owned = next((row for row in get_projects_for_import()
+                  if str(row.get("id")) == str(project_id)), None)
+    if not owned:
+        raise ValueError("The selected project does not belong to your account.")
+    old = get_series_metadata_by_project().get(str(project_id))
+    if not old or str(old.get("series_key") or "") != make_series_key(current_series_name):
+        raise ValueError("That project is not currently assigned to this series.")
+    # Explicit tombstone beats old project sessions and retains an audit trail.
+    metadata = {
+        "series_name": "", "series_key": "", "series_book_number": 0,
+        "series_membership_removed": True,
+        "previous_series_name": str(old.get("series_name") or ""),
+        "previous_series_book_number": int(old.get("series_book_number") or 0),
+        "project_title": str(owned.get("project_title") or "Untitled Project"),
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = (supabase.table("writersblock_project_drafts")
+              .insert({"project_id": project_id, "user_id": user_id,
+                       "draft_title": "Series membership corrected (writing preserved)",
+                       "draft_type": "series_metadata",
+                       "draft_content": json.dumps(metadata), "version_number": 0})
+              .execute())
+    if not getattr(result, "data", None):
+        raise RuntimeError("Series link correction was not confirmed saved.")
+    return result
 
 
 def get_series_reference_candidates():
@@ -5148,9 +5243,11 @@ def get_series_reference_candidates():
             or "Untitled Project"
         ).strip()
         metadata = metadata_by_project.get(project_id, {})
-        book_number = int(metadata.get("series_book_number") or snapshot.get("series_book_number") or 0)
-        series_name = str(metadata.get("series_name") or snapshot.get("series_name") or "").strip()
-        series_key = str(metadata.get("series_key") or snapshot.get("series_key") or "")
+        # Use the authoritative index only. The project may have been removed
+        # from its old series by an explicit metadata correction (tombstone).
+        book_number = int(metadata.get("series_book_number") or 0)
+        series_name = str(metadata.get("series_name") or "").strip()
+        series_key = str(metadata.get("series_key") or "")
         prefix = f"{series_name} — Series #{book_number} — " if series_name and book_number else ""
 
         candidates.append({
@@ -6887,117 +6984,137 @@ if st.session_state.project_stage == "Intake":
             candidates = get_series_reference_candidates()
             id_to_candidate = {candidate["id"]: candidate for candidate in candidates}
 
-            # One-time setup for books written before series support was added.
-            unassigned_candidates = [
-                candidate
-                for candidate in candidates
-                if not str(candidate.get("series_key") or "").strip()
+            # Membership is a property of the saved PROJECT, never of a
+            # manuscript revision. Surface duplicates/conflicts; don't pick a
+            # winner based on title, date, word count, or arbitrary ordering.
+            membership = get_series_metadata_by_project()
+            slots = get_series_membership_slots(st.session_state.series_key)
+            current_id = str(get_active_project_id() or "")
+            related_count = sum(len(entries) for entries in slots.values())
+            other_members = [
+                (number, member_id, member_data)
+                for number, entries in slots.items()
+                for member_id, member_data in entries if member_id != current_id
             ]
-
-            known_members = []
+            duplicate_numbers = sorted(number for number, entries in slots.items() if len(entries) > 1)
             candidate_by_project = {str(candidate["project_id"]): candidate for candidate in candidates}
-            for member_project_id, member_metadata in get_series_metadata_by_project().items():
-                if (str(member_project_id) == str(get_active_project_id() or "")
-                        or not st.session_state.series_key
-                        or str(member_metadata.get("series_key") or "") != st.session_state.series_key):
-                    continue
-                member_number = int(member_metadata.get("series_book_number") or 0)
-                if member_number < 1:
-                    continue
-                reference = candidate_by_project.get(str(member_project_id))
-                member_title = str(
-                    (reference or {}).get("title")
-                    or member_metadata.get("project_title")
-                    or get_project_title_from_project_id(member_project_id)
-                    or "Untitled Project"
-                )
-                known_members.append((member_number, member_title, reference is not None))
-            if known_members:
-                st.markdown("**Other Saved Projects Already in This Series:**")
-                for member_number, member_title, has_reference in sorted(known_members):
-                    suffix = "" if has_reference else " (no saved story text available)"
-                    st.write(f"✓ Series #{member_number}: {member_title}{suffix}")
 
-            if unassigned_candidates and st.session_state.series_name:
-                st.markdown("**Unassigned Saved Projects — Manual Series Setup:**")
-                st.caption(
-                    "These projects are NOT verified members of this series. "
-                    "Select a project only if you know it belongs here; "
-                    "unrelated projects are never attached automatically."
-                )
-                setup_label_to_candidate = {
-                    candidate["label"]: candidate for candidate in unassigned_candidates
-                }
-                selected_existing_labels = st.multiselect(
-                    "Unassigned Saved Projects:",
-                    options=list(setup_label_to_candidate.keys()),
-                    key="series_existing_book_selector",
-                    help=(
-                        "Select books already written before series support was added. "
-                        "They will be numbered automatically by their original saved date."
-                    ),
-                )
-
-                selected_existing_records = [
-                    setup_label_to_candidate[label]
-                    for label in selected_existing_labels
-                    if label in setup_label_to_candidate
-                ]
-                selected_existing_records.sort(
-                    key=lambda item: (
-                        str(item.get("created_at") or ""),
-                        str(item.get("title") or "").lower(),
+            if related_count:
+                st.markdown("**Saved Projects Assigned to This Series:**")
+                st.caption(f"{related_count} project record(s) are linked. Each series number should belong to one project.")
+                for member_number, member_id, member_metadata in sorted(other_members):
+                    reference = candidate_by_project.get(member_id)
+                    title = str(
+                        (reference or {}).get("title")
+                        or member_metadata.get("project_title")
+                        or get_project_title_from_project_id(member_id)
+                        or "Untitled Project"
                     )
+                    marker = "⚠" if member_number in duplicate_numbers else "✓"
+                    available = "" if reference else " (no saved story text available)"
+                    st.write(f"{marker} Series #{member_number}: {title}{available}")
+            if duplicate_numbers:
+                st.warning(
+                    "Conflicting series numbers: " + ", ".join(map(str, duplicate_numbers))
+                    + ". These links need manual confirmation; conflicting volumes "
+                    "are excluded from automatic continuity. No records have been changed."
                 )
 
-                if selected_existing_records:
-                    st.caption("Automatic series order:")
-                    for assigned_number, record in enumerate(selected_existing_records, start=1):
-                        st.write(f"Series #{assigned_number}: {record.get('title', 'Untitled Project')}")
+            # This management panel is shared across ALL writing formats.
+            # A single confirmed change writes only a series_metadata audit row;
+            # it never saves a project session or changes manuscript versions.
+            with st.expander("Manage Series Membership — Add or Correct Saved Projects", expanded=False):
+                st.caption(
+                    "Add a project that was missed during setup, correct an assigned series number, "
+                    "or unlink a mistaken entry. You must confirm each action. "
+                    "Original projects, manuscripts and versions are never deleted."
+                )
+                all_saved_projects = [
+                    row for row in get_projects_for_import()
+                    if row.get("id") and str(row["id"]) != current_id
+                ]
+                project_index = {str(row["id"]): row for row in all_saved_projects}
+                project_choices = [""] + [str(row["id"]) for row in all_saved_projects]
+                def _membership_option_label(pid):
+                    if not pid:
+                        return "Select saved project..."
+                    row = project_index[pid]
+                    old = membership.get(pid) or {}
+                    assigned = str(old.get("series_name") or "").strip()
+                    suffix = (f" — {assigned} #{old.get('series_book_number')}" if assigned
+                              else " — Unassigned")
+                    return str(row.get("project_title") or "Untitled Project") + suffix + f" (ID {pid[-6:]})"
 
+                chosen_project_id = st.selectbox(
+                    "Saved Project:", project_choices,
+                    format_func=_membership_option_label,
+                    key="series_member_manage_project_selector",
+                )
+                if chosen_project_id:
+                    previous = membership.get(chosen_project_id) or {}
+                    old_name = str(previous.get("series_name") or "").strip()
+                    old_number = int(previous.get("series_book_number") or 0)
+                    next_available = max(slots, default=0) + 1
+                    proposed_number = st.number_input(
+                        "Series Number to Assign:", min_value=1, max_value=100,
+                        value=old_number if old_name == st.session_state.series_name and old_number else min(next_available,100),
+                        step=1, key=f"series_membership_number_{chosen_project_id}_{st.session_state.series_key}",
+                    )
+                    if old_name and old_name != st.session_state.series_name:
+                        st.warning(f"Currently assigned to '{old_name}' #{old_number}. "
+                                   "Adding it here will move its membership; this requires confirmation.")
+                    conflicting = [pid for pid, _record in slots.get(int(proposed_number), [])
+                                   if pid != chosen_project_id]
+                    if conflicting:
+                        st.warning(f"Series #{int(proposed_number)} is already in use. "
+                                   "Choose another number or correct the existing link first.")
+                    assign_confirm = st.checkbox(
+                        "Confirm: assign this saved project to the selected series and number.",
+                        key=f"series_assign_confirm_{chosen_project_id}_{st.session_state.series_key}_{int(proposed_number)}",
+                    )
                     if st.button(
-                        "Add Selected Projects to Series",
-                        key="assign_existing_books_to_series",
-                        use_container_width=True,
+                        "Confirm Add / Correct Series Membership",
+                        key="series_membership_apply_button", use_container_width=True,
+                        disabled=bool(conflicting) or not assign_confirm,
                     ):
-                        for assigned_number, record in enumerate(selected_existing_records, start=1):
+                        try:
                             assign_existing_project_to_series(
-                                project_id=record.get("project_id"),
-                                series_name=st.session_state.series_name,
-                                book_number=assigned_number,
-                                project_title=record.get("title"),
+                                chosen_project_id, st.session_state.series_name,
+                                int(proposed_number), project_index[chosen_project_id].get("project_title"),
                             )
+                        except (ValueError, RuntimeError) as exc:
+                            st.error(str(exc))
+                        else:
+                            st.success("Series membership updated; project and manuscript versions unchanged.")
+                            st.rerun()
 
-                        st.session_state.series_book_number = max(
-                            int(st.session_state.get("series_book_number", 1) or 1),
-                            len(selected_existing_records) + 1,
+                    if old_name == st.session_state.series_name:
+                        st.divider()
+                        remove_confirm = st.checkbox(
+                            "Confirm: unlink this project from this series (do NOT delete the project).",
+                            key=f"series_unlink_confirm_{chosen_project_id}_{st.session_state.series_key}",
                         )
-                        st.session_state.series_existing_book_selector = []
-                        st.success("Existing projects added to the series.")
-                        st.rerun()
+                        if st.button("Confirm Unlink Mistaken Series Assignment",
+                                     key="series_membership_unlink_button", use_container_width=True,
+                                     disabled=not remove_confirm):
+                            try:
+                                remove_project_from_series(chosen_project_id, st.session_state.series_name)
+                            except (ValueError, RuntimeError) as exc:
+                                st.error(str(exc))
+                            else:
+                                st.success("Series link cleared. Manuscript and versions remain untouched.")
+                                st.rerun()
 
-            valid_saved_ids = [
-                reference_id
-                for reference_id in (st.session_state.get("series_reference_ids", []) or [])
-                if reference_id in id_to_candidate
+            # References are scoped to unequivocal earlier PROJECT IDs only.
+            # A stale prior series_reference_ids list must never inject unrelated
+            # or conflicting members after project/format switching.
+            allowed_prior_projects = get_unambiguous_series_project_ids(
+                st.session_state.series_key, before_number=st.session_state.series_book_number,
+            )
+            automatic_ids = [
+                candidate["id"] for candidate in candidates
+                if str(candidate.get("project_id")) in allowed_prior_projects
             ]
-            prior_series_ids = [
-                candidate["id"]
-                for candidate in candidates
-                if (
-                    st.session_state.series_key
-                    and candidate.get("series_key") == st.session_state.series_key
-                    and int(candidate.get("book_number") or 0) > 0
-                    and int(candidate.get("book_number") or 0) < st.session_state.series_book_number
-                )
-            ]
-
-            # Preserve any books already attached during first-time series setup, then automatically
-            # include every earlier book already saved under the same series.
-            automatic_ids = []
-            for reference_id in valid_saved_ids + prior_series_ids:
-                if reference_id not in automatic_ids:
-                    automatic_ids.append(reference_id)
             st.session_state.series_reference_ids = automatic_ids
             st.session_state.series_selection_signature = (
                 f"{st.session_state.series_key}:{st.session_state.series_book_number}"
