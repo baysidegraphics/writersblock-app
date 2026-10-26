@@ -6456,8 +6456,11 @@ if st.session_state.project_stage == "Intake":
                 f"{resolved_series_key}:{st.session_state.get('current_project_id') or 'new-project'}"
             )
 
+            # Auto-number only brand-new series projects. Loading an existing
+            # saved volume must NEVER renumber it based on newer books.
             if (
-                resolved_series_key
+                not get_active_project_id()
+                and resolved_series_key
                 and st.session_state.get("series_book_number_auto_signature")
                 != auto_number_signature
             ):
@@ -7074,12 +7077,41 @@ if st.session_state.project_stage == "Intake":
         # Save is deliberately visible BEFORE the advance action on every format page.
         render_format_template_save_reminder()
 
+        # A loaded saved project may already contain its Scripting options.
+        # Continue READ-ONLY: never regenerate its paths, reset its manuscript,
+        # or create another writersblock_projects row under a new identity.
+        _wbs_is_loaded_project = bool(get_active_project_id())
+        _wbs_has_saved_paths = (
+            _wbs_is_loaded_project
+            and isinstance(st.session_state.get("sandbox_slates"), dict)
+            and sandbox_output_is_usable(st.session_state.get("sandbox_slates"))
+        )
+        _wbs_paths_button_label = (
+            "Continue to Scripting — Existing Paths"
+            if _wbs_has_saved_paths
+            else str(concept_ui.get("button_label") or "Develop Project Paths 🚀")
+        )
         if st.button(
-            str(concept_ui.get("button_label") or "Develop Project Paths 🚀"),
+            _wbs_paths_button_label,
             key="generate_sandbox_paths",
             type="primary",
             use_container_width=True,
         ):
+            if _wbs_has_saved_paths:
+                # The stage navigator enforces project identity. It performs
+                # no database writes and does not regenerate any story text.
+                wbs_request_stage_change("Sandbox")
+                # Successful navigation reruns inside wbs_complete_stage_change;
+                # a blocked navigation must leave its error visible.
+            if _wbs_is_loaded_project:
+                # These older projects have no recoverable saved sandbox paths.
+                # Do not destructively generate a new branch in this session.
+                st.error(
+                    "This saved project has no stored Scripting paths to resume. "
+                    "No existing manuscript was changed. Use a separately "
+                    "created new project for new paths; leave this saved version intact."
+                )
+                st.stop()
             require_product_access("sandbox")
             require_demo_action_available("sandbox")
 
@@ -7197,10 +7229,19 @@ if st.session_state.project_stage == "Intake":
                 if sandbox_output_is_usable(st.session_state.sandbox_slates):
                     mark_demo_action_used("sandbox")
 
-                save_project_to_supabase(
+                # Only a genuinely new project can create a parent project row.
+                # Existing saved projects use the read-only resume path above.
+                # NEVER replace current_project_id while editing saved work.
+                if get_active_project_id():
+                    st.error("Existing project detected. No new project was created or saved.")
+                    st.stop()
+                new_project_result = save_project_to_supabase(
                     project_title=get_project_title_for_display()[:80],
                     project_type=st.session_state.format_type,
                 )
+                if not new_project_result or not get_active_project_id():
+                    st.error("New project creation could not be confirmed. Scripting was not opened.")
+                    st.stop()
 
                 if st.session_state.get("project_scope") == "Book in a Series":
                     save_series_metadata_for_project(
