@@ -485,15 +485,6 @@ def get_next_project_session_internal_version(project_id):
 
 
 # MASTER PROJECT / VERSION RULE — shared by all formats and workflow stages.
-WBS_SAVE_EXPLANATION = (
-    "The Project Title stays the same unless you use **Confirm Only If Renaming**. "
-    "**Save Project** creates the first master record once. "
-    "After that, **Save Project Changes As A New Version** preserves the original "
-    "and creates another saved revision under the same title. "
-    "No edits = no new version."
-)
-
-
 def wbs_has_saved_master():
     """Read-only check: a project ID alone does not mean a master was saved."""
     project_id = get_active_project_id()
@@ -578,12 +569,10 @@ def render_save_as_named_version_control(location_key):
         st.session_state[input_key] = suggested
 
     with st.expander("Save Project Changes As A New Version", expanded=False):
-        st.caption("The project title will NOT change. Earlier versions remain available.")
-        st.markdown(WBS_SAVE_EXPLANATION)
         version_name = st.text_input(
-            "Version Description (not a new Project Title):",
+            "Version Description:",
             key=input_key, max_chars=60,
-            help="Describe what changed. The project keeps its existing title.",
+            help="Briefly describe what changed.",
         )
         if changed_areas:
             st.caption("Changes in: " + ", ".join(changed_areas))
@@ -652,7 +641,7 @@ def save_current_project_session_to_supabase(version_name=None, save_as_new_vers
         return None
     actual_title = str(parent_rows[0].get("project_title") or "").strip()
     if not actual_title or actual_title != get_project_title():
-        st.error("Project title differs from its saved master. Use Confirm Only If Renaming; no version was saved.")
+        st.error("Project title differs from its saved master. Use Rename Project; no version was saved.")
         return None
 
     master_saved = wbs_has_saved_master()
@@ -2552,8 +2541,6 @@ def render_format_template_save_reminder():
     """One master Save Project, then non-destructive new versions (all formats)."""
     st.markdown("---")
     with st.container(border=True):
-        st.markdown("**Project saving and version history**")
-        st.markdown(WBS_SAVE_EXPLANATION)
         if st.session_state.get("demo_mode"):
             st.caption("Project saving is available in the full Writer Edition.")
             if st.button("💾 Save Project 🔒", key="template_save_project_trial", use_container_width=True):
@@ -4614,7 +4601,6 @@ def render_project_title_banner(stage_key):
             )
             return
 
-        st.caption("Project Title changes only when you confirm a rename. All other edits use Save Project Changes As A New Version.")
         rename_key = f"rename_project_title_{safe_stage}_{project_id}"
         source_key = f"{rename_key}_source"
 
@@ -4636,7 +4622,7 @@ def render_project_title_banner(stage_key):
         with col_button:
             st.markdown("<div style='height:1.72rem'></div>", unsafe_allow_html=True)
             confirm_clicked = st.button(
-                "Confirm Only If Renaming",
+                "Rename Project",
                 key=f"confirm_rename_{safe_stage}_{project_id}",
                 type="secondary",
                 use_container_width=True,
@@ -6201,7 +6187,7 @@ def wbs_request_stage_change(destination, export_view=None):
     if anchor_id and anchor_title and current == "Intake" and destination != "Intake" and active_title != anchor_title:
         st.error(
             f'Project title changed from "{anchor_title}" to "{active_title}". '
-            "Use Confirm Only If Renaming before moving to another stage."
+            "Use Rename Project to change the title before moving to another stage."
         )
         return
     st.session_state["wbs_pending_stage_change"] = {
@@ -6358,7 +6344,6 @@ with st.sidebar.container(border=True):
             st.info("Concept setup was restored from an earlier save of this same project. Review it before saving.")
 
 with st.sidebar:
-    st.caption("**Project saving:** Title changes only through Rename Project. First save creates the master; later edits create new versions.")
     if st.session_state.get("demo_mode"):
         if st.button("💾 Save Project 🔒", key="save_current_project_session_trial", use_container_width=True, type="secondary"):
             full_version_only_notice("Saved Projects")
@@ -6651,6 +6636,15 @@ if st.session_state.project_stage == "Intake":
         concept_ui = get_active_concept_ui()
         st.markdown(f"##### {concept_ui.get('step_subtitle') or 'Build the foundation for your project.'}")
 
+        # Every format names this field PROJECT TITLE, never a saved version.
+        # Format-specific title wording stays in the registry for other consumers.
+        _format_title_prefix = next(
+            (name for format_id, name in WBS_FORMAT_OPTIONS
+             if format_id == st.session_state.get("active_format_id")),
+            "Project",
+        )
+        _project_title_label = f"{_format_title_prefix} / Project Title:"
+
         if get_active_project_id():
             st.caption("Loaded saved project — saved Concept Development choices are restored where recorded.")
             if st.session_state.get("_wbs_saved_concept_missing_fields"):
@@ -6665,14 +6659,14 @@ if st.session_state.project_stage == "Intake":
                         "no changes were written to the database.")
 
             st.session_state.project_title = st.text_input(
-                concept_ui.get("title_label") or "Project / Story Title:",
+                _project_title_label,
                 value=st.session_state.get("project_title", ""),
                 placeholder="Example: It's Not Safe",
                 key="saved_project_title_input",
             ).strip()
         else:
             st.session_state.project_title = st.text_input(
-                concept_ui.get("title_label") or "Project / Story Title:",
+                _project_title_label,
                 value=st.session_state.get("project_title", ""),
                 placeholder="Example: It's Not Safe",
                 key="project_title_input",
