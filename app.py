@@ -4697,6 +4697,108 @@ def get_loaded_project_series_versions(project_id):
     return result
 
 
+
+def get_assigned_series_projects_for_display(series_name):
+    """Read-only: one row per project ID, using the writer-selected saved revision.
+
+    Series membership is additive; never mutate or infer it from manuscript text.
+    Historical assignments without an explicit revision are shown using the most
+    recently saved revision, clearly marked as NOT a confirmed series source.
+    """
+    series_key = make_series_key(series_name)
+    if not series_key or not get_current_user_id():
+        return []
+    memberships = {
+        str(project_id): metadata
+        for project_id, metadata in get_series_metadata_by_project().items()
+        if str(metadata.get("series_key") or "") == series_key
+    }
+    if not memberships:
+        return []
+    # Owner-filtered project and saved-version queries. Never include another
+    # project's record merely because the titles happen to match.
+    projects = {str(row.get("id")): row for row in get_projects_for_import()
+                if row.get("id")}
+    candidates = {}
+    exact_versions = {}
+    for item in get_saved_projects_versions_dropdown_items():
+        row = item.get("row") or {}
+        pid = str(row.get("project_id") or "")
+        kind = str(item.get("type") or "")
+        row_id = str(row.get("id") or "")
+        if pid not in memberships or pid not in projects or not row_id:
+            continue
+        entry = {"row": row, "item": item, "type": kind}
+        candidates.setdefault(pid, []).append(entry)
+        exact_versions[(pid, kind, row_id)] = entry
+    displayed = []
+    for pid, meta in memberships.items():
+        if pid not in projects:
+            continue
+        preferred_key = (pid, str(meta.get("series_source_type") or ""),
+                         str(meta.get("series_source_id") or ""))
+        chosen = exact_versions.get(preferred_key)
+        confirmed = chosen is not None
+        if chosen is None:
+            options = candidates.get(pid) or []
+            chosen = max(options, key=lambda entry: (
+                str(entry["row"].get("created_at") or ""),
+                str(entry["row"].get("id") or ""))) if options else None
+        title = str(projects[pid].get("project_title") or meta.get("project_title") or "Untitled Project")
+        suffix = ""
+        if chosen is not None:
+            row = chosen["row"]
+            label = str(chosen["item"].get("label") or "")
+            match = re.search(r" — (V-\d+[A-Z]*)(?: —|$)", label)
+            revision = match.group(1) if match else (
+                f"V-{row.get('version_number')}" if row.get("version_number") else "Version unknown")
+            saved_at = str(row.get("created_at") or "")
+            try:
+                parsed = datetime.fromisoformat(saved_at.replace("Z", "+00:00"))
+                saved_date = parsed.strftime("%m/%d/%Y")
+            except (ValueError, TypeError):
+                saved_date = "Date unavailable"
+            if chosen["type"] == "manuscript_version":
+                source_text = str(row.get("manuscript_content") or "")
+            else:
+                try:
+                    snapshot = json.loads(row.get("draft_content") or "{}")
+                except (TypeError, ValueError):
+                    snapshot = {}
+                source_text = get_best_saved_manuscript_source(snapshot) if isinstance(snapshot, dict) else ""
+                if not source_text and isinstance(snapshot, dict):
+                    source_text = str(snapshot.get("story_seed") or "")
+            word_total = f"{count_words(source_text):,} words"
+            if not confirmed:
+                suffix = " (latest saved; series revision not confirmed)"
+        else:
+            revision = "Version unavailable"
+            saved_date = "Date unavailable"
+            word_total = "Words unavailable"
+            suffix = " (no saved revision found)"
+        displayed.append({
+            "project_id": pid,
+            "book_number": int(meta.get("series_book_number") or 0),
+            "title": title, "revision": revision, "date": saved_date,
+            "words": word_total, "confirmed": confirmed, "suffix": suffix,
+        })
+    displayed.sort(key=lambda v: (v["book_number"] if v["book_number"] > 0 else 99999,
+                                  v["title"].casefold(), v["project_id"]))
+    # Different projects can legitimately share a title. Disambiguate visibly.
+    title_counts = {}
+    for entry in displayed:
+        key = entry["title"].casefold()
+        title_counts[key] = title_counts.get(key, 0) + 1
+    for entry in displayed:
+        if title_counts[entry["title"].casefold()] > 1:
+            entry["title"] += f" [ID {entry['project_id'][:8]}]"
+        entry["label"] = (
+            f"Book {entry['book_number'] or '?'} — {entry['title']} — "
+            f"{entry['revision']} — {entry['date']} — {entry['words']}{entry['suffix']}"
+        )
+    return displayed
+
+
 def render_save_open_project_to_series():
     """Explicit series/reference selection, scoped to the loaded project ID."""
     project_id = str(get_active_project_id() or "")
@@ -4718,16 +4820,30 @@ def render_save_open_project_to_series():
         st.caption("Only the open project's saved versions are eligible. Your manuscript and version history are not changed.")
         known_series = get_existing_series_names()
         series_options = list(known_series) + ["Create New Series", "Standalone (Remove series link)"]
-        selection = st.selectbox(
-            "Select Series:", series_options,
-            index=(known_series.index(current_series) if current_series in known_series else 0),
-            key=f"{ui_prefix}_series")
+        series_col, projects_col = st.columns(2, gap="small")
+        with series_col:
+            selection = st.selectbox(
+                "Select Series:", series_options,
+                index=(known_series.index(current_series) if current_series in known_series else 0),
+                key=f"{ui_prefix}_series")
         if selection == "Create New Series":
             destination = st.text_input("New Series Name:", key=f"{ui_prefix}_new", max_chars=80).strip()
         elif selection == "Standalone (Remove series link)":
             destination = ""
         else:
             destination = selection
+        with projects_col:
+            members = get_assigned_series_projects_for_display(destination) if destination else []
+            if members:
+                member_labels = [member["label"] for member in members]
+                member_idx = st.selectbox(
+                    "Series Projects:", range(len(members)),
+                    format_func=lambda idx: member_labels[idx],
+                    key=f"{ui_prefix}_members_{make_series_key(destination)}")
+                st.caption(member_labels[member_idx])
+            else:
+                st.selectbox("Series Projects:", ["No projects assigned to this series"],
+                             disabled=True, key=f"{ui_prefix}_members_empty")
         labels = [f"{v['label']} — {v['words']:,} words" for v in versions]
         loaded_id = str(st.session_state.get("_wbs_loaded_saved_session_id") or "")
         loaded_manuscript_id = str(st.session_state.get("_wbs_loaded_manuscript_version_id") or "")
