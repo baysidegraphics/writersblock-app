@@ -29,6 +29,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from pathlib import Path
+from types import SimpleNamespace
 import hashlib
 import zipfile
 import uuid
@@ -483,110 +484,189 @@ def get_next_project_session_internal_version(project_id):
     return 1
 
 
-def render_save_as_named_version_control(location_key):
-    """Save a complete project-state branch under a short writer-facing name."""
-    if st.session_state.get("demo_mode"):
-        return
+# MASTER PROJECT / VERSION RULE — shared by all formats and workflow stages.
+WBS_SAVE_EXPLANATION = (
+    "The Project Title stays the same unless you use **Confirm Only If Renaming**. "
+    "**Save Project** creates the first master record once. "
+    "After that, **Save Project Changes As A New Version** preserves the original "
+    "and creates another saved revision under the same title. "
+    "No edits = no new version."
+)
 
+
+def wbs_has_saved_master():
+    """Read-only check: a project ID alone does not mean a master was saved."""
     project_id = get_active_project_id()
-    if not project_id or not get_project_title():
+    user_id = get_current_user_id()
+    if not project_id:
+        return False
+    if not user_id:
+        return None
+    if (str(st.session_state.get("_wbs_last_saved_project_id") or "") == str(project_id)
+            and st.session_state.get("_wbs_active_saved_session_row_id")):
+        return True
+    try:
+        rows = (supabase.table("writersblock_project_drafts")
+                .select("id")
+                .eq("project_id", project_id)
+                .eq("user_id", user_id)
+                .eq("draft_type", "project_session")
+                .limit(1).execute())
+        return bool(getattr(rows, "data", None))
+    except Exception:
+        return None  # fail closed; never risk an initial-save rewrite
+
+
+# Only writer-facing content counts as a change, not navigation, dates, editor
+# previews, labels, or the version's descriptive name.
+WBS_WRITER_CHANGE_KEYS = (
+    "active_format_id", "format_type", "format_template_values", "dialogue_style",
+    "tone_style", "author_style", "project_scope", "series_key", "series_name",
+    "series_book_number", "series_continuity_mode", "series_reference_ids",
+    "series_canon_notes", "audiobook_length", "audiobook_target_word_count",
+    "picture_book_word_target", "picture_book_page_size", "story_seed", "wbs_project_original_concept",
+    "starting_source_mode", "version_source_mode", "imported_source_name",
+    "quill_starting_direction", "imported_source_text", "saved_version_source_text",
+    "audiobook_production_script", "audiobook_production_cue_level",
+    "final_output_format",
+    "chosen_option", "chosen_option_text", "sandbox_slates", "plot_outline",
+    "current_draft_output", "rewritten_manuscript", "scene_blocks", "completed_beats",
+    "rolling_lore_book", "final_output_text", "picture_book_layout_spreads",
+)
+
+
+def wbs_save_state_signature(snapshot=None):
+    """Hash meaningful writer work; titles are changed ONLY using Rename Project."""
+    if snapshot is None:
+        snapshot = get_project_session_snapshot()
+    relevant = {key: snapshot.get(key) for key in WBS_WRITER_CHANGE_KEYS}
+    if isinstance(relevant.get("scene_blocks"), dict):
+        relevant["scene_blocks"] = {str(k): v for k, v in relevant["scene_blocks"].items()}
+    return hashlib.sha256(json.dumps(relevant, sort_keys=True, default=str,
+                                     ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def wbs_work_has_changed(snapshot=None):
+    """No version from a change to the branch label or a stage navigation alone."""
+    project_id = str(get_active_project_id() or "")
+    baseline_project = str(st.session_state.get("_wbs_last_saved_project_id") or "")
+    baseline = str(st.session_state.get("_wbs_last_saved_work_signature") or "")
+    if not baseline or baseline_project != project_id:
+        # Older sessions without a trustworthy baseline require a reload, not
+        # speculative insert of a duplicate saved version.
+        return None
+    try:
+        return wbs_save_state_signature(snapshot) != baseline
+    except SavedFormatError:
+        return None
+
+
+def render_save_as_named_version_control(location_key):
+    """Save a NEW session revision without modifying an older saved version."""
+    if st.session_state.get("demo_mode") or not get_active_project_id():
+        return
+    if wbs_has_saved_master() is not True:
         return
 
     changed_areas = get_changed_concept_version_areas()
     suggested = get_suggested_project_version_name()
     signature = "|".join(changed_areas) or suggested
-
     signature_key = f"_wbs_version_name_suggestion_signature_{location_key}"
     input_key = f"save_as_version_name_{location_key}"
-
     if st.session_state.get(signature_key) != signature:
         st.session_state[signature_key] = signature
         st.session_state[input_key] = suggested
 
-    with st.expander("Save As New Version", expanded=False):
+    with st.expander("Save Project Changes As A New Version", expanded=False):
+        st.caption("The project title will NOT change. Earlier versions remain available.")
+        st.markdown(WBS_SAVE_EXPLANATION)
         version_name = st.text_input(
-            "Version Name:",
-            key=input_key,
-            max_chars=60,
-            help=(
-                "Keep this short and identify where the version changed, "
-                "for example Format Change or Format-Development Change."
-            ),
+            "Version Description (not a new Project Title):",
+            key=input_key, max_chars=60,
+            help="Describe what changed. The project keeps its existing title.",
         )
-
         if changed_areas:
-            st.caption("Suggested from changes: " + ", ".join(changed_areas))
-
+            st.caption("Changes in: " + ", ".join(changed_areas))
+        changed = wbs_work_has_changed()
+        if changed is False:
+            st.info("No changes detected. The existing saved version is preserved.")
+        elif changed is None:
+            st.warning("Reload the saved version before creating a new version; no changes were written.")
         if st.button(
-            "Save As New Version",
+            "Save Project Changes As A New Version",
             key=f"save_as_new_named_version_{location_key}",
-            use_container_width=True,
-            type="secondary",
+            use_container_width=True, type="secondary", disabled=(changed is not True),
         ):
             clean_name = clean_project_version_name(version_name)
             if not clean_name:
-                st.warning("Enter a short Version Name.")
+                st.warning("Enter a brief description of the version change.")
                 return
-
             result = save_current_project_session_to_supabase(
-                version_name=clean_name,
-                save_as_new_version=True,
+                version_name=clean_name, save_as_new_version=True,
             )
-            if result:
-                st.success(f"Saved as: {clean_name}")
+            if result and not getattr(result, "unchanged", False):
+                st.success(f"New version saved under {get_project_title_for_display()} — {clean_name}")
                 st.rerun()
 
 
-def wbs_save_state_signature(snapshot=None):
-    """Stable signature of persisted writer work, excluding save timestamps and navigation."""
-    if snapshot is None:
-        snapshot = get_project_session_snapshot()
-    relevant = {key: value for key, value in snapshot.items()
-                if key not in {"saved_at", "project_stage", "export_view",
-                               "current_project_id", "concept_change_areas"}}
-    return get_text_signature(json.dumps(relevant, sort_keys=True, default=str))
-
-
 def save_current_project_session_to_supabase(version_name=None, save_as_new_version=False):
-    user_id = get_current_user_id()
+    """First save creates the master; all subsequent changed saves make versions.
 
+    Never edit an existing snapshot and never silently rename the parent project.
+    Stage checkpoint callers use this same protection in ALL formats.
+    """
+    user_id = get_current_user_id()
     if not user_id:
         st.error("No user found.")
         return None
 
     project_id = get_active_project_id()
     if not project_id:
+        title = get_project_title()
+        if not title:
+            st.error("Name the project before its first master save.")
+            return None
         result = save_project_to_supabase(
-            project_title=get_project_title_for_display()[:80],
+            project_title=title[:80],
             project_type=st.session_state.get("format_type", "story"),
         )
-        project_id = st.session_state.get("current_project_id")
-
-    if not project_id:
-        st.error("No active project available to save.")
-        return None
+        project_id = get_active_project_id()
+        if not project_id:
+            st.error("Could not create the initial project record; nothing was saved.")
+            return None
 
     ensure_project_title_loaded()
+    # The authoritative Project Title is read-only here. Only Confirm Only If
+    # Renaming may update it; creating a version must NEVER rename a project.
+    try:
+        parent = (supabase.table("writersblock_projects")
+                  .select("project_title")
+                  .eq("id", project_id).eq("user_id", user_id)
+                  .limit(1).execute())
+        parent_rows = getattr(parent, "data", None) or []
+    except Exception as exc:
+        st.error(f"Cannot verify the project title. Save blocked: {exc}")
+        return None
+    if len(parent_rows) != 1:
+        st.error("Project identity cannot be verified; nothing was saved.")
+        return None
+    actual_title = str(parent_rows[0].get("project_title") or "").strip()
+    if not actual_title or actual_title != get_project_title():
+        st.error("Project title differs from its saved master. Use Confirm Only If Renaming; no version was saved.")
+        return None
 
-    requested_version_name = clean_project_version_name(
-        version_name
-        or st.session_state.get("project_version_name")
-        or "Original"
-    ) or "Original"
+    master_saved = wbs_has_saved_master()
+    if master_saved is None:
+        st.error("Cannot check existing versions. No data was written.")
+        return None
+    if save_as_new_version and master_saved is False:
+        st.error("Save the new project's master record first.")
+        return None
 
-    if save_as_new_version:
-        st.session_state.project_version_name = requested_version_name
-    elif not str(st.session_state.get("project_version_name") or "").strip():
-        st.session_state.project_version_name = requested_version_name
-
-    # Save Project must retain the writer's full Quill concept, not merely its project title.
     if (st.session_state.get("version_source_mode") == "Quill Assisted"
             and not str(st.session_state.get("story_seed") or "").strip()):
         st.error("No Quill story concept is present to save. Generate or restore it first.")
         return None
-
-    changed_areas = get_changed_concept_version_areas()
-    st.session_state.concept_change_areas = list(changed_areas)
 
     try:
         snapshot = get_project_session_snapshot()
@@ -596,45 +676,63 @@ def save_current_project_session_to_supabase(version_name=None, save_as_new_vers
     if snapshot.get("version_source_mode") == "Quill Assisted":
         snapshot["saved_quill_concept"] = str(st.session_state.get("story_seed") or "")
     snapshot["current_project_id"] = project_id
+    snapshot["project_title"] = actual_title
+
+    # Loaded versions have a known baseline. A no-op is an explicit successful
+    # navigation checkpoint but NEVER performs a database INSERT.
+    if master_saved:
+        changed = wbs_work_has_changed(snapshot)
+        if changed is False:
+            st.info("No project changes detected; no new version was created.")
+            return SimpleNamespace(unchanged=True, data=[])
+        if changed is None:
+            st.error("Saved-version baseline is unavailable. Reload this project before saving; nothing was written.")
+            return None
+
+    changed_areas = get_changed_concept_version_areas()
+    requested_version_name = clean_project_version_name(
+        version_name or (get_suggested_project_version_name() if master_saved else "Original")
+    ) or ("New Revision" if master_saved else "Original")
     snapshot["project_version_name"] = requested_version_name
     snapshot["concept_change_areas"] = list(changed_areas)
-    st.session_state.last_saved_project_at = snapshot.get("saved_at")
-
-    # Keep editable Step 1 metadata synchronized with the parent project record.
-    supabase.table("writersblock_projects").update({
-        "project_title": get_project_title_for_display()[:80],
-        "project_type": st.session_state.get("format_type", "story"),
-    }).eq("id", project_id).execute()
-
     internal_version_number = get_next_project_session_internal_version(project_id)
 
-    result = supabase.table("writersblock_project_drafts").insert({
-        "project_id": project_id,
-        "user_id": user_id,
-        "draft_title": f"Saved Project Session — {requested_version_name}",
-        "draft_type": "project_session",
-        "draft_content": json.dumps(snapshot),
-        "version_number": internal_version_number,
-    }).execute()
+    # INSERT ONLY: never update an existing saved revision while saving a new one.
+    try:
+        result = (supabase.table("writersblock_project_drafts").insert({
+            "project_id": project_id,
+            "user_id": user_id,
+            "draft_title": f"Saved Project Session — {requested_version_name}",
+            "draft_type": "project_session",
+            "draft_content": json.dumps(snapshot),
+            "version_number": internal_version_number,
+        }).execute())
+    except Exception as exc:
+        st.error(f"Unable to save the new version: {exc}")
+        return None
+    if not result or not getattr(result, "data", None):
+        st.error("The database did not confirm a saved version; nothing has been overwritten.")
+        return None
 
-    if result and st.session_state.get("project_scope") == "Book in a Series":
+    if st.session_state.get("project_scope") == "Book in a Series":
+        # Existing series metadata code is preserved; this is the only existing
+        # extra save path, and never edits manuscript/version text.
         save_series_metadata_for_project(project_id)
 
-    if result and getattr(result, "data", None):
-        # The just-saved state becomes the baseline for the current named branch.
-        set_loaded_concept_version_baseline(snapshot)
-        st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
-        st.session_state["_wbs_last_saved_project_id"] = str(project_id)
-        st.session_state["_wbs_saved_session_to_select"] = str(result.data[0].get("id") or "")
-        st.session_state["_wbs_active_saved_session_row_id"] = str(result.data[0].get("id") or "")
-        st.session_state["wbs_locked_format_id"] = snapshot["active_format_id"]
-        st.session_state["_wbs_locked_project_id"] = str(project_id)
-        st.session_state["_wbs_loaded_project_id"] = str(project_id)
-        st.session_state["_wbs_loaded_project_title"] = str(snapshot.get("project_title") or "").strip()
-        return result
-
-    st.error("The project was not confirmed saved. Remain here and retry.")
-    return None
+    st.session_state.project_version_name = requested_version_name
+    st.session_state.concept_change_areas = list(changed_areas)
+    st.session_state.last_saved_project_at = snapshot.get("saved_at")
+    set_loaded_concept_version_baseline(snapshot)
+    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
+    st.session_state["_wbs_last_saved_project_id"] = str(project_id)
+    st.session_state["_wbs_saved_session_to_select"] = str(result.data[0].get("id") or "")
+    st.session_state["_wbs_active_saved_session_row_id"] = str(result.data[0].get("id") or "")
+    st.session_state["_wbs_loaded_saved_session_id"] = str(result.data[0].get("id") or "")
+    st.session_state["wbs_locked_format_id"] = snapshot["active_format_id"]
+    st.session_state["_wbs_locked_project_id"] = str(project_id)
+    st.session_state["_wbs_loaded_project_id"] = str(project_id)
+    st.session_state["_wbs_loaded_project_title"] = actual_title
+    return result
 
 
 def persist_project_integrity_in_current_version(report, source_signature, status):
@@ -2451,42 +2549,35 @@ def wbs_concept_contains_editorial_commentary(text):
 
 
 def render_format_template_save_reminder():
-    """Bottom-of-template reminder and save action for Concept Development."""
+    """One master Save Project, then non-destructive new versions (all formats)."""
     st.markdown("---")
     with st.container(border=True):
-        st.markdown("**💾 Remember to Save Project before leaving Concept Development.**")
-
+        st.markdown("**Project saving and version history**")
+        st.markdown(WBS_SAVE_EXPLANATION)
         if st.session_state.get("demo_mode"):
             st.caption("Project saving is available in the full Writer Edition.")
-            if st.button(
-                "💾 Save Project 🔒",
-                key=f"template_save_project_trial_{st.session_state.get('active_format_id', 'format')}",
-                use_container_width=True,
-                type="secondary",
-            ):
+            if st.button("💾 Save Project 🔒", key="template_save_project_trial", use_container_width=True):
                 full_version_only_notice("Saved Projects")
             return
-
-        if st.button(
-            "💾 Save Project",
-            key=f"template_save_project_{st.session_state.get('active_format_id', 'format')}",
-            use_container_width=True,
-            type="secondary",
-        ):
-            ensure_project_title_loaded()
-            if not get_project_title():
-                st.warning("Name this project before saving.")
-                return
-            save_result = save_current_project_session_to_supabase()
-            if save_result:
-                st.success("Project saved and available in Saved Projects / Versions.")
-                st.rerun()
-
-        if get_active_project_id():
+        has_master = wbs_has_saved_master()
+        if has_master is None:
+            st.warning("Cannot verify this project's save history. Saving is disabled until the connection is restored.")
+        elif has_master:
             render_save_as_named_version_control(
                 f"concept_{st.session_state.get('active_format_id', 'format')}"
             )
-
+        elif st.button(
+            "💾 Save Project — Create Master",
+            key=f"template_save_project_{st.session_state.get('active_format_id', 'format')}",
+            use_container_width=True, type="secondary",
+        ):
+            if not get_project_title():
+                st.warning("Name the new project before saving.")
+                return
+            result = save_current_project_session_to_supabase()
+            if result and not getattr(result, "unchanged", False):
+                st.success("Master project saved. Future changes are new versions.")
+                st.rerun()
 
 
 if "project_version_name" not in st.session_state:
@@ -4489,19 +4580,9 @@ def rename_current_project_everywhere(new_title):
         st.session_state["_wbs_loaded_project_id"] = str(project_id)
         st.session_state["_wbs_loaded_project_title"] = clean_title
 
-        # 5) Save the complete current working state immediately for licensed users.
-        #    This is a database save only; it makes no Gemini/API generation call.
-        if st.session_state.get("licensed_mode"):
-            save_result = save_current_project_session_to_supabase()
-            if not save_result:
-                return (
-                    True,
-                    "Project renamed, but the current project session could not be saved automatically. "
-                    "Use Save Project before leaving.",
-                )
-
-
-        return True, f'Project renamed to "{clean_title}" and current work saved.'
+        # Project identity changed; this operation does NOT create a new version.
+        # Explicit edits must be saved separately using New Version.
+        return True, f'Project renamed to "{clean_title}". Earlier versions remain available; edits require a new version.'
 
     except Exception as exc:
         return False, f"Project rename could not be completed: {exc}"
@@ -4533,6 +4614,7 @@ def render_project_title_banner(stage_key):
             )
             return
 
+        st.caption("Project Title changes only when you confirm a rename. All other edits use Save Project Changes As A New Version.")
         rename_key = f"rename_project_title_{safe_stage}_{project_id}"
         source_key = f"{rename_key}_source"
 
@@ -5949,6 +6031,9 @@ with st.sidebar.expander("Saved Projects / Versions", expanded=False):
                     st.session_state.current_manuscript_save_version = int(selected_version.get("version_number") or 0)
                     st.session_state.rewritten_manuscript = ""
                     st.session_state.rewrite_applied_message = ""
+                    # Exact writer-selected checkpoint, no phantom version on reload.
+                    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature()
+                    st.session_state["_wbs_last_saved_project_id"] = str(selected_project_id)
                     st.session_state.show_saved_version_manager = False
 
                     # Open at Concept but unlock review of all reached stages.
@@ -6093,7 +6178,7 @@ def wbs_verify_navigation_project_identity():
 def wbs_request_stage_change(destination, export_view=None):
     """Go directly to the requested writing stage; never display a second save gate.
 
-    Project saving remains available through the normal Save Project control.
+    Project saving is a master-first action; later edits create new versions.
     """
     current = st.session_state.get("project_stage", "Intake")
     current_export = bool(st.session_state.get("export_view", False))
@@ -6116,7 +6201,7 @@ def wbs_request_stage_change(destination, export_view=None):
     if anchor_id and anchor_title and current == "Intake" and destination != "Intake" and active_title != anchor_title:
         st.error(
             f'Project title changed from "{anchor_title}" to "{active_title}". '
-            "Save the revised project or confirm the rename before moving to another stage."
+            "Use Confirm Only If Renaming before moving to another stage."
         )
         return
     st.session_state["wbs_pending_stage_change"] = {
@@ -6272,24 +6357,25 @@ with st.sidebar.container(border=True):
         if st.session_state.pop("_wbs_concept_recovered_for_review", False):
             st.info("Concept setup was restored from an earlier save of this same project. Review it before saving.")
 
-if st.session_state.get("demo_mode"):
-    if st.sidebar.button("💾 Save Project 🔒", key="save_current_project_session_trial", use_container_width=True, type="secondary"):
-        full_version_only_notice("Saved Projects")
-else:
-    if st.sidebar.button("💾 Save Project", key="save_current_project_session", use_container_width=True, type="secondary"):
-        ensure_project_title_loaded()
-
-        if not get_project_title():
-            st.sidebar.warning("Project title could not be found. Return to Concept Development and name the project before saving.")
-        else:
-            result = save_current_project_session_to_supabase()
-            if result:
-                st.sidebar.success("Project saved. Your latest project is available in Saved Projects / Versions.")
-                st.rerun()
-
-if not st.session_state.get("demo_mode"):
-    with st.sidebar:
-        render_save_as_named_version_control("sidebar")
+with st.sidebar:
+    st.caption("**Project saving:** Title changes only through Rename Project. First save creates the master; later edits create new versions.")
+    if st.session_state.get("demo_mode"):
+        if st.button("💾 Save Project 🔒", key="save_current_project_session_trial", use_container_width=True, type="secondary"):
+            full_version_only_notice("Saved Projects")
+    else:
+        _sidebar_has_master = wbs_has_saved_master()
+        if _sidebar_has_master is None:
+            st.warning("Cannot verify saved project history; saving is disabled.")
+        elif _sidebar_has_master:
+            render_save_as_named_version_control("sidebar")
+        elif st.button("💾 Save Project — Create Master", key="save_current_project_session", use_container_width=True, type="secondary"):
+            if not get_project_title():
+                st.warning("Name the project in Concept Development first.")
+            else:
+                _master_result = save_current_project_session_to_supabase()
+                if _master_result and not getattr(_master_result, "unchanged", False):
+                    st.success("Master project saved. Future changes become versions.")
+                    st.rerun()
 
 if st.session_state.get("demo_mode"):
     if st.sidebar.button("📚 Saved Version Manager 🔒", key="sidebar_saved_version_manager_trial", use_container_width=True, type="secondary"):
@@ -6321,6 +6407,8 @@ def wbs_clear_new_project_ui_state():
     st.session_state.pop("wbs_pending_stage_change", None)
     st.session_state.pop("_wbs_last_saved_work_signature", None)
     st.session_state.pop("_wbs_last_saved_project_id", None)
+    st.session_state.pop("_wbs_active_saved_session_row_id", None)
+    st.session_state.pop("_wbs_loaded_saved_session_id", None)
     st.session_state.pop("_wbs_loaded_quill_concept", None)
 
 if st.sidebar.button("⚠️ Start New Project", key="global_reset", use_container_width=True, type="secondary"):
@@ -10336,7 +10424,7 @@ elif st.session_state.project_stage == "Rewrite Engine":
                 else:
                     st.session_state.rewrite_applied_message = (
                         st.session_state.rewrite_applied_message
-                        + " Project session was not saved automatically. Use Save Project before leaving."
+                        + " Project session was not saved automatically. Use Save Project Changes As A New Version before leaving."
                     )
 
                 wbs_request_stage_change("Isolation Guardrail", export_view=True)
