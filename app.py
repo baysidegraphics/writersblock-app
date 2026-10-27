@@ -5143,6 +5143,214 @@ def get_saved_project_sessions_for_dropdown():
     return result.data or []
 
 
+# WBS_LEGACY_MISLINKED_SAVE_RECOVERY_2026_10_27
+# A historical project_session may have a trustworthy manuscript/title but a
+# wrong parent project_id.  Never load it as the parent.  This separate, strictly
+# opt-in recovery COPIES valid sessions under a NEW parent, preserving all originals.
+def wbs_legacy_recovery_candidates(rows, source_project_id, title):
+    """Pure validation; never take a session from another parent or title."""
+    result = []
+    source_project_id = str(source_project_id or "").strip()
+    title_fold = str(title or "").strip().casefold()
+    for row in rows:
+        if str(row.get("project_id") or "").strip() != source_project_id:
+            continue
+        try:
+            snapshot = json.loads(row.get("draft_content") or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(snapshot, dict):
+            continue
+        if str(snapshot.get("project_title") or "").strip().casefold() != title_fold:
+            continue
+        embedded = str(snapshot.get("current_project_id") or "").strip()
+        if embedded and embedded != source_project_id:
+            continue
+        if not row.get("id"):
+            continue
+        result.append((row, snapshot))
+    return sorted(result, key=lambda pair: (str(pair[0].get("created_at") or ""),
+                                            str(pair[0].get("id") or "")))
+
+
+def wbs_legacy_recovery_snapshot_copy(snapshot, new_project_id, source_row_id):
+    """Make an independent copy without ever modifying the source dictionary."""
+    restored = json.loads(json.dumps(snapshot, ensure_ascii=False))
+    restored["current_project_id"] = str(new_project_id)
+    restored["_wbs_legacy_recovery_source_session_id"] = str(source_row_id)
+    # A legacy source row was linked to the WRONG parent. Its historical series
+    # membership might also be wrong; preserve evidence but require a separate,
+    # explicit Save Project to Series confirmation before linking the new copy.
+    if restored.get("project_scope") == "Book in a Series" or restored.get("series_name"):
+        restored["_wbs_legacy_recovery_original_series"] = {
+            field: restored.get(field) for field in (
+                "project_scope", "series_key", "series_name", "series_book_number",
+                "series_continuity_mode", "series_reference_ids")
+        }
+        restored["project_scope"] = "Standalone Book"
+        restored["series_key"] = ""
+        restored["series_name"] = ""
+        restored["series_book_number"] = 1
+        restored["series_reference_ids"] = []
+        restored["series_selection_signature"] = ""
+    return restored
+
+
+def wbs_legacy_original_story_text(snapshot):
+    for name in ("current_draft_output", "final_output_text", "rewritten_manuscript",
+                 "saved_version_source_text", "imported_source_text", "story_seed"):
+        value = snapshot.get(name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def wbs_find_prior_legacy_recovery(source_row_id, user_id):
+    """Idempotence check; don't create a second recovered project on retries."""
+    rows = (supabase.table("writersblock_project_drafts")
+            .select("id,project_id,draft_content")
+            .eq("user_id", user_id).eq("draft_type", "project_session").execute()).data or []
+    for row in rows:
+        try:
+            snapshot = json.loads(row.get("draft_content") or "{}")
+        except (TypeError, ValueError):
+            continue
+        if (isinstance(snapshot, dict) and
+                str(snapshot.get("_wbs_legacy_recovery_source_session_id") or "") == str(source_row_id)):
+            return str(row.get("project_id") or "")
+    return ""
+
+
+def wbs_create_independent_legacy_copy(selected_row, title, user_id):
+    """Append-only copy of historical project sessions; no UPDATE/DELETE statements.
+
+    This is deliberately NOT a series reassignment, and does not copy manuscript
+    checkpoints whose historical attribution to the wrong parent is ambiguous.
+    """
+    source_id = str(selected_row.get("project_id") or "").strip()
+    selected_row_id = str(selected_row.get("id") or "").strip()
+    if not source_id or not selected_row_id or not user_id:
+        raise ValueError("The original saved entry could not be verified.")
+    checked = (supabase.table("writersblock_project_drafts")
+               .select("id,project_id,user_id,draft_content,created_at,version_number")
+               .eq("id", selected_row_id).eq("project_id", source_id)
+               .eq("user_id", user_id).eq("draft_type", "project_session")
+               .limit(1).execute()).data or []
+    if len(checked) != 1:
+        raise ValueError("The selected saved record changed. Nothing was recovered.")
+    selected_snapshot = json.loads(checked[0].get("draft_content") or "{}")
+    if str(selected_snapshot.get("project_title") or "").strip() != title:
+        raise ValueError("Saved project title changed. Nothing was recovered.")
+    # A title conflict is not alone enough; the selected source must still have
+    # a DIFFERENT verified parent title, otherwise this recovery is unnecessary.
+    original_parent = (supabase.table("writersblock_projects")
+                       .select("id,project_title")
+                       .eq("id", source_id).eq("user_id", user_id)
+                       .limit(1).execute()).data or []
+    if len(original_parent) != 1 or str(original_parent[0].get("project_title") or "").casefold() == title.casefold():
+        raise ValueError("The parent mismatch is no longer confirmed; no copy created.")
+    existing_copy = wbs_find_prior_legacy_recovery(selected_row_id, user_id)
+    if existing_copy:
+        raise ValueError("This saved record was already recovered to a separate project; no duplicate created.")
+    historical = (supabase.table("writersblock_project_drafts")
+                  .select("id,project_id,user_id,draft_content,created_at,version_number")
+                  .eq("project_id", source_id).eq("user_id", user_id)
+                  .eq("draft_type", "project_session")
+                  .order("created_at", desc=False).execute()).data or []
+    candidates = wbs_legacy_recovery_candidates(historical, source_id, title)
+    if not any(str(row.get("id")) == selected_row_id for row, _ in candidates):
+        raise ValueError("Selected saved version was not verified among this title's history.")
+    # A new record, never the original parent.  No code writes to old project IDs.
+    new_parent = (supabase.table("writersblock_projects").insert({
+        "user_id": user_id, "project_title": title,
+        "project_type": str(selected_snapshot.get("format_type") or "story"),
+        "project_status": "active",
+    }).execute()).data or []
+    if len(new_parent) != 1 or not new_parent[0].get("id"):
+        raise RuntimeError("A separate recovery project could not be created. Originals were untouched.")
+    new_id = new_parent[0]["id"]
+    # One atomic bulk INSERT for all history snapshots: no partial revisions.
+    payload = []
+    for number, (source_row, snapshot) in enumerate(candidates, start=1):
+        cloned = wbs_legacy_recovery_snapshot_copy(snapshot, new_id, source_row["id"])
+        cloned["_wbs_legacy_recovery_original_created_at"] = source_row.get("created_at")
+        branch = clean_project_version_name(cloned.get("project_version_name") or "Original") or "Original"
+        payload.append({
+            "user_id": user_id, "project_id": new_id,
+            "draft_title": "Recovered Project Session — " + branch,
+            "draft_type": "project_session", "draft_content": json.dumps(cloned, ensure_ascii=False),
+            "version_number": number,
+        })
+    copied = (supabase.table("writersblock_project_drafts").insert(payload).execute()).data or []
+    if len(copied) != len(candidates):
+        raise RuntimeError("Recovery records were not confirmed. Originals remain untouched; do not retry automatically.")
+    selected_clone_id = ""
+    for row in copied:
+        try:
+            snapshot = json.loads(row.get("draft_content") or "{}")
+        except (TypeError, ValueError):
+            continue
+        if str(snapshot.get("_wbs_legacy_recovery_source_session_id") or "") == selected_row_id:
+            selected_clone_id = str(row.get("id") or "")
+            break
+    if not selected_clone_id:
+        raise RuntimeError("Could not verify which recovery entry was created; originals remain unchanged.")
+    return new_id, selected_clone_id, len(candidates)
+
+
+def render_wbs_legacy_recovery(selected_row):
+    """Expose the original snapshot read-only, then a confirmed independent COPY."""
+    row_id = str(selected_row.get("id") or "")
+    if not row_id:
+        return
+    source_id = str(selected_row.get("project_id") or "")
+    try:
+        snapshot = json.loads(selected_row.get("draft_content") or "{}")
+    except (ValueError, TypeError):
+        return
+    if not isinstance(snapshot, dict):
+        return
+    title = str(snapshot.get("project_title") or "").strip()
+    parent = get_project_title_from_project_id(source_id)
+    if not title or not parent or title.casefold() == parent.casefold():
+        return
+    with st.expander("Recover this misplaced saved project (read-only first)", expanded=False):
+        st.warning(f'"{title}" was saved under "{parent}". Neither record will be changed automatically.')
+        text = wbs_legacy_original_story_text(snapshot)
+        st.caption(f'Saved title: {title} | Stored words: {count_words(text):,} | Original parent: {parent}')
+        if text:
+            st.text_area("Saved text preview — read-only", value=text[:10000],
+                         height=180, disabled=True, key=f"legacy_preview_{row_id}")
+        else:
+            st.info("No story text is embedded in this session; its development setup can still be backed up.")
+        # First make a local backup before offering any write. No DB actions here.
+        memory = BytesIO()
+        with zipfile.ZipFile(memory, "w", zipfile.ZIP_DEFLATED) as backup:
+            backup.writestr("original_project_session.json", json.dumps(snapshot, indent=2, ensure_ascii=False))
+            backup.writestr("saved_story.txt", text)
+        st.download_button("Download Original Saved Record (ZIP)", data=memory.getvalue(),
+                           file_name="WBS_Legacy_Project_Backup.zip", mime="application/zip",
+                           key=f"legacy_backup_{row_id}")
+        st.caption("Optional: create an independent copy so this saved project can load under its own title."
+                   " The original record and The Reflection are NOT edited or deleted."
+                   " Series assignment and old manuscript checkpoints are not automatically moved.")
+        confirmed = st.checkbox("I reviewed the preview and backup; create a separate recovery project",
+                                key=f"legacy_confirm_{row_id}")
+        typed = st.text_input("Confirm by typing the exact saved project title", key=f"legacy_typed_{row_id}")
+        if st.button("Recover as Separate Project", key=f"legacy_do_recover_{row_id}",
+                     disabled=not(confirmed and typed.strip() == title), use_container_width=True):
+            try:
+                new_id, new_session_id, count = wbs_create_independent_legacy_copy(
+                    selected_row, title, get_current_user_id())
+            except Exception as exc:
+                st.error(str(exc))
+            else:
+                st.session_state["_wbs_saved_session_to_select"] = new_session_id
+                st.success(f"Created a separate {title} project with {count} saved session(s)."
+                           " Originals remain untouched; select the recovered entry to load it.")
+                st.rerun()
+
+
 # WBS_SIDEBAR_DRAFT_FINAL_LABELS_2026_09_08
 def get_saved_projects_versions_dropdown_items():
     """List all saved entries, grouped by project, most recently saved first.
@@ -5177,17 +5385,22 @@ def get_saved_projects_versions_dropdown_items():
         branch_name = clean_project_version_name(
             snapshot.get("project_version_name") or "Original"
         ) or "Original"
-        saved_time = str(saved_row.get("created_at") or snapshot.get("saved_at") or "")
+        saved_time = str(snapshot.get("_wbs_legacy_recovery_original_created_at")
+                         or saved_row.get("created_at") or snapshot.get("saved_at") or "")
         items.append({
             "type": "project_session", "row": saved_row,
             "version_name": branch_name, "_title": title,
             "_time": saved_time, "_detail": branch_name,
+            "_recovered_copy": bool(snapshot.get("_wbs_legacy_recovery_source_session_id")),
         })
 
     # Assign numbers chronologically within each project. Display recent first.
     by_project = {}
     for item in items:
-        project_key = item["_title"].strip().casefold()
+        # Different saved project IDs must NEVER share a version sequence just
+        # because they have the same title (legacy mislinked saves exist).
+        project_key = (str((item.get("row") or {}).get("project_id") or ""),
+                       item["_title"].strip().casefold())
         by_project.setdefault(project_key, []).append(item)
 
     groups = []
@@ -5205,7 +5418,8 @@ def get_saved_projects_versions_dropdown_items():
             else:
                 base_number += 1
                 item['_ordinal'] = base_number
-                item['label'] = f"{item['_title']} — V-{base_number} — {full_date_label(item['_time'])}"
+                item['label'] = (f"{item['_title']} — V-{base_number} — {full_date_label(item['_time'])}"
+                                 + (" — RECOVERED COPY" if item.get("_recovered_copy") else ""))
         groups.append(sorted(group, key=lambda item: (item["_time"], item["_ordinal"]), reverse=True))
 
     groups.sort(key=lambda group: group[0]["_time"] if group else "", reverse=True)
@@ -5213,7 +5427,7 @@ def get_saved_projects_versions_dropdown_items():
     for group in groups:
         for item in group:
             # Remove presentation-only fields before returning.
-            for key in ("_title", "_time", "_detail", "_ordinal"):
+            for key in ("_title", "_time", "_detail", "_ordinal", "_recovered_copy"):
                 item.pop(key, None)
             result.append(item)
     return result
@@ -6925,6 +7139,7 @@ with st.sidebar.expander("Saved Projects / Versions", expanded=False):
                         f'"{_parent_title}". Loading has been blocked to prevent '
                         'mixing projects. No data was saved or changed.'
                     )
+                    render_wbs_legacy_recovery(_row)
 
             if st.button("Load Selected Saved Item", key="sidebar_load_saved_item", use_container_width=True):
                 if selected_saved_item and selected_saved_item["type"] == "project_session":
