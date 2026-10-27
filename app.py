@@ -5187,22 +5187,77 @@ def wbs_legacy_recovery_snapshot_copy(snapshot, new_project_id, source_row_id):
                 "project_scope", "series_key", "series_name", "series_book_number",
                 "series_continuity_mode", "series_reference_ids")
         }
-        restored["project_scope"] = "Standalone Book"
-        restored["series_key"] = ""
-        restored["series_name"] = ""
-        restored["series_book_number"] = 1
-        restored["series_reference_ids"] = []
-        restored["series_selection_signature"] = ""
+    # An independent recovery is ALWAYS unassigned until explicitly confirmed.
+    restored["project_scope"] = "Standalone Book"
+    restored["series_key"] = ""
+    restored["series_name"] = ""
+    restored["series_book_number"] = 1
+    restored["series_reference_ids"] = []
+    restored["series_selection_signature"] = ""
     return restored
 
 
-def wbs_legacy_original_story_text(snapshot):
-    for name in ("current_draft_output", "final_output_text", "rewritten_manuscript",
-                 "saved_version_source_text", "imported_source_text", "story_seed"):
-        value = snapshot.get(name)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
+# Recover ONLY text that exists in the ORIGINAL saved snapshot.
+# An older project can have multiple full text fields from different stages.
+# Never guess which is the authoritative book.
+WBS_LEGACY_TEXT_FIELDS = (
+    "saved_version_source_text", "imported_source_text", "current_draft_output",
+    "manuscript_text", "final_output_text", "rewritten_manuscript",
+    "saved_quill_concept", "story_seed", "chosen_option_text", "plot_outline",
+)
+
+
+def wbs_legacy_saved_text_sources(snapshot):
+    """Display candidate text fields individually; original JSON is never altered."""
+    if not isinstance(snapshot, dict):
+        return {}
+    found = {}
+    for key in WBS_LEGACY_TEXT_FIELDS:
+        text = snapshot.get(key)
+        if isinstance(text, str) and text.strip():
+            found[key] = text  # Keep exact stored text, without stripping or truncating.
+    # Older record schemas sometimes used additional manuscript field names.
+    # Expose substantial top-level strings instead of silently omitting them.
+    for key, text in snapshot.items():
+        if (key not in found and isinstance(key, str) and not key.startswith("_")
+                and isinstance(text, str) and len(text.strip()) >= 100):
+            found[key] = text
+    blocks = snapshot.get("scene_blocks")
+    if isinstance(blocks, dict) and blocks:
+        def order_key(pair):
+            value = str(pair[0])
+            return (0, int(value)) if value.isdigit() else (1, value)
+        scene_text = "\n\n".join(str(value) for _, value in
+                                   sorted(blocks.items(), key=order_key)
+                                   if isinstance(value, str) and value.strip())
+        if scene_text:
+            found["scene_blocks (assembled)"] = scene_text
+    return found
+
+
+def wbs_legacy_original_story_text(snapshot, chosen_field=None):
+    """No implicit priority: only an explicitly selected field is authoritative."""
+    return wbs_legacy_saved_text_sources(snapshot).get(chosen_field, "")
+
+
+def wbs_legacy_original_record_zip(snapshot, selected_field=None):
+    """Immutable original JSON plus separate exact text sources for user verification."""
+    sources = wbs_legacy_saved_text_sources(snapshot)
+    memory = BytesIO()
+    manifest = {"text_sources": []}
+    with zipfile.ZipFile(memory, "w", zipfile.ZIP_DEFLATED) as backup:
+        backup.writestr("original_project_session.json", json.dumps(snapshot, indent=2, ensure_ascii=False))
+        for n, (key, value) in enumerate(sources.items(), start=1):
+            filename = f"saved_text_sources/{n:02d}_{re.sub(r'[^a-zA-Z0-9_]+', '_', key)}.txt"
+            backup.writestr(filename, value)
+            manifest["text_sources"].append({
+                "field": key, "file": filename, "words": len(value.split()),
+                "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+            })
+        if selected_field in sources:
+            backup.writestr("selected_saved_text.txt", sources[selected_field])
+        backup.writestr("manifest.json", json.dumps(manifest, indent=2))
+    return memory.getvalue()
 
 
 def wbs_find_prior_legacy_recovery(source_row_id, user_id):
@@ -5221,11 +5276,13 @@ def wbs_find_prior_legacy_recovery(source_row_id, user_id):
     return ""
 
 
-def wbs_create_independent_legacy_copy(selected_row, title, user_id):
-    """Append-only copy of historical project sessions; no UPDATE/DELETE statements.
+def wbs_create_independent_legacy_copy(selected_row, title, user_id,
+                                       chosen_field=None, expected_text_sha=None):
+    """Copy ONE user-verified saved session under a NEW project; never edit originals.
 
-    This is deliberately NOT a series reassignment, and does not copy manuscript
-    checkpoints whose historical attribution to the wrong parent is ambiguous.
+    The chosen manuscript field is taken from a fresh database read. The exact
+    selected value is installed as the recovered working manuscript. Other fields
+    from the original snapshot are preserved for audit, not overwritten in source.
     """
     source_id = str(selected_row.get("project_id") or "").strip()
     selected_row_id = str(selected_row.get("id") or "").strip()
@@ -5239,10 +5296,11 @@ def wbs_create_independent_legacy_copy(selected_row, title, user_id):
     if len(checked) != 1:
         raise ValueError("The selected saved record changed. Nothing was recovered.")
     selected_snapshot = json.loads(checked[0].get("draft_content") or "{}")
-    if str(selected_snapshot.get("project_title") or "").strip() != title:
+    if not isinstance(selected_snapshot, dict) or str(selected_snapshot.get("project_title") or "").strip() != title:
         raise ValueError("Saved project title changed. Nothing was recovered.")
-    # A title conflict is not alone enough; the selected source must still have
-    # a DIFFERENT verified parent title, otherwise this recovery is unnecessary.
+    source_text = wbs_legacy_original_story_text(selected_snapshot, chosen_field)
+    if not source_text or not expected_text_sha or hashlib.sha256(source_text.encode("utf-8")).hexdigest() != expected_text_sha:
+        raise ValueError("Saved text differs from your preview or was not verified. Nothing was recovered.")
     original_parent = (supabase.table("writersblock_projects")
                        .select("id,project_title")
                        .eq("id", source_id).eq("user_id", user_id)
@@ -5251,16 +5309,8 @@ def wbs_create_independent_legacy_copy(selected_row, title, user_id):
         raise ValueError("The parent mismatch is no longer confirmed; no copy created.")
     existing_copy = wbs_find_prior_legacy_recovery(selected_row_id, user_id)
     if existing_copy:
-        raise ValueError("This saved record was already recovered to a separate project; no duplicate created.")
-    historical = (supabase.table("writersblock_project_drafts")
-                  .select("id,project_id,user_id,draft_content,created_at,version_number")
-                  .eq("project_id", source_id).eq("user_id", user_id)
-                  .eq("draft_type", "project_session")
-                  .order("created_at", desc=False).execute()).data or []
-    candidates = wbs_legacy_recovery_candidates(historical, source_id, title)
-    if not any(str(row.get("id")) == selected_row_id for row, _ in candidates):
-        raise ValueError("Selected saved version was not verified among this title's history.")
-    # A new record, never the original parent.  No code writes to old project IDs.
+        raise ValueError("This saved record was already recovered; no duplicate was created.")
+    # Do not bulk-copy other unreviewed sessions, even if their title matches.
     new_parent = (supabase.table("writersblock_projects").insert({
         "user_id": user_id, "project_title": title,
         "project_type": str(selected_snapshot.get("format_type") or "story"),
@@ -5269,37 +5319,28 @@ def wbs_create_independent_legacy_copy(selected_row, title, user_id):
     if len(new_parent) != 1 or not new_parent[0].get("id"):
         raise RuntimeError("A separate recovery project could not be created. Originals were untouched.")
     new_id = new_parent[0]["id"]
-    # One atomic bulk INSERT for all history snapshots: no partial revisions.
-    payload = []
-    for number, (source_row, snapshot) in enumerate(candidates, start=1):
-        cloned = wbs_legacy_recovery_snapshot_copy(snapshot, new_id, source_row["id"])
-        cloned["_wbs_legacy_recovery_original_created_at"] = source_row.get("created_at")
-        branch = clean_project_version_name(cloned.get("project_version_name") or "Original") or "Original"
-        payload.append({
-            "user_id": user_id, "project_id": new_id,
-            "draft_title": "Recovered Project Session — " + branch,
-            "draft_type": "project_session", "draft_content": json.dumps(cloned, ensure_ascii=False),
-            "version_number": number,
-        })
-    copied = (supabase.table("writersblock_project_drafts").insert(payload).execute()).data or []
-    if len(copied) != len(candidates):
-        raise RuntimeError("Recovery records were not confirmed. Originals remain untouched; do not retry automatically.")
-    selected_clone_id = ""
-    for row in copied:
-        try:
-            snapshot = json.loads(row.get("draft_content") or "{}")
-        except (TypeError, ValueError):
-            continue
-        if str(snapshot.get("_wbs_legacy_recovery_source_session_id") or "") == selected_row_id:
-            selected_clone_id = str(row.get("id") or "")
-            break
-    if not selected_clone_id:
-        raise RuntimeError("Could not verify which recovery entry was created; originals remain unchanged.")
-    return new_id, selected_clone_id, len(candidates)
+    cloned = wbs_legacy_recovery_snapshot_copy(selected_snapshot, new_id, selected_row_id)
+    cloned["_wbs_legacy_recovery_original_created_at"] = checked[0].get("created_at")
+    cloned["_wbs_legacy_recovery_selected_text_field"] = chosen_field
+    cloned["_wbs_legacy_recovery_selected_text_sha256"] = expected_text_sha
+    # Original saved data still exists as the original JSON and in original DB row.
+    # Make the USER-VERIFIED text the new project's active working manuscript.
+    cloned["_wbs_legacy_recovery_prior_current_draft_output"] = cloned.get("current_draft_output")
+    cloned["current_draft_output"] = source_text
+    branch = clean_project_version_name(cloned.get("project_version_name") or "Original") or "Original"
+    copied = (supabase.table("writersblock_project_drafts").insert({
+        "user_id": user_id, "project_id": new_id,
+        "draft_title": "Recovered Project Session — " + branch,
+        "draft_type": "project_session", "draft_content": json.dumps(cloned, ensure_ascii=False),
+        "version_number": 1,
+    }).execute()).data or []
+    if len(copied) != 1 or not copied[0].get("id"):
+        raise RuntimeError("Recovery session could not be verified. Original projects remain untouched.")
+    return new_id, str(copied[0]["id"]), 1
 
 
 def render_wbs_legacy_recovery(selected_row):
-    """Expose the original snapshot read-only, then a confirmed independent COPY."""
+    """Preview exact saved fields, then recover ONLY after human text verification."""
     row_id = str(selected_row.get("id") or "")
     if not row_id:
         return
@@ -5316,38 +5357,51 @@ def render_wbs_legacy_recovery(selected_row):
         return
     with st.expander("Recover this misplaced saved project (read-only first)", expanded=False):
         st.warning(f'"{title}" was saved under "{parent}". Neither record will be changed automatically.')
-        text = wbs_legacy_original_story_text(snapshot)
-        st.caption(f'Saved title: {title} | Stored words: {count_words(text):,} | Original parent: {parent}')
-        if text:
-            st.text_area("Saved text preview — read-only", value=text[:10000],
-                         height=180, disabled=True, key=f"legacy_preview_{row_id}")
+        sources = wbs_legacy_saved_text_sources(snapshot)
+        st.caption("A historical save may contain DIFFERENT text in separate manuscript, draft and concept fields. "
+                   "The original JSON contains all these fields. Choose and verify the correct text; "
+                   "no field is presumed authoritative.")
+        options = [""] + list(sources.keys())
+        chosen = st.selectbox(
+            "Select saved text field to inspect", options, index=0,
+            format_func=lambda key: (f"{key} — {count_words(sources[key]):,} words" if key else
+                                     "Choose a text field from the original saved record"),
+            key=f"legacy_source_{row_id}")
+        chosen_text = wbs_legacy_original_story_text(snapshot, chosen)
+        if chosen_text:
+            st.caption(f"Displaying exactly the stored text from: {chosen} — "
+                       f"{count_words(chosen_text):,} words. Nothing is truncated or generated.")
+            st.text_area("Exact saved field — read-only", value=chosen_text,
+                         height=260, disabled=True, key=f"legacy_preview_{row_id}_{chosen}")
         else:
-            st.info("No story text is embedded in this session; its development setup can still be backed up.")
-        # First make a local backup before offering any write. No DB actions here.
-        memory = BytesIO()
-        with zipfile.ZipFile(memory, "w", zipfile.ZIP_DEFLATED) as backup:
-            backup.writestr("original_project_session.json", json.dumps(snapshot, indent=2, ensure_ascii=False))
-            backup.writestr("saved_story.txt", text)
-        st.download_button("Download Original Saved Record (ZIP)", data=memory.getvalue(),
-                           file_name="WBS_Legacy_Project_Backup.zip", mime="application/zip",
-                           key=f"legacy_backup_{row_id}")
-        st.caption("Optional: create an independent copy so this saved project can load under its own title."
-                   " The original record and The Reflection are NOT edited or deleted."
-                   " Series assignment and old manuscript checkpoints are not automatically moved.")
-        confirmed = st.checkbox("I reviewed the preview and backup; create a separate recovery project",
-                                key=f"legacy_confirm_{row_id}")
+            st.info("Choose a text field to compare with the verified original backup before recovery.")
+        st.download_button(
+            "Download Original Saved Record (ZIP)",
+            data=wbs_legacy_original_record_zip(snapshot, chosen),
+            file_name="WBS_Legacy_Project_Backup.zip", mime="application/zip",
+            key=f"legacy_backup_{row_id}")
+        st.caption("ZIP includes the entire original saved JSON and each text field separately. "
+                   "Recovery will copy only THIS verified session into a separate project; "
+                   "The Reflection, original records, and series links remain unchanged.")
+        choice_sha = hashlib.sha256(chosen_text.encode("utf-8")).hexdigest()[:12] if chosen_text else "none"
+        confirmed = st.checkbox(
+            "I matched the selected text field to the original backup and confirm it is the correct story",
+            key=f"legacy_confirm_{row_id}_{chosen}_{choice_sha}", value=False)
         typed = st.text_input("Confirm by typing the exact saved project title", key=f"legacy_typed_{row_id}")
-        if st.button("Recover as Separate Project", key=f"legacy_do_recover_{row_id}",
-                     disabled=not(confirmed and typed.strip() == title), use_container_width=True):
+        if st.button("Recover Verified Session as Separate Project",
+                     key=f"legacy_do_recover_{row_id}",
+                     disabled=not(chosen_text and confirmed and typed.strip() == title),
+                     use_container_width=True):
             try:
                 new_id, new_session_id, count = wbs_create_independent_legacy_copy(
-                    selected_row, title, get_current_user_id())
+                    selected_row, title, get_current_user_id(), chosen,
+                    hashlib.sha256(chosen_text.encode("utf-8")).hexdigest())
             except Exception as exc:
                 st.error(str(exc))
             else:
                 st.session_state["_wbs_saved_session_to_select"] = new_session_id
-                st.success(f"Created a separate {title} project with {count} saved session(s)."
-                           " Originals remain untouched; select the recovered entry to load it.")
+                st.success(f"Created one separately recovered {title} session with the verified story text. "
+                           "Originals remain untouched. Select the recovered entry to load it.")
                 st.rerun()
 
 
