@@ -275,6 +275,121 @@ def save_project_draft_to_supabase(project_id, draft_title, draft_type, draft_co
     return result
 
 
+WBS_SHARED_DEVELOPMENT_KEYS = {
+    "project_title", "dialogue_style", "story_premise", "premise",
+    "logline", "story_idea", "objective", "core_premise",
+}
+
+
+def wbs_expected_saved_development_fields(fmt, choices):
+    """Return required *visible* field keys from the chosen format's setup.
+
+    A conditional, hidden field is not required. Optional text fields must
+    still be present with an empty value to prove the form was captured.
+    """
+    template = get_wbs_format_template(fmt) or {}
+    fields = template.get("concept_fields") or []
+    choices = choices if isinstance(choices, dict) else {}
+    expected = []
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        key = str(field.get("key") or "")
+        if not key or key in WBS_SHARED_DEVELOPMENT_KEYS:
+            continue
+        if field.get("type") == "select" and not field.get("options"):
+            continue
+        if not format_field_should_render(field, choices):
+            continue
+        expected.append((key, str(field.get("label") or key)))
+    if choices.get("production_influence") == "Custom Influence / Other":
+        expected.append(("production_influence_custom", "Custom Influence"))
+    return expected
+
+
+def wbs_validate_setup_for_save(snapshot):
+    """Fail closed for incomplete *new* saves, across all registered formats.
+
+    No old revision is altered. A default displayed on screen does not count
+    as an original choice when it is absent from a saved snapshot.
+    """
+    fmt = str(snapshot.get("active_format_id") or "")
+    values = (snapshot.get("format_template_values") or {}).get(fmt)
+    values = values if isinstance(values, dict) else {}
+    expected = wbs_expected_saved_development_fields(fmt, values)
+    missing = [label for key, label in expected if key not in values]
+    return missing
+
+
+def wbs_get_saved_concept_setup_audit():
+    """Read the exact saved project-session row; never substitute current widget defaults.
+
+    A missing field is NOT evidence of its previous value. This read-only audit
+    never creates, edits or deletes Supabase records.
+    """
+    row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or
+                 st.session_state.get("_wbs_loaded_saved_session_id") or "").strip()
+    project_id = str(get_active_project_id() or "").strip()
+    user_id = get_current_user_id()
+    fmt = str(st.session_state.get("active_format_id") or "").strip()
+    if not (row_id and project_id and user_id and fmt in WBS_FORMAT_IDS):
+        return {"ok": False, "message": "An exact saved revision is not currently loaded."}
+    try:
+        result = (supabase.table("writersblock_project_drafts")
+                  .select("id, project_id, user_id, draft_type, draft_content")
+                  .eq("id", row_id).eq("project_id", project_id)
+                  .eq("user_id", user_id).eq("draft_type", "project_session")
+                  .limit(1).execute())
+        rows = getattr(result, "data", None) or []
+        if len(rows) != 1:
+            return {"ok": False, "message": "The exact saved revision could not be verified."}
+        snap = json.loads(rows[0].get("draft_content") or "{}")
+        if not isinstance(snap, dict):
+            raise ValueError("Saved snapshot is not an object")
+        if (str(snap.get("current_project_id") or project_id) != project_id
+                or str(snap.get("active_format_id") or "") != fmt):
+            return {"ok": False, "message": "Saved project identity/format mismatch; no data was changed."}
+        all_values = snap.get("format_template_values")
+        raw = all_values.get(fmt) if isinstance(all_values, dict) else None
+        raw = raw if isinstance(raw, dict) else {}
+        expected = wbs_expected_saved_development_fields(fmt, raw)
+        recorded = [(name, label, raw[name]) for name, label in expected if name in raw]
+        missing = [(name, label) for name, label in expected if name not in raw]
+        return {"ok": True, "recorded": recorded, "missing": missing,
+                "saved_revision_id": row_id, "format": fmt,
+                "saved_premise_present": bool(str(snap.get("story_seed") or "").strip())}
+    except Exception as exc:
+        return {"ok": False, "message": f"Cannot inspect original saved settings: {exc}"}
+
+
+def wbs_merge_live_concept_widgets_into_snapshot(snapshot, fmt):
+    """Capture pending keyed Streamlit edits even when Save is in the sidebar.
+
+    The sidebar's Save button executes before Step 1 form fields re-render on a
+    click. Use only the currently scoped project+format+revision widget keys.
+    Do not backfill absent historical settings from current template defaults.
+    """
+    template = get_wbs_format_template(fmt) or {}
+    values = dict((snapshot.get("format_template_values") or {}).get(fmt) or {})
+    excluded = {"project_title", "dialogue_style", "story_premise", "premise",
+                "logline", "story_idea", "objective", "core_premise"}
+    for field in (template.get("concept_fields") or []):
+        if not isinstance(field, dict):
+            continue
+        name = str(field.get("key") or "")
+        if not name or name in excluded:
+            continue
+        widget_key = get_active_format_widget_key(name)
+        if widget_key in st.session_state:
+            value = st.session_state[widget_key]
+            # Streamlit date widgets use date objects, but JSON snapshots use ISO.
+            if hasattr(value, "isoformat") and not isinstance(value, str):
+                value = value.isoformat()
+            values[name] = value
+    snapshot["format_template_values"] = {fmt: values}
+    return snapshot
+
+
 def get_project_session_snapshot():
     snapshot_keys = [
         "project_stage",
@@ -368,6 +483,7 @@ def get_project_session_snapshot():
     snapshot["format_template_values"] = {
         fmt: dict(values.get(fmt) or {})
     } if isinstance(values, dict) else {fmt: {}}
+    wbs_merge_live_concept_widgets_into_snapshot(snapshot, fmt)
     snapshot["saved_at"] = datetime.now(timezone.utc).isoformat()
     return snapshot
 
@@ -609,6 +725,21 @@ def save_current_project_session_to_supabase(version_name=None, save_as_new_vers
         st.error("No user found.")
         return None
 
+    # Capture and verify the entire Stage 1 development configuration before
+    # any Supabase INSERT, including before creation of a master project row.
+    try:
+        snapshot = get_project_session_snapshot()
+    except SavedFormatError as exc:
+        st.error(f"Project save cancelled: {exc}")
+        return None
+    missing_setup = wbs_validate_setup_for_save(snapshot)
+    if missing_setup:
+        st.error("Development Setup was not fully captured, so nothing was saved. "
+                 "Return to Concept Development and review these fields: "
+                 + ", ".join(missing_setup[:12])
+                 + (f" (and {len(missing_setup)-12} others)" if len(missing_setup)>12 else ""))
+        return None
+
     project_id = get_active_project_id()
     if not project_id:
         title = get_project_title()
@@ -657,11 +788,6 @@ def save_current_project_session_to_supabase(version_name=None, save_as_new_vers
         st.error("No Quill story concept is present to save. Generate or restore it first.")
         return None
 
-    try:
-        snapshot = get_project_session_snapshot()
-    except SavedFormatError as exc:
-        st.error(f"Project save cancelled: {exc}")
-        return None
     if snapshot.get("version_source_mode") == "Quill Assisted":
         snapshot["saved_quill_concept"] = str(st.session_state.get("story_seed") or "")
     snapshot["current_project_id"] = project_id
@@ -7634,6 +7760,26 @@ if st.session_state.project_stage == "Intake":
 
         if get_active_project_id():
             st.caption("Loaded saved project — saved Concept Development choices are restored where recorded.")
+            with st.expander("Verify Saved Development Setup (read-only)", expanded=False):
+                _saved_setup_audit = wbs_get_saved_concept_setup_audit()
+                if not _saved_setup_audit.get("ok"):
+                    st.warning(_saved_setup_audit.get("message") or "Saved settings could not be verified.")
+                else:
+                    _recorded = _saved_setup_audit["recorded"]
+                    _missing = _saved_setup_audit["missing"]
+                    st.caption(f"Exact saved revision: {_saved_setup_audit['saved_revision_id']}")
+                    st.write(f"Recorded Development Setup fields: **{len(_recorded)}**; "
+                             f"not recorded: **{len(_missing)}**.")
+                    if _missing:
+                        st.warning("This saved revision does not contain every Development Setup "
+                                   "selection. Current form defaults are NOT proof of the "
+                                   "writer's original choices; the saved record was not modified.")
+                    else:
+                        for _key, _label, _value in _recorded:
+                            st.caption(f"{_label}: {_value}")
+                    if _missing:
+                        st.caption("Not recorded in this revision: " +
+                                   ", ".join(label for _, label in _missing))
             if st.session_state.get("_wbs_saved_concept_missing_fields"):
                 # Older saved projects may not contain every newer template
                 # field. Preserve that audit fact without displaying the same
@@ -8270,6 +8416,18 @@ if st.session_state.project_stage == "Intake":
                 )
                 if not _wbs_create_saved_first_paths:
                     st.error(_wbs_first_paths_error)
+                    st.stop()
+                _audit = wbs_get_saved_concept_setup_audit()
+                if not _audit.get("ok"):
+                    st.error((_audit.get("message") or "Cannot verify saved setup.") +
+                             " No AI generation was started.")
+                    st.stop()
+                if _audit.get("missing"):
+                    st.error("This saved revision is missing Development Setup selections: "
+                             + ", ".join(label for _, label in _audit["missing"][:12])
+                             + ". The displayed template defaults are NOT proven "
+                               "to be your original instructions. No AI generation "
+                               "was started. Review the saved Setup audit.")
                     st.stop()
             require_product_access("sandbox")
             require_demo_action_available("sandbox")
