@@ -867,6 +867,15 @@ def load_saved_project_session_to_state(saved_session_row):
         )
         st.session_state.active_format_id = restored_format_id
 
+    # SHORT STORY ONLY: the parent project record is authoritative for the title.
+    # Older saved snapshots/widget state must never overwrite the saved project title.
+    if restored_format_id == "short_story":
+        _short_story_project_title = get_project_title_from_project_id(
+            st.session_state.current_project_id
+        )
+        if _short_story_project_title:
+            st.session_state.project_title = _short_story_project_title
+
     # Restore the Writing Format widget from the saved authoritative template.
     # A keyed Streamlit selectbox ignores its index= argument when an old widget
     # value remains in session_state; without this, it overwrites the loaded format.
@@ -875,20 +884,6 @@ def load_saved_project_session_to_state(saved_session_row):
     # Restore the actual saved Quill concept before Step 1 constructs its widgets.
     # Clearing widget keys without seeding them again made saved stories look lost.
     clear_concept_widget_state_for_loaded_project()
-
-    # FORMAT OWNERSHIP: short_story ONLY.  Use the stable parent project title
-    # when opening an existing Short Story version.  A title saved in a legacy
-    # snapshot (or stale Streamlit title widget) must not silently rename the
-    # project or contaminate the displayed title.  This performs NO DB writes.
-    # Every other format follows its original load path unchanged.
-    if restored_format_id == "short_story":
-        short_story_project_title = get_project_title_from_project_id(
-            st.session_state.current_project_id
-        )
-        if short_story_project_title:
-            st.session_state.project_title = short_story_project_title
-            st.session_state["saved_project_title_input"] = short_story_project_title
-
     saved_concept = str(snapshot.get("saved_quill_concept") or snapshot.get("story_seed") or "")
     saved_mode = str(snapshot.get("version_source_mode") or snapshot.get("starting_source_mode") or "")
     if saved_mode == "Quill Assisted":
@@ -6771,14 +6766,34 @@ if st.session_state.project_stage == "Intake":
                     st.error("Quill's writing service is unavailable. Please try again later.")
                 else:
                     development_context = get_active_format_development_context()
-                    creative_direction = (
-                        "Build the story around the writer's specified theme, takeaway, and "
-                        "creative instructions in Development Setup. Honor those choices closely."
-                        if guided_generation else
-                        "Invent a fresh, original storyline. Honor the format, age range, genre, "
-                        "and required production constraints, but freely invent characters, conflict, "
-                        "and events rather than relying on a writer-specified theme or takeaway."
+                    _strict_short_story_guided = (
+                        guided_generation
+                        and str(st.session_state.get("active_format_id") or "") == "short_story"
                     )
+                    if _strict_short_story_guided:
+                        creative_direction = (
+                            "STRICT SHORT STORY DEVELOPMENT MODE. The DEVELOPMENT SETUP below is the "
+                            "writer's CURRENT LIVE setup and is authoritative even if the project has "
+                            "not yet been saved. Every populated development field is mandatory. Do not "
+                            "omit, replace, contradict, generalize away, or reinterpret a populated field. "
+                            "Use the specified main character exactly; make the stated central conflict "
+                            "the actual story problem; use the selected setting as the story location; "
+                            "obey the selected point of view; honor the ending direction; write for the "
+                            "selected audience; and shape the eventual finished short story for the "
+                            "selected target length. If more than one tone/style field is populated, "
+                            "combine them rather than choosing one and ignoring the other. The 100–180 "
+                            "word output here is only the editable starting concept, so the target-length "
+                            "selection describes the later finished story, not this concept box."
+                        )
+                    else:
+                        creative_direction = (
+                            "Build the story around the writer's specified theme, takeaway, and "
+                            "creative instructions in Development Setup. Honor those choices closely."
+                            if guided_generation else
+                            "Invent a fresh, original storyline. Honor the format, age range, genre, "
+                            "and required production constraints, but freely invent characters, conflict, "
+                            "and events rather than relying on a writer-specified theme or takeaway."
+                        )
                     prompt = (
                         "You are Quill, writing an original STORY CONCEPT that a writer can edit. "
                         f"Write 100–180 words for {format_name}. "
