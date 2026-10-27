@@ -1617,6 +1617,78 @@ def get_project_title_from_project_id(project_id):
 
 
 
+def wbs_saved_project_identity_preflight(saved_row):
+    """Read-only preflight before loading an older project-session row.
+
+    A historical session can retain a title from project A while its project_id
+    points at project B. Replacing its title with B's database title would show
+    the wrong manuscript/project, so fail closed and preserve the active state.
+    """
+    if not isinstance(saved_row, dict):
+        return False, "The selected saved entry is invalid. Nothing was loaded."
+    project_id = str(saved_row.get("project_id") or "").strip()
+    row_id = str(saved_row.get("id") or "").strip()
+    user_id = get_current_user_id()
+    if not project_id or not row_id or not user_id:
+        return False, "The selected saved entry has no verifiable project identity. Nothing was loaded."
+    try:
+        snapshot = json.loads(saved_row.get("draft_content") or "{}")
+        if not isinstance(snapshot, dict):
+            raise ValueError("Invalid snapshot")
+        embedded_id = str(snapshot.get("current_project_id") or "").strip()
+        if embedded_id and embedded_id != project_id:
+            return False, (
+                "Saved entry contains two different project IDs. Loading was blocked; "
+                "the current project and every saved version remain unchanged."
+            )
+        saved_title = str(snapshot.get("project_title") or "").strip()
+        project_result = (supabase.table("writersblock_projects")
+                          .select("id,project_title")
+                          .eq("id", project_id).eq("user_id", user_id)
+                          .limit(1).execute())
+        projects = getattr(project_result, "data", None) or []
+        if len(projects) != 1:
+            return False, (
+                "This saved entry does not have a uniquely verified parent project "
+                "for the current user. Loading was blocked; no data was changed."
+            )
+        parent_title = str(projects[0].get("project_title") or "").strip()
+        if not parent_title:
+            return False, "The saved entry's parent project has no title. Loading was blocked."
+        if not saved_title:
+            return False, (
+                "The saved project session has no original title to verify. "
+                "Loading was blocked; no records were changed."
+            )
+        if saved_title.casefold() != parent_title.casefold():
+            return False, (
+                f'Saved entry is titled "{saved_title}" but its database project ID '
+                f'belongs to "{parent_title}". This may be a legacy wrong-project '
+                "association or a historical rename; it cannot be resolved safely "
+                "by changing the displayed title. Loading was blocked, and neither "
+                "project was changed."
+            )
+        # Verify the selected session itself still exists and belongs to the
+        # authenticated user and parent; avoid trusting stale selectbox values.
+        session_result = (supabase.table("writersblock_project_drafts")
+                          .select("id,project_id,draft_type")
+                          .eq("id", row_id).eq("user_id", user_id)
+                          .eq("project_id", project_id)
+                          .eq("draft_type", "project_session")
+                          .limit(1).execute())
+        sessions = getattr(session_result, "data", None) or []
+        if len(sessions) != 1:
+            return False, "The saved entry could not be verified against its project. Loading was blocked."
+        return True, ""
+    except (ValueError, TypeError, KeyError):
+        return False, "Saved entry metadata is invalid; load cancelled without changes."
+    except Exception:
+        return False, (
+            "Could not verify this saved entry with the database. "
+            "Loading was blocked to protect existing projects."
+        )
+
+
 def get_projects_for_import():
     user_id = get_current_user_id()
 
@@ -6836,8 +6908,32 @@ with st.sidebar.expander("Saved Projects / Versions", expanded=False):
                 if (chosen_project_id != live_project_id or (selected_title and selected_title != live_title)):
                     st.caption("Selected saved item is not the active story. Click **Load Selected Saved Item** to open it.")
 
+            # Detect a legacy cross-linked project BEFORE the writer tries to
+            # load it. This check is read-only and never changes series,
+            # manuscript, title, or version records.
+            if selected_saved_item and selected_saved_item.get("type") == "project_session":
+                _row = selected_saved_item.get("row") or {}
+                try:
+                    _snapshot = json.loads(_row.get("draft_content") or "{}")
+                except (ValueError, TypeError):
+                    _snapshot = {}
+                _entry_title = str((_snapshot if isinstance(_snapshot, dict) else {}).get("project_title") or "").strip()
+                _parent_title = get_project_title_from_project_id(_row.get("project_id"))
+                if _entry_title and _parent_title and _entry_title.casefold() != _parent_title.casefold():
+                    st.error(
+                        f'Saved entry "{_entry_title}" is linked to database project '
+                        f'"{_parent_title}". Loading has been blocked to prevent '
+                        'mixing projects. No data was saved or changed.'
+                    )
+
             if st.button("Load Selected Saved Item", key="sidebar_load_saved_item", use_container_width=True):
                 if selected_saved_item and selected_saved_item["type"] == "project_session":
+                    _identity_ok, _identity_message = wbs_saved_project_identity_preflight(
+                        selected_saved_item["row"]
+                    )
+                    if not _identity_ok:
+                        st.error(_identity_message)
+                        st.stop()
                     if load_saved_project_session_to_state(selected_saved_item["row"]):
                         st.session_state.pop("_wbs_loaded_manuscript_version_id", None)
                         st.session_state["_wbs_loaded_saved_session_id"] = str(selected_saved_item["row"].get("id") or "")
@@ -6880,6 +6976,12 @@ with st.sidebar.expander("Saved Projects / Versions", expanded=False):
                         st.stop()
                     if str(saved_project_state.get("project_id") or "") != str(selected_project_id):
                         st.error("The saved session belongs to a different project. Load cancelled.")
+                        st.stop()
+                    _identity_ok, _identity_message = wbs_saved_project_identity_preflight(
+                        saved_project_state
+                    )
+                    if not _identity_ok:
+                        st.error(_identity_message)
                         st.stop()
                     if not load_saved_project_session_to_state(saved_project_state):
                         st.error("The manuscript was not loaded because its project session failed validation.")
@@ -7453,9 +7555,15 @@ if st.session_state.project_stage == "Intake":
         if get_active_project_id():
             st.caption("Loaded saved project — saved Concept Development choices are restored where recorded.")
             if st.session_state.get("_wbs_saved_concept_missing_fields"):
-                st.warning("Some original Development Setup choices were not recorded in "
-                           "this saved version. Unrecorded fields display current template "
-                           "defaults, NOT verified original settings. No project was saved.")
+                # Older saved projects may not contain every newer template
+                # field. Preserve that audit fact without displaying the same
+                # alarming yellow warning on every Streamlit rerun.
+                with st.expander("Historical Development Setup details", expanded=False):
+                    st.caption(
+                        "Some settings were not included in this saved project's "
+                        "historical records. Those fields show current template "
+                        "defaults, not verified original choices. Loading is read-only."
+                    )
             if st.session_state.get("_wbs_series_conflict_for_review"):
                 st.caption("Historical series positions differed. Current Book order is managed separately "
                            "in Series Library; saved stories were not changed.")
