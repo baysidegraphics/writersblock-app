@@ -875,6 +875,20 @@ def load_saved_project_session_to_state(saved_session_row):
     # Restore the actual saved Quill concept before Step 1 constructs its widgets.
     # Clearing widget keys without seeding them again made saved stories look lost.
     clear_concept_widget_state_for_loaded_project()
+
+    # FORMAT OWNERSHIP: short_story ONLY.  Use the stable parent project title
+    # when opening an existing Short Story version.  A title saved in a legacy
+    # snapshot (or stale Streamlit title widget) must not silently rename the
+    # project or contaminate the displayed title.  This performs NO DB writes.
+    # Every other format follows its original load path unchanged.
+    if restored_format_id == "short_story":
+        short_story_project_title = get_project_title_from_project_id(
+            st.session_state.current_project_id
+        )
+        if short_story_project_title:
+            st.session_state.project_title = short_story_project_title
+            st.session_state["saved_project_title_input"] = short_story_project_title
+
     saved_concept = str(snapshot.get("saved_quill_concept") or snapshot.get("story_seed") or "")
     saved_mode = str(snapshot.get("version_source_mode") or snapshot.get("starting_source_mode") or "")
     if saved_mode == "Quill Assisted":
