@@ -6213,6 +6213,86 @@ def sandbox_output_is_usable(sandbox_output):
     )
 
 
+
+def wbs_can_generate_first_paths_for_saved_concept():
+    """Allow a saved *concept-only* master to develop its first paths.
+
+    Fail closed on ambiguous history. Never overwrite a saved session or change
+    the owning project ID. An eligible project's first paths become a new
+    immutable project-session version via the normal version-save routine.
+    """
+    project_id = str(get_active_project_id() or "")
+    user_id = get_current_user_id()
+    if not project_id or not user_id or st.session_state.get("project_stage") != "Intake":
+        return False, "First-time path generation requires a saved Concept Development project."
+    if wbs_has_saved_master() is not True:
+        return False, "Cannot verify the saved master. Reload this project before continuing."
+    if (str(st.session_state.get("_wbs_loaded_project_id") or "") != project_id
+            or str(st.session_state.get("_wbs_loaded_project_title") or "").strip() != get_project_title()):
+        return False, "Saved project identity is not confirmed. Reload the exact saved project."
+    if get_project_title_from_project_id(project_id) != get_project_title():
+        return False, "Database project title does not match the open project. Nothing was changed."
+    format_id = str(st.session_state.get("active_format_id") or "")
+    if (not format_id or format_id != str(st.session_state.get("wbs_locked_format_id") or "")
+            or str(st.session_state.get("_wbs_locked_project_id") or "") != project_id):
+        return False, "Saved writing format cannot be verified; reload the saved project."
+    if not st.session_state.get("_wbs_active_saved_session_row_id"):
+        return False, "The active saved version cannot be verified. Reload V-1 before continuing."
+    # This route is for writer-entered or Quill concepts, not imported/saved
+    # manuscripts. No working manuscript or downstream scene may be reset.
+    if str(st.session_state.get("version_source_mode") or "") not in {"Custom Plot Line", "Quill Assisted"}:
+        return False, "Only saved concept-only starting points can generate first paths this way."
+    if (st.session_state.get("imported_source_text") or st.session_state.get("saved_version_source_text")):
+        return False, "A saved or imported manuscript is attached. Its existing content was protected."
+    downstream_fields = (
+        "sandbox_slates", "chosen_option", "chosen_option_text", "plot_outline",
+        "current_draft_output", "rewritten_manuscript", "manuscript_text",
+        "scene_blocks", "completed_beats", "rolling_lore_book", "final_output_text",
+        "final_output_saved_signature", "picture_book_layout_spreads",
+    )
+    def has_downstream_content(record):
+        return any(bool(record.get(key)) for key in downstream_fields)
+    if has_downstream_content(st.session_state):
+        return False, "This project already contains downstream writing. No paths were regenerated."
+
+    try:
+        manuscripts = (supabase.table("writersblock_manuscript_versions")
+                       .select("id").eq("project_id", project_id)
+                       .eq("user_id", user_id).limit(1).execute())
+        if getattr(manuscripts, "data", None):
+            return False, "This project has saved manuscript versions; existing work was protected."
+        draft_rows = (supabase.table("writersblock_project_drafts")
+                      .select("id,draft_type,draft_content").eq("project_id", project_id)
+                      .eq("user_id", user_id).limit(101).execute())
+        rows = getattr(draft_rows, "data", None)
+        if not isinstance(rows, list) or not rows or len(rows) >= 101:
+            return False, "Saved project history is incomplete or too large to verify safely."
+        found_active = False
+        for row in rows:
+            kind = str(row.get("draft_type") or "")
+            if kind == "series_metadata":
+                continue
+            if kind != "project_session":
+                return False, "This project has other saved writing stages; no paths were generated."
+            if str(row.get("id") or "") == str(st.session_state.get("_wbs_active_saved_session_row_id")):
+                found_active = True
+            snap = json.loads(row.get("draft_content") or "{}")
+            if not isinstance(snap, dict):
+                return False, "The project history contains an invalid saved record."
+            if (str(snap.get("current_project_id") or project_id) != project_id
+                    or str(snap.get("active_format_id") or "") != format_id
+                    or str(snap.get("project_stage") or "Intake") != "Intake"
+                    or has_downstream_content(snap)):
+                return False, "An earlier saved version contains different or downstream work."
+        if not found_active:
+            return False, "The selected saved version is missing from this project's history."
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return False, "Saved project history could not be checked safely. No work was changed."
+    except Exception:
+        return False, "Database history could not be verified. No paths were generated."
+    return True, ""
+
+
 def get_user_by_email(email: str):
     clean_email = (email or "").strip().lower()
     if not clean_email:
@@ -8168,20 +8248,29 @@ if st.session_state.project_stage == "Intake":
             use_container_width=True,
         ):
             if _wbs_has_saved_paths:
-                # The stage navigator enforces project identity. It performs
-                # no database writes and does not regenerate any story text.
+                # Reuse only paths that match the currently saved snapshot.
+                # In particular, after a failed write, keep the generated paths
+                # in memory so the user can save them without another API call.
+                if (wbs_has_saved_master() is not True
+                        or wbs_work_has_changed() is not False):
+                    st.error(
+                        "These scripting paths or concept changes are not yet saved. "
+                        "Use 'Save Project Changes As A New Version' above, then "
+                        "continue to Scripting. No AI regeneration is required."
+                    )
+                    st.stop()
                 wbs_request_stage_change("Sandbox")
-                # Successful navigation reruns inside wbs_complete_stage_change;
-                # a blocked navigation must leave its error visible.
-            if _wbs_is_loaded_project:
-                # These older projects have no recoverable saved sandbox paths.
-                # Do not destructively generate a new branch in this session.
-                st.error(
-                    "This saved project has no stored Scripting paths to resume. "
-                    "No existing manuscript was changed. Use a separately "
-                    "created new project for new paths; leave this saved version intact."
-                )
                 st.stop()
+            _wbs_create_saved_first_paths = False
+            if _wbs_is_loaded_project:
+                # Saved V-1 concept-only projects must not be trapped before
+                # Scripting. Protect *all* existing versions and other stages.
+                _wbs_create_saved_first_paths, _wbs_first_paths_error = (
+                    wbs_can_generate_first_paths_for_saved_concept()
+                )
+                if not _wbs_create_saved_first_paths:
+                    st.error(_wbs_first_paths_error)
+                    st.stop()
             require_product_access("sandbox")
             require_demo_action_available("sandbox")
 
@@ -8296,11 +8385,29 @@ if st.session_state.project_stage == "Intake":
                 )
                 st.session_state["_wbs_agent_bridge_last_success"] = True
 
-                if sandbox_output_is_usable(st.session_state.sandbox_slates):
-                    mark_demo_action_used("sandbox")
+                if not sandbox_output_is_usable(st.session_state.sandbox_slates):
+                    st.error("Quill did not return three usable paths. Nothing was saved.")
+                    st.stop()
+                mark_demo_action_used("sandbox")
 
-                # Only a genuinely new project can create a parent project row.
-                # Existing saved projects use the read-only resume path above.
+                if _wbs_create_saved_first_paths:
+                    # INSERT ONLY: V-1 remains intact, first generated paths
+                    # are committed as the next saved project version (V-2).
+                    first_paths_save = save_current_project_session_to_supabase(
+                        version_name="First Scripting Paths", save_as_new_version=True,
+                    )
+                    if not first_paths_save or getattr(first_paths_save, "unchanged", False):
+                        st.error(
+                            "Generated paths remain in this session but were NOT saved. "
+                            "Use 'Save Project Changes As A New Version' above to "
+                            "retry the save without another AI generation."
+                        )
+                        st.stop()
+                    st.session_state.project_saved_notice = True
+                    wbs_request_stage_change("Sandbox")
+                    st.stop()
+
+                # A genuinely new project creates its parent only once.
                 # NEVER replace current_project_id while editing saved work.
                 if get_active_project_id():
                     st.error("Existing project detected. No new project was created or saved.")
