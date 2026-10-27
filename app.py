@@ -29,14 +29,8 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from pathlib import Path
-from types import SimpleNamespace
 import hashlib
 import zipfile
-import uuid
-from wbs_format_guard import (
-    SavedFormatError, FORMAT_LEGACY, prepare_saved_snapshot,
-    validate_format_for_save, project_format_widget_key,
-)
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
@@ -275,121 +269,6 @@ def save_project_draft_to_supabase(project_id, draft_title, draft_type, draft_co
     return result
 
 
-WBS_SHARED_DEVELOPMENT_KEYS = {
-    "project_title", "dialogue_style", "story_premise", "premise",
-    "logline", "story_idea", "objective", "core_premise",
-}
-
-
-def wbs_expected_saved_development_fields(fmt, choices):
-    """Return required *visible* field keys from the chosen format's setup.
-
-    A conditional, hidden field is not required. Optional text fields must
-    still be present with an empty value to prove the form was captured.
-    """
-    template = get_wbs_format_template(fmt) or {}
-    fields = template.get("concept_fields") or []
-    choices = choices if isinstance(choices, dict) else {}
-    expected = []
-    for field in fields:
-        if not isinstance(field, dict):
-            continue
-        key = str(field.get("key") or "")
-        if not key or key in WBS_SHARED_DEVELOPMENT_KEYS:
-            continue
-        if field.get("type") == "select" and not field.get("options"):
-            continue
-        if not format_field_should_render(field, choices):
-            continue
-        expected.append((key, str(field.get("label") or key)))
-    if choices.get("production_influence") == "Custom Influence / Other":
-        expected.append(("production_influence_custom", "Custom Influence"))
-    return expected
-
-
-def wbs_validate_setup_for_save(snapshot):
-    """Fail closed for incomplete *new* saves, across all registered formats.
-
-    No old revision is altered. A default displayed on screen does not count
-    as an original choice when it is absent from a saved snapshot.
-    """
-    fmt = str(snapshot.get("active_format_id") or "")
-    values = (snapshot.get("format_template_values") or {}).get(fmt)
-    values = values if isinstance(values, dict) else {}
-    expected = wbs_expected_saved_development_fields(fmt, values)
-    missing = [label for key, label in expected if key not in values]
-    return missing
-
-
-def wbs_get_saved_concept_setup_audit():
-    """Read the exact saved project-session row; never substitute current widget defaults.
-
-    A missing field is NOT evidence of its previous value. This read-only audit
-    never creates, edits or deletes Supabase records.
-    """
-    row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or
-                 st.session_state.get("_wbs_loaded_saved_session_id") or "").strip()
-    project_id = str(get_active_project_id() or "").strip()
-    user_id = get_current_user_id()
-    fmt = str(st.session_state.get("active_format_id") or "").strip()
-    if not (row_id and project_id and user_id and fmt in WBS_FORMAT_IDS):
-        return {"ok": False, "message": "An exact saved revision is not currently loaded."}
-    try:
-        result = (supabase.table("writersblock_project_drafts")
-                  .select("id, project_id, user_id, draft_type, draft_content")
-                  .eq("id", row_id).eq("project_id", project_id)
-                  .eq("user_id", user_id).eq("draft_type", "project_session")
-                  .limit(1).execute())
-        rows = getattr(result, "data", None) or []
-        if len(rows) != 1:
-            return {"ok": False, "message": "The exact saved revision could not be verified."}
-        snap = json.loads(rows[0].get("draft_content") or "{}")
-        if not isinstance(snap, dict):
-            raise ValueError("Saved snapshot is not an object")
-        if (str(snap.get("current_project_id") or project_id) != project_id
-                or str(snap.get("active_format_id") or "") != fmt):
-            return {"ok": False, "message": "Saved project identity/format mismatch; no data was changed."}
-        all_values = snap.get("format_template_values")
-        raw = all_values.get(fmt) if isinstance(all_values, dict) else None
-        raw = raw if isinstance(raw, dict) else {}
-        expected = wbs_expected_saved_development_fields(fmt, raw)
-        recorded = [(name, label, raw[name]) for name, label in expected if name in raw]
-        missing = [(name, label) for name, label in expected if name not in raw]
-        return {"ok": True, "recorded": recorded, "missing": missing,
-                "saved_revision_id": row_id, "format": fmt,
-                "saved_premise_present": bool(str(snap.get("story_seed") or "").strip())}
-    except Exception as exc:
-        return {"ok": False, "message": f"Cannot inspect original saved settings: {exc}"}
-
-
-def wbs_merge_live_concept_widgets_into_snapshot(snapshot, fmt):
-    """Capture pending keyed Streamlit edits even when Save is in the sidebar.
-
-    The sidebar's Save button executes before Step 1 form fields re-render on a
-    click. Use only the currently scoped project+format+revision widget keys.
-    Do not backfill absent historical settings from current template defaults.
-    """
-    template = get_wbs_format_template(fmt) or {}
-    values = dict((snapshot.get("format_template_values") or {}).get(fmt) or {})
-    excluded = {"project_title", "dialogue_style", "story_premise", "premise",
-                "logline", "story_idea", "objective", "core_premise"}
-    for field in (template.get("concept_fields") or []):
-        if not isinstance(field, dict):
-            continue
-        name = str(field.get("key") or "")
-        if not name or name in excluded:
-            continue
-        widget_key = get_active_format_widget_key(name)
-        if widget_key in st.session_state:
-            value = st.session_state[widget_key]
-            # Streamlit date widgets use date objects, but JSON snapshots use ISO.
-            if hasattr(value, "isoformat") and not isinstance(value, str):
-                value = value.isoformat()
-            values[name] = value
-    snapshot["format_template_values"] = {fmt: values}
-    return snapshot
-
-
 def get_project_session_snapshot():
     snapshot_keys = [
         "project_stage",
@@ -471,19 +350,6 @@ def get_project_session_snapshot():
         else:
             snapshot[key] = value
 
-    # WBS Fixes-3: prevent a saved branch from silently switching format.
-    project_id = get_active_project_id()
-    locked = (st.session_state.get("wbs_locked_format_id")
-              if project_id and str(st.session_state.get("_wbs_locked_project_id") or "") == str(project_id)
-              else None)
-    fmt = validate_format_for_save(str(st.session_state.get("active_format_id") or ""), locked)
-    snapshot["active_format_id"] = fmt
-    snapshot["format_type"] = FORMAT_LEGACY[fmt]
-    values = st.session_state.get("format_template_values") or {}
-    snapshot["format_template_values"] = {
-        fmt: dict(values.get(fmt) or {})
-    } if isinstance(values, dict) else {fmt: {}}
-    wbs_merge_live_concept_widgets_into_snapshot(snapshot, fmt)
     snapshot["saved_at"] = datetime.now(timezone.utc).isoformat()
     return snapshot
 
@@ -600,254 +466,150 @@ def get_next_project_session_internal_version(project_id):
     return 1
 
 
-# MASTER PROJECT / VERSION RULE — shared by all formats and workflow stages.
-def wbs_has_saved_master():
-    """Read-only check: a project ID alone does not mean a master was saved."""
-    project_id = get_active_project_id()
-    user_id = get_current_user_id()
-    if not project_id:
-        return False
-    if not user_id:
-        return None
-    if (str(st.session_state.get("_wbs_last_saved_project_id") or "") == str(project_id)
-            and st.session_state.get("_wbs_active_saved_session_row_id")):
-        return True
-    try:
-        rows = (supabase.table("writersblock_project_drafts")
-                .select("id")
-                .eq("project_id", project_id)
-                .eq("user_id", user_id)
-                .eq("draft_type", "project_session")
-                .limit(1).execute())
-        return bool(getattr(rows, "data", None))
-    except Exception:
-        return None  # fail closed; never risk an initial-save rewrite
-
-
-# Only writer-facing content counts as a change, not navigation, dates, editor
-# previews, labels, or the version's descriptive name.
-WBS_WRITER_CHANGE_KEYS = (
-    "active_format_id", "format_type", "format_template_values", "dialogue_style",
-    "tone_style", "author_style", "project_scope", "series_key", "series_name",
-    "series_book_number", "series_continuity_mode", "series_reference_ids",
-    "series_canon_notes", "audiobook_length", "audiobook_target_word_count",
-    "picture_book_word_target", "picture_book_page_size", "story_seed", "wbs_project_original_concept",
-    "starting_source_mode", "version_source_mode", "imported_source_name",
-    "quill_starting_direction", "imported_source_text", "saved_version_source_text",
-    "audiobook_production_script", "audiobook_production_cue_level",
-    "final_output_format",
-    "chosen_option", "chosen_option_text", "sandbox_slates", "plot_outline",
-    "current_draft_output", "rewritten_manuscript", "scene_blocks", "completed_beats",
-    "rolling_lore_book", "final_output_text", "picture_book_layout_spreads",
-)
-
-
-def wbs_save_state_signature(snapshot=None):
-    """Hash meaningful writer work; titles are changed ONLY using Rename Project."""
-    if snapshot is None:
-        snapshot = get_project_session_snapshot()
-    relevant = {key: snapshot.get(key) for key in WBS_WRITER_CHANGE_KEYS}
-    if isinstance(relevant.get("scene_blocks"), dict):
-        relevant["scene_blocks"] = {str(k): v for k, v in relevant["scene_blocks"].items()}
-    return hashlib.sha256(json.dumps(relevant, sort_keys=True, default=str,
-                                     ensure_ascii=False).encode("utf-8")).hexdigest()
-
-
-def wbs_work_has_changed(snapshot=None):
-    """No version from a change to the branch label or a stage navigation alone."""
-    project_id = str(get_active_project_id() or "")
-    baseline_project = str(st.session_state.get("_wbs_last_saved_project_id") or "")
-    baseline = str(st.session_state.get("_wbs_last_saved_work_signature") or "")
-    if not baseline or baseline_project != project_id:
-        # Older sessions without a trustworthy baseline require a reload, not
-        # speculative insert of a duplicate saved version.
-        return None
-    try:
-        return wbs_save_state_signature(snapshot) != baseline
-    except SavedFormatError:
-        return None
-
-
 def render_save_as_named_version_control(location_key):
-    """Save a NEW session revision without modifying an older saved version."""
-    if st.session_state.get("demo_mode") or not get_active_project_id():
+    """Save a complete project-state branch under a short writer-facing name."""
+    if st.session_state.get("demo_mode"):
         return
-    if wbs_has_saved_master() is not True:
+
+    project_id = get_active_project_id()
+    if not project_id or not get_project_title():
         return
 
     changed_areas = get_changed_concept_version_areas()
     suggested = get_suggested_project_version_name()
     signature = "|".join(changed_areas) or suggested
+
     signature_key = f"_wbs_version_name_suggestion_signature_{location_key}"
     input_key = f"save_as_version_name_{location_key}"
+
     if st.session_state.get(signature_key) != signature:
         st.session_state[signature_key] = signature
         st.session_state[input_key] = suggested
 
-    with st.expander("Save Project Changes As A New Version", expanded=False):
+    with st.expander("Save As New Version", expanded=False):
         version_name = st.text_input(
-            "Version Description:",
-            key=input_key, max_chars=60,
-            help="Briefly describe what changed.",
+            "Version Name:",
+            key=input_key,
+            max_chars=60,
+            help=(
+                "Keep this short and identify where the version changed, "
+                "for example Format Change or Format-Development Change."
+            ),
         )
+
         if changed_areas:
-            st.caption("Changes in: " + ", ".join(changed_areas))
-        changed = wbs_work_has_changed()
-        if changed is False:
-            st.info("No changes detected. The existing saved version is preserved.")
-        elif changed is None:
-            st.warning("Reload the saved version before creating a new version; no changes were written.")
+            st.caption("Suggested from changes: " + ", ".join(changed_areas))
+
         if st.button(
-            "Save Project Changes As A New Version",
+            "Save As New Version",
             key=f"save_as_new_named_version_{location_key}",
-            use_container_width=True, type="secondary", disabled=(changed is not True),
+            use_container_width=True,
+            type="secondary",
         ):
             clean_name = clean_project_version_name(version_name)
             if not clean_name:
-                st.warning("Enter a brief description of the version change.")
+                st.warning("Enter a short Version Name.")
                 return
+
             result = save_current_project_session_to_supabase(
-                version_name=clean_name, save_as_new_version=True,
+                version_name=clean_name,
+                save_as_new_version=True,
             )
-            if result and not getattr(result, "unchanged", False):
-                st.success(f"New version saved under {get_project_title_for_display()} — {clean_name}")
+            if result:
+                st.success(f"Saved as: {clean_name}")
                 st.rerun()
 
 
-def save_current_project_session_to_supabase(version_name=None, save_as_new_version=False):
-    """First save creates the master; all subsequent changed saves make versions.
+def wbs_save_state_signature(snapshot=None):
+    """Stable signature of persisted writer work, excluding save timestamps and navigation."""
+    if snapshot is None:
+        snapshot = get_project_session_snapshot()
+    relevant = {key: value for key, value in snapshot.items()
+                if key not in {"saved_at", "project_stage", "export_view",
+                               "current_project_id", "concept_change_areas"}}
+    return get_text_signature(json.dumps(relevant, sort_keys=True, default=str))
 
-    Never edit an existing snapshot and never silently rename the parent project.
-    Stage checkpoint callers use this same protection in ALL formats.
-    """
+
+def save_current_project_session_to_supabase(version_name=None, save_as_new_version=False):
     user_id = get_current_user_id()
+
     if not user_id:
         st.error("No user found.")
         return None
 
-    # Capture and verify the entire Stage 1 development configuration before
-    # any Supabase INSERT, including before creation of a master project row.
-    try:
-        snapshot = get_project_session_snapshot()
-    except SavedFormatError as exc:
-        st.error(f"Project save cancelled: {exc}")
-        return None
-    missing_setup = wbs_validate_setup_for_save(snapshot)
-    if missing_setup:
-        st.error("Development Setup was not fully captured, so nothing was saved. "
-                 "Return to Concept Development and review these fields: "
-                 + ", ".join(missing_setup[:12])
-                 + (f" (and {len(missing_setup)-12} others)" if len(missing_setup)>12 else ""))
-        return None
-
     project_id = get_active_project_id()
     if not project_id:
-        title = get_project_title()
-        if not title:
-            st.error("Name the project before its first master save.")
-            return None
         result = save_project_to_supabase(
-            project_title=title[:80],
+            project_title=get_project_title_for_display()[:80],
             project_type=st.session_state.get("format_type", "story"),
         )
-        project_id = get_active_project_id()
-        if not project_id:
-            st.error("Could not create the initial project record; nothing was saved.")
-            return None
+        project_id = st.session_state.get("current_project_id")
+
+    if not project_id:
+        st.error("No active project available to save.")
+        return None
 
     ensure_project_title_loaded()
-    # The authoritative Project Title is read-only here. Only Confirm Only If
-    # Renaming may update it; creating a version must NEVER rename a project.
-    try:
-        parent = (supabase.table("writersblock_projects")
-                  .select("project_title")
-                  .eq("id", project_id).eq("user_id", user_id)
-                  .limit(1).execute())
-        parent_rows = getattr(parent, "data", None) or []
-    except Exception as exc:
-        st.error(f"Cannot verify the project title. Save blocked: {exc}")
-        return None
-    if len(parent_rows) != 1:
-        st.error("Project identity cannot be verified; nothing was saved.")
-        return None
-    actual_title = str(parent_rows[0].get("project_title") or "").strip()
-    if not actual_title or actual_title != get_project_title():
-        st.error("Project title differs from its saved master. Use Rename Project; no version was saved.")
-        return None
 
-    master_saved = wbs_has_saved_master()
-    if master_saved is None:
-        st.error("Cannot check existing versions. No data was written.")
-        return None
-    if save_as_new_version and master_saved is False:
-        st.error("Save the new project's master record first.")
-        return None
+    requested_version_name = clean_project_version_name(
+        version_name
+        or st.session_state.get("project_version_name")
+        or "Original"
+    ) or "Original"
 
+    if save_as_new_version:
+        st.session_state.project_version_name = requested_version_name
+    elif not str(st.session_state.get("project_version_name") or "").strip():
+        st.session_state.project_version_name = requested_version_name
+
+    # Save Project must retain the writer's full Quill concept, not merely its project title.
     if (st.session_state.get("version_source_mode") == "Quill Assisted"
             and not str(st.session_state.get("story_seed") or "").strip()):
         st.error("No Quill story concept is present to save. Generate or restore it first.")
         return None
 
+    changed_areas = get_changed_concept_version_areas()
+    st.session_state.concept_change_areas = list(changed_areas)
+
+    snapshot = get_project_session_snapshot()
     if snapshot.get("version_source_mode") == "Quill Assisted":
         snapshot["saved_quill_concept"] = str(st.session_state.get("story_seed") or "")
     snapshot["current_project_id"] = project_id
-    snapshot["project_title"] = actual_title
-
-    # Loaded versions have a known baseline. A no-op is an explicit successful
-    # navigation checkpoint but NEVER performs a database INSERT.
-    if master_saved:
-        changed = wbs_work_has_changed(snapshot)
-        if changed is False:
-            st.info("No project changes detected; no new version was created.")
-            return SimpleNamespace(unchanged=True, data=[])
-        if changed is None:
-            st.error("Saved-version baseline is unavailable. Reload this project before saving; nothing was written.")
-            return None
-
-    changed_areas = get_changed_concept_version_areas()
-    requested_version_name = clean_project_version_name(
-        version_name or (get_suggested_project_version_name() if master_saved else "Original")
-    ) or ("New Revision" if master_saved else "Original")
     snapshot["project_version_name"] = requested_version_name
     snapshot["concept_change_areas"] = list(changed_areas)
+    st.session_state.last_saved_project_at = snapshot.get("saved_at")
+
+    # Keep editable Step 1 metadata synchronized with the parent project record.
+    supabase.table("writersblock_projects").update({
+        "project_title": get_project_title_for_display()[:80],
+        "project_type": st.session_state.get("format_type", "story"),
+    }).eq("id", project_id).execute()
+
     internal_version_number = get_next_project_session_internal_version(project_id)
 
-    # INSERT ONLY: never update an existing saved revision while saving a new one.
-    try:
-        result = (supabase.table("writersblock_project_drafts").insert({
-            "project_id": project_id,
-            "user_id": user_id,
-            "draft_title": f"Saved Project Session — {requested_version_name}",
-            "draft_type": "project_session",
-            "draft_content": json.dumps(snapshot),
-            "version_number": internal_version_number,
-        }).execute())
-    except Exception as exc:
-        st.error(f"Unable to save the new version: {exc}")
-        return None
-    if not result or not getattr(result, "data", None):
-        st.error("The database did not confirm a saved version; nothing has been overwritten.")
-        return None
+    result = supabase.table("writersblock_project_drafts").insert({
+        "project_id": project_id,
+        "user_id": user_id,
+        "draft_title": f"Saved Project Session — {requested_version_name}",
+        "draft_type": "project_session",
+        "draft_content": json.dumps(snapshot),
+        "version_number": internal_version_number,
+    }).execute()
 
-    if st.session_state.get("project_scope") == "Book in a Series":
-        # Existing series metadata code is preserved; this is the only existing
-        # extra save path, and never edits manuscript/version text.
+    if result and st.session_state.get("project_scope") == "Book in a Series":
         save_series_metadata_for_project(project_id)
 
-    st.session_state.project_version_name = requested_version_name
-    st.session_state.concept_change_areas = list(changed_areas)
-    st.session_state.last_saved_project_at = snapshot.get("saved_at")
-    set_loaded_concept_version_baseline(snapshot)
-    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
-    st.session_state["_wbs_last_saved_project_id"] = str(project_id)
-    st.session_state["_wbs_saved_session_to_select"] = str(result.data[0].get("id") or "")
-    st.session_state["_wbs_active_saved_session_row_id"] = str(result.data[0].get("id") or "")
-    st.session_state["_wbs_loaded_saved_session_id"] = str(result.data[0].get("id") or "")
-    st.session_state["wbs_locked_format_id"] = snapshot["active_format_id"]
-    st.session_state["_wbs_locked_project_id"] = str(project_id)
-    st.session_state["_wbs_loaded_project_id"] = str(project_id)
-    st.session_state["_wbs_loaded_project_title"] = actual_title
-    return result
+    if result and getattr(result, "data", None):
+        # The just-saved state becomes the baseline for the current named branch.
+        set_loaded_concept_version_baseline(snapshot)
+        st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
+        st.session_state["_wbs_last_saved_project_id"] = str(project_id)
+        st.session_state["_wbs_saved_session_to_select"] = str(result.data[0].get("id") or "")
+        st.session_state["_wbs_active_saved_session_row_id"] = str(result.data[0].get("id") or "")
+        return result
+
+    st.error("The project was not confirmed saved. Remain here and retry.")
+    return None
 
 
 def persist_project_integrity_in_current_version(report, source_signature, status):
@@ -943,7 +705,6 @@ def clear_concept_widget_state_for_loaded_project():
         "audiobook_length_selector",
     }
     prefix_keys = (
-        "rename_project_title_",
         "format_field_",
         "tone_style_",
         "starting_source_",
@@ -1014,8 +775,7 @@ def get_manuscript_branch_name(version):
     return clean_project_version_name(first) or "Original"
 
 
-def get_latest_saved_project_session_for_project(project_id, version_name=None,
-                                                checkpoint_created_at=None):
+def get_latest_saved_project_session_for_project(project_id, version_name=None):
     """Return the newest saved project-state snapshot for one project/branch."""
     user_id = get_current_user_id()
     if not user_id or not project_id:
@@ -1027,18 +787,13 @@ def get_latest_saved_project_session_for_project(project_id, version_name=None,
         .eq("draft_type", "project_session")
         .eq("project_id", project_id)
         .order("created_at", desc=True)
-        .limit(500)
+        .limit(100)
     )
     if user_id:
         query = query.eq("user_id", user_id)
 
     result = query.execute()
     rows = list(result.data or [])
-    if checkpoint_created_at:
-        # Choosing the newest session overall leaks subsequent concept edits into
-        # an older manuscript V-n. Never travel forward in time during restore.
-        rows = [row for row in rows if str(row.get("created_at") or "")
-                <= str(checkpoint_created_at)]
     if not rows:
         return None
 
@@ -1055,155 +810,7 @@ def get_latest_saved_project_session_for_project(project_id, version_name=None,
             if row_name.lower() == requested_name.lower():
                 return row
 
-    # A different branch is not a valid restoration source for this checkpoint.
-    # Older saves with no explicit branch name are matched above as "Original".
-    return rows[0] if not requested_name else None
-
-
-def _wbs_restore_missing_concept_fields(saved_snapshot, project_id, as_of=None):
-    """Read-only recovery from THIS project's historical records, never session defaults.
-
-    A manuscript checkpoint does not persist its Concept form separately.  Old
-    project sessions may predate today's template or series fields.  Consult
-    same-user/same-project historical snapshots and series metadata; never
-    invent choices when the information was not recorded.
-    """
-    recovered = dict(saved_snapshot)
-    audit = {"recovered_setup": False, "recovered_series": False,
-             "series_conflict": False, "history_unavailable": False}
-    user_id = get_current_user_id()
-    if not user_id or not project_id:
-        return recovered, audit
-
-    saved_fmt = str(recovered.get("active_format_id") or "").strip()
-    if saved_fmt not in WBS_FORMAT_IDS:
-        saved_fmt = WBS_TEMPLATE_ID_BY_LEGACY_FORMAT.get(str(recovered.get("format_type") or ""), "")
-    def _fmt_match(candidate):
-        value = str(candidate.get("active_format_id") or "")
-        if not value:
-            value = WBS_TEMPLATE_ID_BY_LEGACY_FORMAT.get(str(candidate.get("format_type") or ""), "")
-        return value == saved_fmt
-
-    # Do not use a future branch/session to reconstruct an earlier checkpoint.
-    historical = []
-    target_branch = clean_project_version_name(recovered.get("project_version_name") or "Original").casefold()
-    try:
-        history_query = (supabase.table("writersblock_project_drafts")
-                         .select("id, project_id, user_id, draft_content, created_at")
-                         .eq("project_id", project_id).eq("user_id", user_id)
-                         .eq("draft_type", "project_session")
-                         .order("created_at", desc=True).limit(500))
-        for row in history_query.execute().data or []:
-            when = str(row.get("created_at") or "")
-            if as_of and when and when > str(as_of):
-                continue
-            try:
-                old = json.loads(row.get("draft_content") or "{}")
-            except (ValueError, TypeError):
-                continue
-            if not isinstance(old, dict):
-                continue
-            if old.get("current_project_id") and str(old["current_project_id"]) != str(project_id):
-                continue
-            if not _fmt_match(old):
-                continue
-            old_branch = clean_project_version_name(old.get("project_version_name") or "Original").casefold()
-            if old_branch != target_branch:
-                continue
-            historical.append((when, old))
-    except Exception:
-        audit["history_unavailable"] = True
-    historical.sort(key=lambda item: item[0], reverse=True)
-
-    # Only retrieve saved choices, not the current template's default values.
-    all_values = recovered.get("format_template_values")
-    all_values = dict(all_values) if isinstance(all_values, dict) else {}
-    present = all_values.get(saved_fmt)
-    present = dict(present) if isinstance(present, dict) else {}
-    for _, old in historical:
-        old_all = old.get("format_template_values")
-        old_setup = old_all.get(saved_fmt) if isinstance(old_all, dict) else None
-        if not isinstance(old_setup, dict):
-            continue
-        for field, value in old_setup.items():
-            if field not in present and value is not None and str(value).strip():
-                present[field] = value
-                audit["recovered_setup"] = True
-    if saved_fmt:
-        all_values[saved_fmt] = present
-    recovered["format_template_values"] = all_values
-
-    # These independent development controls were saved before format templates.
-    for field in ("dialogue_style", "tone_style", "author_style", "audiobook_length",
-                  "audiobook_target_word_count", "picture_book_word_target"):
-        if recovered.get(field) not in (None, ""):
-            continue
-        for _, old in historical:
-            value = old.get(field)
-            if value not in (None, ""):
-                recovered[field] = value
-                audit["recovered_setup"] = True
-                break
-
-    # Prefer the selected saved snapshot's exact series identity. When it lacks
-    # series fields, an explicit series_metadata row for the SAME project may
-    # supply the relationship. No cross-project or auto-number lookups.
-    series_name = str(recovered.get("series_name") or "").strip()
-    series_scope = recovered.get("project_scope") == "Book in a Series"
-    if not (series_name and series_scope):
-        # An old snapshot can predate its series assignment. Prefer historical
-        # series metadata, and require unambiguous evidence for its book number.
-        series_evidence = []
-        for _, old in historical:
-            name = str(old.get("series_name") or "").strip()
-            if old.get("project_scope") == "Book in a Series" and name:
-                series_evidence.append(old)
-        try:
-            metadata_query = (supabase.table("writersblock_project_drafts")
-                              .select("id, project_id, user_id, draft_content, created_at")
-                              .eq("project_id", project_id).eq("user_id", user_id)
-                              .eq("draft_type", "series_metadata")
-                              .order("created_at", desc=False).limit(200))
-            for row in metadata_query.execute().data or []:
-                try:
-                    item = json.loads(row.get("draft_content") or "{}")
-                except (TypeError, ValueError):
-                    continue
-                if isinstance(item, dict) and str(item.get("series_name") or "").strip():
-                    series_evidence.append(item)
-        except Exception:
-            audit["history_unavailable"] = True
-        names = {str(x.get("series_name") or "").strip().casefold() for x in series_evidence}
-        names.discard("")
-        if len(names) == 1:
-            # Favor the oldest evidence for this project; this prevents a later
-            # auto-renumbered metadata record from overwriting an earlier volume.
-            evidence = series_evidence[0]
-            recovered["project_scope"] = "Book in a Series"
-            recovered["series_name"] = str(evidence.get("series_name") or "")
-            if not str(recovered.get("series_key") or ""):
-                recovered["series_key"] = str(evidence.get("series_key") or "")
-            numbers = set()
-            for item in series_evidence:
-                try:
-                    number = int(item.get("series_book_number") or 0)
-                except (ValueError, TypeError):
-                    number = 0
-                if number > 0:
-                    numbers.add(number)
-            if len(numbers) == 1:
-                recovered["series_book_number"] = next(iter(numbers))
-            elif len(numbers) > 1:
-                # Conflicting historical numbers must be flagged, not guessed.
-                audit["series_conflict"] = True
-                # Preserve the saved relationship fields but block the series
-                # control from proposing an arbitrary volume of 1.
-                recovered["project_scope"] = "Standalone Book"
-            audit["recovered_series"] = True
-        elif len(names) > 1:
-            audit["series_conflict"] = True
-
-    return recovered, audit
+    return rows[0]
 
 
 def load_saved_project_session_to_state(saved_session_row):
@@ -1213,175 +820,52 @@ def load_saved_project_session_to_state(saved_session_row):
 
     try:
         snapshot = json.loads(saved_session_row.get("draft_content") or "{}")
-        if not isinstance(snapshot, dict):
-            raise SavedFormatError("Saved project snapshot is not a record.")
-        load_project_id = saved_session_row.get("project_id") or snapshot.get("current_project_id")
-        # Validate ID and recognized format BEFORE modifying the open project.
-        prepare_saved_snapshot(snapshot, load_project_id)
-    except (ValueError, TypeError, SavedFormatError) as exc:
-        st.error(f"Saved project could not be loaded: {exc}")
+    except Exception as e:
+        st.error(f"Saved project could not be loaded: {e}")
         return False
 
-    # Restore only evidence saved for this exact project; all queries read-only.
-    snapshot, restore_audit = _wbs_restore_missing_concept_fields(
-        snapshot, load_project_id, saved_session_row.get("created_at"),
-    )
-
-    # Restoring a saved project must use evidence belonging to THIS project,
-    # never the previous project's widget or session state.
-    legacy_aliases = {
-        "Children's Storybook (32-Page Writing Layout)": "Children's Picture Book (32-Page Layout)",
-        "Children's Storybook (32-Page Layout)": "Children's Picture Book (32-Page Layout)",
-        "Children's Picture Book": "Children's Picture Book (32-Page Layout)",
-        "Audio Short Story — 15–30 min": "Audio Book",
-    }
-    def _format_id_from_name(value):
-        name = legacy_aliases.get(str(value or "").strip(), str(value or "").strip())
-        if name in WBS_FORMAT_IDS:
-            return name
-        return WBS_TEMPLATE_ID_BY_LEGACY_FORMAT.get(name)
-
-    snapshot_id = _format_id_from_name(snapshot.get("active_format_id"))
-    snapshot_name_id = _format_id_from_name(snapshot.get("format_type"))
-    parent_id = None
-    # The project row may be more accurate than a stale copied format field in
-    # an old project_session. Read it, but NEVER update it during project load.
-    try:
-        parent_row = (supabase.table("writersblock_projects")
-                      .select("project_type")
-                      .eq("id", load_project_id)
-                      .limit(1).execute())
-        if getattr(parent_row, "data", None):
-            parent_id = _format_id_from_name(parent_row.data[0].get("project_type"))
-    except Exception:
-        pass
-
-    recovered_setup = False
-    per_format = snapshot.get("format_template_values")
-    if not isinstance(per_format, dict):
-        per_format = {}
-    populated = [fmt for fmt, values in per_format.items()
-                 if fmt in WBS_FORMAT_IDS and isinstance(values, dict)
-                 and any(str(value or "").strip() for value in values.values())]
-    # A saved snapshot can have a stale childrens_picture_book ID while all
-    # actual development choices belong to the audiobook or short-story template.
-    # Prefer existing project-specific form data over an incompatible stale ID.
-    candidates = [parent_id, snapshot_name_id, snapshot_id]
-    restored_format_id = next((fmt for fmt in candidates if fmt in populated), None)
-    if not restored_format_id and len(populated) == 1:
-        restored_format_id = populated[0]
-    if not restored_format_id:
-        restored_format_id = next((fmt for fmt in candidates if fmt in WBS_FORMAT_IDS), None)
-    if not restored_format_id:
-        # Do not silently give an unknown saved project the previous template.
-        st.error("Saved writing format is missing or unknown. This project was not loaded.")
-        return False
-
-    # If an old save has lost its format's setup values, recover them READ-ONLY
-    # from an earlier session of the same project and same format. Never use
-    # any other project's settings, and never auto-save the recovered data.
-    current_values = per_format.get(restored_format_id)
-    if not isinstance(current_values, dict) or not any(str(v or "").strip() for v in current_values.values()):
-        try:
-            old_rows = (supabase.table("writersblock_project_drafts")
-                        .select("id, draft_content, created_at")
-                        .eq("project_id", load_project_id)
-                        .eq("draft_type", "project_session")
-                        .order("created_at", desc=True).limit(100).execute())
-            loaded_time = str(saved_session_row.get("created_at") or "")
-            for candidate in getattr(old_rows, "data", None) or []:
-                if str(candidate.get("id")) == str(saved_session_row.get("id")):
-                    continue
-                if loaded_time and str(candidate.get("created_at") or "") > loaded_time:
-                    continue
-                try:
-                    older = json.loads(candidate.get("draft_content") or "{}")
-                except (ValueError, TypeError):
-                    continue
-                older_values = older.get("format_template_values")
-                if not isinstance(older_values, dict):
-                    continue
-                recovered = older_values.get(restored_format_id)
-                if not isinstance(recovered, dict) or not any(str(v or "").strip() for v in recovered.values()):
-                    continue
-                older_id = _format_id_from_name(older.get("active_format_id"))
-                older_name = _format_id_from_name(older.get("format_type"))
-                if restored_format_id not in (older_id, older_name):
-                    continue
-                per_format = dict(per_format)
-                per_format[restored_format_id] = dict(recovered)
-                recovered_setup = True
-                break
-        except Exception:
-            pass
-    # Commit only after resolving this project's format and checking all IDs.
-    # Reset absent older keys to project-safe defaults; license and account state
-    # are never touched. Preserve the saved version/Quill/Stage 3 fields.
-    normalized_raw = dict(snapshot)
-    # Project title is master metadata owned by this project ID, not by an
-    # earlier snapshot's UI widget or another open project. Read only: the
-    # actual parent record always wins after explicit project renames.
-    parent_project_title = get_project_title_from_project_id(load_project_id)
-    if parent_project_title:
-        normalized_raw["project_title"] = parent_project_title
-    normalized_raw["format_template_values"] = {restored_format_id: dict(per_format.get(restored_format_id) or {})}
-    try:
-        verified = prepare_saved_snapshot(normalized_raw, load_project_id, restored_format_id)
-    except SavedFormatError as exc:
-        st.error(f"Saved project could not be loaded: {exc}")
-        return False
-    for key, value in verified.items():
+    for key, value in snapshot.items():
+        if key == "saved_at":
+            st.session_state.last_saved_project_at = value
+            continue
         if key == "scene_blocks" and isinstance(value, dict):
-            converted = {}
+            restored = {}
             for scene_key, scene_text in value.items():
                 try:
-                    converted[int(scene_key)] = scene_text
-                except (ValueError, TypeError):
-                    converted[scene_key] = scene_text
-            st.session_state.scene_blocks = converted
+                    restored[int(scene_key)] = scene_text
+                except Exception:
+                    restored[scene_key] = scene_text
+            st.session_state.scene_blocks = restored
         else:
             st.session_state[key] = value
-    st.session_state.last_saved_project_at = snapshot.get("saved_at")
+
+    st.session_state.current_project_id = saved_session_row.get("project_id") or snapshot.get("current_project_id")
+    # Keep the exact database row of the loaded numbered version for in-place review updates.
     st.session_state["_wbs_active_saved_session_row_id"] = str(saved_session_row.get("id") or "")
+    # Baseline is the EXACT version the writer loaded, never the newest
+    # version of this project (which may be a different branch).
     st.session_state["_wbs_stage3_saved_outline_baseline"] = str(snapshot.get("plot_outline") or "").strip()
     st.session_state["_wbs_stage3_unsaved_changes"] = False
-    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(verified)
-    st.session_state["_wbs_last_saved_project_id"] = str(load_project_id or "")
-    st.session_state["_wbs_loaded_project_id"] = str(load_project_id or "")
-    st.session_state["_wbs_loaded_project_title"] = str(verified.get("project_title") or "").strip()
-    st.session_state["wbs_locked_format_id"] = restored_format_id
-    st.session_state["_wbs_locked_project_id"] = str(load_project_id or "")
-    st.session_state["_wbs_concept_recovered_for_review"] = (
-        recovered_setup or restore_audit["recovered_setup"]
-    )
-    st.session_state["_wbs_series_recovered_for_review"] = restore_audit["recovered_series"]
-    st.session_state["_wbs_series_conflict_for_review"] = restore_audit["series_conflict"]
-    st.session_state["_wbs_historical_restore_unavailable"] = restore_audit["history_unavailable"]
-    setup_values = normalized_raw.get("format_template_values") or {}
-    saved_fields = setup_values.get(restored_format_id) or {}
-    template_fields = (get_wbs_format_template(restored_format_id) or {}).get("concept_fields") or []
-    # Defaults shown by Streamlit are not proof of the writer's original choices.
-    missing_fields = [str(f.get("key")) for f in template_fields if isinstance(f, dict)
-                      and f.get("key") and f["key"] not in saved_fields
-                      and f["key"] not in {"project_title", "dialogue_style",
-                                            "story_premise", "premise", "logline",
-                                            "story_idea", "objective", "core_premise"}]
-    st.session_state["_wbs_saved_concept_missing_fields"] = missing_fields
-    # Old preview/editor widget state must never spill into another project.
-    for cache_key in list(st.session_state.keys()):
-        if str(cache_key).startswith(("_wbs_stage3_rewrite_", "_wbs_stage3_edit_", "_wbs_stage3_clean_")):
-            st.session_state.pop(cache_key, None)
-    st.session_state["_wbs_loaded_quill_concept"] = False
-    # Never carry a stale Quill-generated premise from another project.
-    if snapshot.get("saved_quill_concept") is not None:
-        st.session_state["saved_quill_concept"] = snapshot["saved_quill_concept"]
-    else:
-        st.session_state.pop("saved_quill_concept", None)
-    st.session_state.active_format_id = restored_format_id
-    st.session_state.format_type = WBS_LEGACY_FORMAT_BY_TEMPLATE_ID[restored_format_id]
-    st.session_state.active_format_template = get_wbs_format_template(restored_format_id)
-    st.session_state.quill_format_instructions = get_wbs_quill_instructions(restored_format_id)
-    st.session_state.quill_format_name = get_wbs_format_display_name(restored_format_id)
+    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
+    st.session_state["_wbs_last_saved_project_id"] = str(st.session_state.current_project_id or "")
+
+    # Normalize older picture-book labels every time a saved project is restored.
+    restored_format = str(st.session_state.get("format_type") or "").strip()
+    if restored_format in {
+        "Children's Storybook (32-Page Writing Layout)",
+        "Children's Storybook (32-Page Layout)",
+        "Children's Picture Book",
+    }:
+        st.session_state.format_type = "Children's Picture Book (32-Page Layout)"
+        restored_format = st.session_state.format_type
+
+    restored_format_id = str(st.session_state.get("active_format_id") or "").strip()
+    if restored_format_id not in WBS_FORMAT_IDS:
+        restored_format_id = WBS_TEMPLATE_ID_BY_LEGACY_FORMAT.get(
+            restored_format or "Novel / Prose",
+            "novel_prose_novella",
+        )
+        st.session_state.active_format_id = restored_format_id
 
     # Restore the Writing Format widget from the saved authoritative template.
     # A keyed Streamlit selectbox ignores its index= argument when an old widget
@@ -1391,7 +875,6 @@ def load_saved_project_session_to_state(saved_session_row):
     # Restore the actual saved Quill concept before Step 1 constructs its widgets.
     # Clearing widget keys without seeding them again made saved stories look lost.
     clear_concept_widget_state_for_loaded_project()
-    st.session_state["wbs_format_template_selector"] = restored_format_id
     saved_concept = str(snapshot.get("saved_quill_concept") or snapshot.get("story_seed") or "")
     saved_mode = str(snapshot.get("version_source_mode") or snapshot.get("starting_source_mode") or "")
     if saved_mode == "Quill Assisted":
@@ -1741,78 +1224,6 @@ def get_project_title_from_project_id(project_id):
 
     return ""
 
-
-
-def wbs_saved_project_identity_preflight(saved_row):
-    """Read-only preflight before loading an older project-session row.
-
-    A historical session can retain a title from project A while its project_id
-    points at project B. Replacing its title with B's database title would show
-    the wrong manuscript/project, so fail closed and preserve the active state.
-    """
-    if not isinstance(saved_row, dict):
-        return False, "The selected saved entry is invalid. Nothing was loaded."
-    project_id = str(saved_row.get("project_id") or "").strip()
-    row_id = str(saved_row.get("id") or "").strip()
-    user_id = get_current_user_id()
-    if not project_id or not row_id or not user_id:
-        return False, "The selected saved entry has no verifiable project identity. Nothing was loaded."
-    try:
-        snapshot = json.loads(saved_row.get("draft_content") or "{}")
-        if not isinstance(snapshot, dict):
-            raise ValueError("Invalid snapshot")
-        embedded_id = str(snapshot.get("current_project_id") or "").strip()
-        if embedded_id and embedded_id != project_id:
-            return False, (
-                "Saved entry contains two different project IDs. Loading was blocked; "
-                "the current project and every saved version remain unchanged."
-            )
-        saved_title = str(snapshot.get("project_title") or "").strip()
-        project_result = (supabase.table("writersblock_projects")
-                          .select("id,project_title")
-                          .eq("id", project_id).eq("user_id", user_id)
-                          .limit(1).execute())
-        projects = getattr(project_result, "data", None) or []
-        if len(projects) != 1:
-            return False, (
-                "This saved entry does not have a uniquely verified parent project "
-                "for the current user. Loading was blocked; no data was changed."
-            )
-        parent_title = str(projects[0].get("project_title") or "").strip()
-        if not parent_title:
-            return False, "The saved entry's parent project has no title. Loading was blocked."
-        if not saved_title:
-            return False, (
-                "The saved project session has no original title to verify. "
-                "Loading was blocked; no records were changed."
-            )
-        if saved_title.casefold() != parent_title.casefold():
-            return False, (
-                f'Saved entry is titled "{saved_title}" but its database project ID '
-                f'belongs to "{parent_title}". This may be a legacy wrong-project '
-                "association or a historical rename; it cannot be resolved safely "
-                "by changing the displayed title. Loading was blocked, and neither "
-                "project was changed."
-            )
-        # Verify the selected session itself still exists and belongs to the
-        # authenticated user and parent; avoid trusting stale selectbox values.
-        session_result = (supabase.table("writersblock_project_drafts")
-                          .select("id,project_id,draft_type")
-                          .eq("id", row_id).eq("user_id", user_id)
-                          .eq("project_id", project_id)
-                          .eq("draft_type", "project_session")
-                          .limit(1).execute())
-        sessions = getattr(session_result, "data", None) or []
-        if len(sessions) != 1:
-            return False, "The saved entry could not be verified against its project. Loading was blocked."
-        return True, ""
-    except (ValueError, TypeError, KeyError):
-        return False, "Saved entry metadata is invalid; load cancelled without changes."
-    except Exception:
-        return False, (
-            "Could not verify this saved entry with the database. "
-            "Loading was blocked to protect existing projects."
-        )
 
 
 def get_projects_for_import():
@@ -2382,7 +1793,6 @@ WBS_LEGACY_FORMAT_BY_TEMPLATE_ID = {
     "childrens_picture_book": "Children's Picture Book (32-Page Layout)",
     "full_novel_blueprint": "Full Novel Blueprint",
     "podcast_script": "Podcast Script",
-    "standard_manuscript": "Standard Manuscript",
 }
 
 WBS_TEMPLATE_ID_BY_LEGACY_FORMAT = {
@@ -2396,7 +1806,6 @@ WBS_TEMPLATE_ID_BY_LEGACY_FORMAT = {
     "Full Novel Blueprint": "full_novel_blueprint",
     "YouTube Shorts": "youtube_shorts",
     "Podcast Script": "podcast_script",
-    "Standard Manuscript": "standard_manuscript",
 }
 
 WBS_FORMAT_IDS = [format_id for format_id, _label in WBS_FORMAT_OPTIONS]
@@ -2427,33 +1836,6 @@ if "format_template_values" not in st.session_state or not isinstance(
     st.session_state.get("format_template_values"), dict
 ):
     st.session_state.format_template_values = {}
-
-
-def get_active_format_widget_key(field_key):
-    """Bind each development widget to the exact saved revision being edited.
-
-    Project+format isolation alone is insufficient: V-1 and V-2 share those
-    identifiers, so Streamlit can reuse V-2's live widget value after loading
-    V-1 even though the V-1 snapshot itself was restored. The immutable saved
-    session row ID keeps their widget states separate without changing any
-    stored project data or calling the save API.
-    """
-    if not st.session_state.get("_wbs_draft_scope_id"):
-        st.session_state._wbs_draft_scope_id = uuid.uuid4().hex[:12]
-    saved_revision_id = str(
-        st.session_state.get("_wbs_active_saved_session_row_id")
-        or st.session_state.get("_wbs_loaded_saved_session_id")
-        or ""
-    ).strip()
-    # Unsaved work uses its own fresh draft scope; the saved revision ID only
-    # appears in widget keys, never in format-template values or manuscript text.
-    revision_scope = saved_revision_id or "draft_" + st.session_state._wbs_draft_scope_id
-    return project_format_widget_key(
-        st.session_state.get("current_project_id"),
-        st.session_state._wbs_draft_scope_id,
-        st.session_state.get("active_format_id"),
-        f"{field_key}__revision_{revision_scope}",
-    )
 
 
 def get_active_format_template_values():
@@ -2638,7 +2020,7 @@ def render_active_format_development_fields():
                 continue
             label = str(field.get("label") or key)
             help_text = str(field.get("help") or "") or None
-            widget_key = get_active_format_widget_key(key)
+            widget_key = f"format_field_{st.session_state.active_format_id}_{key}"
             existing = values.get(key, "")
 
             with col:
@@ -2712,7 +2094,7 @@ def render_active_format_development_fields():
                     custom_key = "production_influence_custom"
                     custom_option = "Custom Influence / Other"
                     if value == custom_option:
-                        custom_widget_key = get_active_format_widget_key(custom_key)
+                        custom_widget_key = f"format_field_{st.session_state.active_format_id}_{custom_key}"
                         custom_existing = values.get(custom_key, "")
                         custom_value = st.text_input(
                             "Custom Influence",
@@ -2758,33 +2140,42 @@ def wbs_concept_contains_editorial_commentary(text):
 
 
 def render_format_template_save_reminder():
-    """One master Save Project, then non-destructive new versions (all formats)."""
+    """Bottom-of-template reminder and save action for Concept Development."""
     st.markdown("---")
     with st.container(border=True):
+        st.markdown("**💾 Remember to Save Project before leaving Concept Development.**")
+
         if st.session_state.get("demo_mode"):
             st.caption("Project saving is available in the full Writer Edition.")
-            if st.button("💾 Save Project 🔒", key="template_save_project_trial", use_container_width=True):
+            if st.button(
+                "💾 Save Project 🔒",
+                key=f"template_save_project_trial_{st.session_state.get('active_format_id', 'format')}",
+                use_container_width=True,
+                type="secondary",
+            ):
                 full_version_only_notice("Saved Projects")
             return
-        has_master = wbs_has_saved_master()
-        if has_master is None:
-            st.warning("Cannot verify this project's save history. Saving is disabled until the connection is restored.")
-        elif has_master:
+
+        if st.button(
+            "💾 Save Project",
+            key=f"template_save_project_{st.session_state.get('active_format_id', 'format')}",
+            use_container_width=True,
+            type="secondary",
+        ):
+            ensure_project_title_loaded()
+            if not get_project_title():
+                st.warning("Name this project before saving.")
+                return
+            save_result = save_current_project_session_to_supabase()
+            if save_result:
+                st.success("Project saved and available in Saved Projects / Versions.")
+                st.rerun()
+
+        if get_active_project_id():
             render_save_as_named_version_control(
                 f"concept_{st.session_state.get('active_format_id', 'format')}"
             )
-        elif st.button(
-            "💾 Save Project — Create Master",
-            key=f"template_save_project_{st.session_state.get('active_format_id', 'format')}",
-            use_container_width=True, type="secondary",
-        ):
-            if not get_project_title():
-                st.warning("Name the new project before saving.")
-                return
-            result = save_current_project_session_to_supabase()
-            if result and not getattr(result, "unchanged", False):
-                st.success("Master project saved. Future changes are new versions.")
-                st.rerun()
+
 
 
 if "project_version_name" not in st.session_state:
@@ -3618,7 +3009,6 @@ PROJECT_INTEGRITY_REVIEW_FORMATS = {
     "Novel / Prose",
     "Short Story",
     "Novella",
-    "Standard Manuscript",
     "Screenplay Outline",
     "Stage Play / Dramatic Script",
     "Audio Book",
@@ -3815,7 +3205,6 @@ FINAL_OUTPUT_DISPLAY_LABELS = {
     "Novel / Prose": "Novel / Prose",
     "Short Story": "Short Story",
     "Novella": "Novella",
-    "Standard Manuscript": "Standard Manuscript",
     "Screenplay Outline": "Screenplay",
     "Stage Play / Dramatic Script": "Stage Play / Dramatic Script",
     "Audio Book": "Audiobook Theatre Production Script",
@@ -3849,7 +3238,7 @@ def get_final_output_conversion_instruction(target_format):
         "Return only the converted final-output text."
     )
 
-    if target_format in {"Novel / Prose", "Short Story", "Novella", "Standard Manuscript"}:
+    if target_format in {"Novel / Prose", "Short Story", "Novella"}:
         form_name = FINAL_OUTPUT_DISPLAY_LABELS.get(target_format, target_format)
         return f"""{common}
 Convert the source into a clean {form_name} manuscript presentation. Use ordinary prose paragraphs and quoted dialogue with natural attribution. Remove screenplay, stage-play, or audiobook speaker labels if any exist in an older source. Preserve all substantive story content and approximately the current story length. This is manuscript normalization and format conversion, not a creative rewrite or summary."""
@@ -4220,7 +3609,7 @@ def build_final_output_docx_bytes(title, output_text, target_format):
     # 12 pt Times New Roman, 1" margins, double spacing, 0.5" first-line
     # indent, no extra paragraph spacing, upper-right page numbering.
     # ------------------------------------------------------------------
-    if target_format in {"Novel / Prose", "Short Story", "Novella", "Standard Manuscript"}:
+    if target_format in {"Novel / Prose", "Short Story", "Novella"}:
         doc = Document()
         section = doc.sections[0]
         section.page_width = Inches(8.5)
@@ -4782,418 +4171,25 @@ def rename_current_project_everywhere(new_title):
                     .execute()
                 )
 
-        # 4) Update the current live project title and loaded-project identity.
+        # 4) Update the current live project title.
         st.session_state.project_title = clean_title
-        st.session_state["_wbs_loaded_project_id"] = str(project_id)
-        st.session_state["_wbs_loaded_project_title"] = clean_title
 
-        # Project identity changed; this operation does NOT create a new version.
-        # Explicit edits must be saved separately using New Version.
-        return True, f'Project renamed to "{clean_title}". Earlier versions remain available; edits require a new version.'
+        # 5) Save the complete current working state immediately for licensed users.
+        #    This is a database save only; it makes no Gemini/API generation call.
+        if st.session_state.get("licensed_mode"):
+            save_result = save_current_project_session_to_supabase()
+            if not save_result:
+                return (
+                    True,
+                    "Project renamed, but the current project session could not be saved automatically. "
+                    "Use Save Project before leaving.",
+                )
+
+
+        return True, f'Project renamed to "{clean_title}" and current work saved.'
 
     except Exception as exc:
         return False, f"Project rename could not be completed: {exc}"
-
-
-def render_confirmed_project_rename(stage_key):
-    """Two-step confirmation required to change an existing project's master title.
-
-    This control never saves a project version. A new project's initial title is
-    edited normally before the master is saved.
-    """
-    project_id = str(get_active_project_id() or "")
-    if not project_id or st.session_state.get("demo_mode"):
-        return
-    safe_stage = re.sub(r"[^A-Za-z0-9_-]+", "_", str(stage_key or "stage"))
-    prefix = f"wbs_rename_{safe_stage}_{project_id}"
-    title = get_project_title_for_display()
-    source_key = f"{prefix}_original"
-    edit_key = f"{prefix}_new"
-    pending_key = f"{prefix}_pending"
-
-    # Reset the proposed title after switching projects or completing a rename.
-    if st.session_state.get(source_key) != title:
-        st.session_state[source_key] = title
-        st.session_state[edit_key] = title
-        st.session_state.pop(pending_key, None)
-
-    pending = st.session_state.get(pending_key)
-    with st.expander("Rename Project", expanded=bool(pending)):
-        proposed = st.text_input("New Project Title:", key=edit_key, max_chars=120)
-        clean = re.sub(r"\s+", " ", str(proposed or "").strip())
-        # A confirmation expires immediately if the title, project, or proposal
-        # differs from what the writer previously reviewed.
-        matches = (
-            isinstance(pending, dict)
-            and pending.get("project_id") == project_id
-            and pending.get("old_title") == title
-            and pending.get("new_title") == clean
-            and clean != title
-        )
-        if matches:
-            st.warning(f'Change project title from "{title}" to "{clean}"? This will update the title on existing saved versions, but will not create a new version.')
-            confirm_col, cancel_col = st.columns(2)
-            with confirm_col:
-                if st.button("Confirm Title Change", key=f"{prefix}_confirm", type="primary", use_container_width=True):
-                    # Independently recheck identity on the final click; never
-                    # confirm a stale title preview from another project.
-                    if str(get_active_project_id() or "") != project_id or get_project_title_for_display() != title:
-                        st.session_state.pop(pending_key, None)
-                        st.error("Project changed during confirmation. Title was not changed.")
-                    else:
-                        ok, message = rename_current_project_everywhere(clean)
-                        if ok:
-                            st.session_state.pop(pending_key, None)
-                            st.success(message)
-                            st.rerun()
-                        else:
-                            st.error(message)
-            with cancel_col:
-                if st.button("Cancel Rename", key=f"{prefix}_cancel", use_container_width=True):
-                    st.session_state.pop(pending_key, None)
-                    st.rerun()
-        else:
-            if pending is not None:
-                st.session_state.pop(pending_key, None)
-                st.caption("The proposed title changed. Review it again before confirming.")
-            if st.button("Review Title Change", key=f"{prefix}_review", disabled=not clean or clean == title, use_container_width=True):
-                st.session_state[pending_key] = {
-                    "project_id": project_id,
-                    "old_title": title,
-                    "new_title": clean,
-                }
-                st.rerun()
-
-
-def get_loaded_project_series_versions(project_id):
-    """Saved versions ONLY for the loaded project, with exact source IDs/word totals."""
-    active_id = str(get_active_project_id() or "")
-    if not project_id or str(project_id) != active_id:
-        return []
-    result = []
-    for item in get_saved_projects_versions_dropdown_items():
-        row = item.get("row") or {}
-        if str(row.get("project_id") or "") != active_id:
-            continue
-        kind = item.get("type")
-        if kind == "manuscript_version":
-            saved_text = str(row.get("manuscript_content") or "")
-        elif kind == "project_session":
-            try:
-                snapshot = json.loads(row.get("draft_content") or "{}")
-            except (ValueError, TypeError):
-                snapshot = {}
-            saved_text = get_best_saved_manuscript_source(snapshot) if isinstance(snapshot, dict) and snapshot else ""
-            if not saved_text and isinstance(snapshot, dict):
-                saved_text = str(snapshot.get("story_seed") or "")
-        else:
-            continue
-        key = f"{kind}:{row.get('id')}"
-        result.append({"key": key, "type": kind, "id": str(row.get("id") or ""),
-                       "label": str(item.get("label") or ""),
-                       "words": count_words(saved_text)})
-    return result
-
-
-
-def get_assigned_series_projects_for_display(series_name):
-    """Read-only: one book per distinct author-recognized project, not all history.
-
-    Legacy saved sessions can contain accidental series links and duplicate project
-    IDs. Those records remain intact; they do not automatically become approved
-    book references. An exact saved source is authoritative only after explicit
-    Save Project to Series confirmation.
-    """
-    series_key = make_series_key(series_name)
-    if not series_key or not get_current_user_id():
-        return []
-    membership = {str(pid): dict(meta) for pid, meta in get_series_metadata_by_project().items()
-                  if str(meta.get("series_key") or "") == series_key}
-    projects = {str(row.get("id")): row for row in get_projects_for_import() if row.get("id")}
-    membership = {pid: meta for pid, meta in membership.items() if pid in projects}
-    if not membership:
-        return []
-
-    # Oakhaven's five historical book titles were expressly confirmed by its
-    # owner. This is presentation-only: DO NOT alter, delete, or attach records.
-    # Other series work generically from their own saved memberships.
-    recognized_titles = (
-        "It's Not Safe", "Return To Sender", "The Dead Letters Covenant",
-        "Chronos' Grasp", "Blood Of The Ancients",
-    ) if str(series_name or "").strip().casefold() == "oakhaven" else ()
-
-    saved_versions = {}
-    for item in get_saved_projects_versions_dropdown_items():
-        row = item.get("row") or {}
-        pid = str(row.get("project_id") or "")
-        if pid not in membership:
-            continue
-        kind = str(item.get("type") or "")
-        rid = str(row.get("id") or "")
-        if kind not in ("manuscript_version", "project_session") or not rid:
-            continue
-        saved_versions.setdefault(pid, []).append((kind, rid, row, item))
-
-    grouped = {}
-    for pid, meta in membership.items():
-        title = str(projects[pid].get("project_title") or meta.get("project_title") or "Untitled Project").strip()
-        group_key = title.casefold()
-        if recognized_titles and group_key not in {t.casefold() for t in recognized_titles}:
-            continue  # Legacy extras are not an approved Oakhaven book reference.
-        options = saved_versions.get(pid) or []
-        chosen = next((entry for entry in options
-                       if entry[0] == str(meta.get("series_source_type") or "")
-                       and entry[1] == str(meta.get("series_source_id") or "")), None)
-        pinned = chosen is not None
-        if chosen is None and options:
-            chosen = max(options, key=lambda entry: (str(entry[2].get("created_at") or ""), entry[1]))
-        candidate = {"project_id": pid, "title": title, "meta": meta,
-                     "selected": chosen, "confirmed": pinned,
-                     "creation": str(projects[pid].get("created_at") or "")}
-        grouped.setdefault(group_key, []).append(candidate)
-
-    preferred = []
-    for title_key, candidates in grouped.items():
-        # Duplicate project names are old ambiguous records; do not present them
-        # as additional books. Prefer a manually selected saved revision.
-        winner = sorted(candidates, key=lambda c: (
-            0 if c["confirmed"] else 1,
-            c["creation"], c["project_id"]))[0]
-        preferred.append(winner)
-
-    # Only an explicitly saved series order overrides the owner's initial five-
-    # book Oakhaven sequence. Ordering never changes the manuscript version.
-    current_order = get_series_order_overrides().get(series_key)
-    if current_order:
-        positions = {pid: index for index, pid in enumerate(current_order)}
-        preferred.sort(key=lambda c: (positions.get(c["project_id"], 100000), c["creation"], c["project_id"]))
-    elif recognized_titles:
-        ranks = {name.casefold(): i for i, name in enumerate(recognized_titles)}
-        preferred.sort(key=lambda c: (ranks.get(c["title"].casefold(), 10000), c["creation"]))
-    else:
-        preferred.sort(key=lambda c: (int(c["meta"].get("series_book_number") or 10000), c["creation"], c["project_id"]))
-
-    displayed = []
-    for book_number, entry in enumerate(preferred, 1):
-        choice = entry["selected"]
-        if choice:
-            kind, rid, row, item = choice
-            match = re.search(r" — (V-\d+[A-Z]*)(?: —|$)", str(item.get("label") or ""))
-            revision = match.group(1) if match else (
-                f"V-{row.get('version_number')}" if row.get("version_number") else "Version unknown")
-            try:
-                saved_date = datetime.fromisoformat(str(row.get("created_at") or "").replace("Z", "+00:00")).strftime("%m/%d/%Y")
-            except (TypeError, ValueError):
-                saved_date = "Date unavailable"
-            if kind == "manuscript_version":
-                words = count_words(row.get("manuscript_content") or "")
-            else:
-                try:
-                    snapshot = json.loads(row.get("draft_content") or "{}")
-                except (TypeError, ValueError):
-                    snapshot = {}
-                text = get_best_saved_manuscript_source(snapshot) if isinstance(snapshot, dict) else ""
-                if not text and isinstance(snapshot, dict):
-                    text = str(snapshot.get("story_seed") or "")
-                words = count_words(text)
-            source_type, source_id = kind, rid
-        else:
-            revision, saved_date, words, source_type, source_id = "Unselected", "Date unavailable", 0, "", ""
-        label = f"Book {book_number} — {entry['title']} — {revision} — {saved_date} — {words:,} words"
-        displayed.append({
-            "project_id": entry["project_id"], "book_number": book_number,
-            "title": entry["title"], "revision": revision, "date": saved_date,
-            "words": words, "confirmed": entry["confirmed"], "label": label,
-            "source_type": source_type, "source_id": source_id,
-            "note": ("Confirmed series version" if entry["confirmed"]
-                     else "Historical series link — displayed revision is ONLY a preview; confirm it from the loaded project to select it for the series"),
-        })
-    return displayed
-
-
-def get_series_reference_preview_text(member):
-    """Return an existing saved book for PREVIEW ONLY, never load its project."""
-    if not member or not get_current_user_id():
-        return ""
-    pid, kind, rid = (str(member.get(key) or "")
-                      for key in ("project_id", "source_type", "source_id"))
-    if not pid or not rid or kind not in ("manuscript_version", "project_session"):
-        return ""
-    for item in get_saved_projects_versions_dropdown_items():
-        row = item.get("row") or {}
-        if (str(row.get("project_id") or "") != pid or
-            str(row.get("id") or "") != rid or
-            item.get("type") != kind):
-            continue
-        if kind == "manuscript_version":
-            return str(row.get("manuscript_content") or "")
-        try:
-            data = json.loads(row.get("draft_content") or "{}")
-        except (ValueError, TypeError):
-            return ""
-        if isinstance(data, dict):
-            return get_best_saved_manuscript_source(data) or str(data.get("story_seed") or "")
-    return ""
-
-
-def change_series_reference_book_number(series_name, visible_members, selected_pid, requested_number):
-    """Reorder ONLY books shown to the writer; preserve all other legacy links.
-
-    A single append-only series_order record is the sole database mutation.
-    Existing projects, versions and manuscripts are never updated or deleted.
-    """
-    visible_ids = [str(x.get("project_id")) for x in visible_members]
-    if not selected_pid or selected_pid not in visible_ids:
-        raise ValueError("Selected book is no longer in this series.")
-    if len(visible_ids) != len(set(visible_ids)):
-        raise ValueError("Duplicate book records; series order was not changed.")
-    target = int(requested_number)
-    if not 1 <= target <= len(visible_ids):
-        raise ValueError("Choose a valid book number.")
-    updated = [pid for pid in visible_ids if pid != selected_pid]
-    updated.insert(target - 1, selected_pid)
-    if updated == visible_ids:
-        return False
-    # The membership catalog may include unconfirmed duplicate/legacy entries.
-    # Preserve their relative order after the visible approved books.
-    full_ids = ordered_series_members(series_name)
-    if not set(visible_ids).issubset(set(full_ids)):
-        raise ValueError("Series membership has changed. Reload before changing book order.")
-    proposed = updated + [pid for pid in full_ids if pid not in visible_ids]
-    save_series_book_order(series_name, proposed)
-    return True
-
-
-def render_save_open_project_to_series():
-    """Explicit series/reference selection, scoped to the loaded project ID."""
-    project_id = str(get_active_project_id() or "")
-    if not project_id or not get_current_user_id() or st.session_state.get("demo_mode"):
-        return
-    confirmed_title = get_project_title_from_project_id(project_id)
-    if not confirmed_title or confirmed_title != get_project_title():
-        st.caption("Load the saved project before changing its series.")
-        return
-    membership = get_series_metadata_by_project().get(project_id) or {}
-    current_series = str(membership.get("series_name") or "")
-    current_source = f"{membership.get('series_source_type') or ''}:{membership.get('series_source_id') or ''}"
-    versions = get_loaded_project_series_versions(project_id)
-    if not versions:
-        st.caption("No saved versions of this project are available for a series reference.")
-        return
-    ui_prefix = f"wbs_series_save_{project_id}"
-    with st.expander("Save Project to Series", expanded=False):
-        st.caption("Only the open project's saved versions are eligible. Your manuscript and version history are not changed.")
-        known_series = get_existing_series_names()
-        series_options = list(known_series) + ["Create New Series", "Standalone (Remove series link)"]
-        series_col, projects_col = st.columns([1, 3], gap="medium")
-        with series_col:
-            selection = st.selectbox(
-                "Select Series:", series_options,
-                index=(known_series.index(current_series) if current_series in known_series else 0),
-                key=f"{ui_prefix}_series")
-        if selection == "Create New Series":
-            destination = st.text_input("New Series Name:", key=f"{ui_prefix}_new", max_chars=80).strip()
-        elif selection == "Standalone (Remove series link)":
-            destination = ""
-        else:
-            destination = selection
-        members = get_assigned_series_projects_for_display(destination) if destination else []
-        with projects_col:
-            if members:
-                # Use stable project identity in widget keys; reruns after selecting
-                # another series cannot reuse a different series' previous row.
-                member_ids = [entry["project_id"] for entry in members]
-                selected_pid = st.selectbox(
-                    "Series Projects:", member_ids,
-                    format_func=lambda pid: next(m["label"] for m in members if m["project_id"] == pid),
-                    key=f"{ui_prefix}_members_{make_series_key(destination)}")
-            else:
-                selected_pid = None
-                st.selectbox("Series Projects:", ["No projects selected for this series"],
-                             disabled=True, key=f"{ui_prefix}_members_empty")
-        member = next((m for m in members if m["project_id"] == selected_pid), None)
-        if member:
-            st.caption(member["label"])  # Full text wraps, even if a selectbox truncates.
-            if not member["confirmed"]:
-                st.caption(member["note"])
-            if st.checkbox("View Selected Saved Book (read-only)",
-                           key=f"{ui_prefix}_preview_{make_series_key(destination)}_{selected_pid}"):
-                preview = get_series_reference_preview_text(member)
-                if preview:
-                    st.text_area("Saved Book Preview — no changes permitted", value=preview,
-                                 height=240, disabled=True,
-                                 key=f"{ui_prefix}_preview_text_{selected_pid}_{member['source_id']}")
-                else:
-                    st.caption("No readable text is available from this saved revision. The saved project has not been changed.")
-
-            # Assign a different BOOK number without changing the chosen saved
-            # revision, its title or date. Explicit confirmation is required.
-            new_book_number = st.selectbox(
-                "Change Book Number:", list(range(1, len(members) + 1)),
-                format_func=lambda num: f"Book {num}",
-                index=member["book_number"] - 1,
-                key=f"{ui_prefix}_book_num_{make_series_key(destination)}_{selected_pid}")
-            if new_book_number != member["book_number"]:
-                order_token = hashlib.sha256(
-                    f"{destination}:{selected_pid}:{new_book_number}:{[m['project_id'] for m in members]}".encode("utf-8")
-                ).hexdigest()[:12]
-                order_confirm = st.checkbox(
-                    f"Confirm move of {member['title']} to Book {new_book_number}",
-                    key=f"{ui_prefix}_order_confirm_{order_token}", value=False)
-                if st.button("Update Book Order", disabled=not order_confirm,
-                             key=f"{ui_prefix}_order_save_{order_token}"):
-                    try:
-                        changed = change_series_reference_book_number(
-                            destination, members, selected_pid, new_book_number)
-                    except Exception as exc:
-                        st.error(f"Book order was not changed: {exc}")
-                    else:
-                        if changed:
-                            st.success("Book order updated. Saved project versions were not changed.")
-                            st.rerun()
-        st.divider()
-        labels = [f"{v['label']} — {v['words']:,} words" for v in versions]
-        loaded_id = str(st.session_state.get("_wbs_loaded_saved_session_id") or "")
-        loaded_manuscript_id = str(st.session_state.get("_wbs_loaded_manuscript_version_id") or "")
-        loaded_key = (f"manuscript_version:{loaded_manuscript_id}" if loaded_manuscript_id
-                      else f"project_session:{loaded_id}")
-        default_key = (loaded_key if loaded_key in [v["key"] for v in versions]
-                       else current_source)
-        default_index = next((idx for idx,v in enumerate(versions) if v["key"] == default_key), 0)
-        selected_idx = st.selectbox(
-            "Saved Version to Use in Series:", list(range(len(versions))),
-            format_func=lambda idx: labels[idx], index=default_index,
-            key=f"{ui_prefix}_revision_{loaded_manuscript_id or loaded_id or 'unspecified'}")
-        picked = versions[selected_idx]
-        st.caption(f"Selected saved version: {picked['words']:,} words. This does not load or rewrite that version.")
-        # Confirmation is bound to this exact project, destination, and version.
-        # Changing either dropdown requires a fresh checkmark.
-        confirmation_token = hashlib.sha256(
-            f"{project_id}:{destination}:{picked['key']}".encode("utf-8")
-        ).hexdigest()[:12]
-        confirm = st.checkbox(
-            "Confirm series and saved version", key=f"{ui_prefix}_confirm_{confirmation_token}", value=False)
-        if st.button("Save Project to Series", key=f"{ui_prefix}_submit",
-                     use_container_width=True, disabled=not confirm or (not destination and selection != "Standalone (Remove series link)")):
-            # Re-verify owner/project and selected revision. No foreign titles/IDs.
-            if str(get_active_project_id() or "") != project_id or get_project_title_from_project_id(project_id) != confirmed_title:
-                st.error("The open project changed; series assignment cancelled.")
-            elif selection == "Standalone (Remove series link)" and not current_series:
-                st.info("This project is already standalone.")
-            else:
-                try:
-                    changed = assign_saved_project_to_series(project_id, destination, picked)
-                except Exception as exc:
-                    st.error(f"Series assignment was not saved: {exc}")
-                else:
-                    if not changed:
-                        st.info("No change to the current series/version assignment.")
-                    else:
-                        st.session_state.project_scope = "Book in a Series" if destination else "Standalone Book"
-                        st.session_state.series_name = destination
-                        st.session_state.series_key = make_series_key(destination)
-                        st.success("Series reference saved. Manuscripts and project versions were not modified.")
-                        st.rerun()
 
 
 def render_project_title_banner(stage_key):
@@ -5222,8 +4218,41 @@ def render_project_title_banner(stage_key):
             )
             return
 
-        render_confirmed_project_rename(stage_key)
-        render_save_open_project_to_series()
+        rename_key = f"rename_project_title_{safe_stage}_{project_id}"
+        source_key = f"{rename_key}_source"
+
+        # Keep the rename field synchronized after a successful rename or project load.
+        if st.session_state.get(source_key) != current_title:
+            st.session_state[rename_key] = "" if current_title == "Untitled Project" else current_title
+            st.session_state[source_key] = current_title
+
+        col_title, col_button = st.columns([4, 1.35])
+
+        with col_title:
+            proposed_title = st.text_input(
+                "Rename Project:",
+                key=rename_key,
+                placeholder="Enter a new project title",
+                label_visibility="visible",
+            )
+
+        with col_button:
+            st.markdown("<div style='height:1.72rem'></div>", unsafe_allow_html=True)
+            confirm_clicked = st.button(
+                "Confirm Only If Renaming",
+                key=f"confirm_rename_{safe_stage}_{project_id}",
+                type="secondary",
+                use_container_width=True,
+            )
+
+        if confirm_clicked:
+            ok, message = rename_current_project_everywhere(proposed_title)
+
+            if ok:
+                st.success(message)
+                st.rerun()
+            else:
+                st.error(message)
 
 
 def make_version_display_label(version):
@@ -5393,285 +4422,21 @@ def get_series_metadata_rows():
     return rows
 
 
-def get_series_order_overrides():
-    """Read the latest explicit order PER series. No project-session edits."""
-    user_id = get_current_user_id()
-    if not user_id:
-        return {}
-    try:
-        rows = (supabase.table("writersblock_project_drafts")
-                .select("project_id, draft_content, created_at")
-                .eq("user_id", user_id).eq("draft_type", "series_order")
-                .order("created_at", desc=True).execute()).data or []
-    except Exception:
-        # Failure must never silently destroy or invent a series ordering.
-        return {}
-    result = {}
-    for row in rows:
-        try:
-            data = json.loads(row.get("draft_content") or "{}")
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        key = str(data.get("series_key") or "")
-        ids = data.get("ordered_project_ids")
-        if key and key not in result and isinstance(ids, list):
-            result[key] = list(dict.fromkeys(str(pid) for pid in ids if pid))
-    return result
-
-
-def ordered_series_members(series_name, membership=None):
-    """Unique project IDs, ordered Book 1..N, never manuscript/version rows."""
-    membership = membership if membership is not None else get_series_metadata_by_project()
-    key = make_series_key(series_name)
-    return [pid for pid, row in sorted(
-        membership.items(), key=lambda pair: (int(pair[1].get("series_book_number") or 9999), pair[0]))
-        if str(row.get("series_key") or "") == key]
-
-
-def save_series_book_order(series_name, ordered_ids):
-    """One append-only, project-owned order record: single DB write per move."""
-    user_id = get_current_user_id()
-    series_key = make_series_key(series_name)
-    verified = ordered_series_members(series_name)
-    proposed = [str(pid) for pid in ordered_ids]
-    if not user_id or not series_key or not proposed or len(set(proposed)) != len(proposed):
-        raise ValueError("Choose a series containing saved projects.")
-    if set(proposed) != set(verified):
-        raise ValueError("Series membership changed. Refresh before reordering.")
-    if proposed == verified:
-        return None
-    # PostgREST insert into the existing drafts table; never mutate manuscripts,
-    # projects, or project-session snapshots.
-    body = {"series_name": series_name, "series_key": series_key,
-            "ordered_project_ids": proposed, "saved_at": datetime.now(timezone.utc).isoformat()}
-    result = (supabase.table("writersblock_project_drafts")
-              .insert({"project_id": proposed[0], "user_id": user_id,
-                       "draft_type": "series_order", "draft_title": "Series Book Order",
-                       "draft_content": json.dumps(body), "version_number": 0})
-              .execute())
-    if not getattr(result, "data", None):
-        raise RuntimeError("Series book order was not confirmed saved.")
-    return result
-
-
-def assign_saved_project_to_series(project_id, series_name, selected_version=None):
-    """Save series membership and the writer's chosen version, without editing any text."""
-    user_id = get_current_user_id()
-    project_id = str(project_id or "")
-    name = str(series_name or "").strip()
-    if not user_id or not project_id:
-        raise ValueError("Select a saved project.")
-    projects = {str(row.get("id")): row for row in get_projects_for_import() if row.get("id")}
-    if project_id not in projects:
-        raise ValueError("The saved project was not found in your account.")
-    prior = get_series_metadata_by_project().get(project_id) or {}
-    old_name = str(prior.get("series_name") or "").strip()
-
-    # Verify the exact selected revision belongs to the logged-in user's LOADED
-    # project. Never accept only a title or an unverified browser widget value.
-    selected_info = {}
-    if name:
-        if not isinstance(selected_version, dict):
-            raise ValueError("Select and confirm a saved version of the open project.")
-        selected_type = str(selected_version.get("type") or "")
-        selected_id = str(selected_version.get("id") or "")
-        if selected_type == "manuscript_version":
-            rows = (supabase.table("writersblock_manuscript_versions")
-                    .select("id, project_id, user_id, manuscript_content")
-                    .eq("id", selected_id).eq("project_id", project_id)
-                    .eq("user_id", user_id).limit(1).execute()).data or []
-            source_text = str(rows[0].get("manuscript_content") or "") if rows else ""
-        elif selected_type == "project_session":
-            rows = (supabase.table("writersblock_project_drafts")
-                    .select("id, project_id, user_id, draft_type, draft_content")
-                    .eq("id", selected_id).eq("project_id", project_id)
-                    .eq("user_id", user_id).eq("draft_type", "project_session")
-                    .limit(1).execute()).data or []
-            try:
-                snapshot = json.loads(rows[0].get("draft_content") or "{}") if rows else {}
-            except (TypeError, ValueError):
-                snapshot = {}
-            source_text = get_best_saved_manuscript_source(snapshot) if isinstance(snapshot, dict) and snapshot else ""
-            if not source_text and isinstance(snapshot, dict):
-                source_text = str(snapshot.get("story_seed") or "")
-        else:
-            raise ValueError("Unrecognized saved version type; nothing was assigned.")
-        if not rows:
-            raise ValueError("This version does not belong to the open project. No series link was changed.")
-        selected_info = {
-            "series_source_type": selected_type,
-            "series_source_id": selected_id,
-            "series_source_words": count_words(source_text),
-            "series_source_label": str(selected_version.get("label") or "")[:180],
-        }
-
-    same_series = (make_series_key(name) == str(prior.get("series_key") or ""))
-    same_source = bool(selected_info) and all(
-        str(prior.get(key) or "") == str(value or "")
-        for key, value in selected_info.items()
-        if key in ("series_source_type", "series_source_id")
-    )
-    if name and same_series and same_source:
-        return False
-    if not name and not old_name:
-        return False
-    old_data = {"series_name": name, "series_key": make_series_key(name) if name else "",
-                "series_book_number": 0 if not name else len(ordered_series_members(name)) + 1,
-                "series_continuity_mode": "Strict", "series_reference_ids": [],
-                "series_canon_notes": str(prior.get("series_canon_notes") or ""),
-                "project_title": str(projects[project_id].get("project_title") or "Untitled Project"),
-                "series_membership_removed": not bool(name),
-                "previous_series_name": old_name,
-                "confirmed_manual_series_assignment": True,
-                "saved_at": datetime.now(timezone.utc).isoformat()}
-    old_data.update(selected_info)
-    # A version change must not shuffle a project to a different book number.
-    if same_series and old_name:
-        old_data["series_book_number"] = int(prior.get("series_book_number") or 1)
-    result = (supabase.table("writersblock_project_drafts")
-              .insert({"project_id": project_id, "user_id": user_id,
-                       "draft_type": "series_metadata", "draft_title": "Series Membership",
-                       "draft_content": json.dumps(old_data), "version_number": 0})
-              .execute())
-    if not getattr(result, "data", None):
-        raise RuntimeError("Series membership was not confirmed saved.")
-    return True
-
-
-
-
-
-
 def get_series_metadata_by_project():
-    """Read-only membership index, including legacy project-session assignments.
-
-    Some older projects recorded the series only in their project_session JSON,
-    before a separate series_metadata record existed. We may use an explicit
-    saved relationship as evidence, but NEVER infer membership from a title,
-    story text, or a different project's saved settings.
-    """
-    # The newest explicit series_metadata row is authoritative, INCLUDING an
-    # intentionally cleared relationship. Do not reconstruct a removed link
-    # from older project_session snapshots.
-    latest_rows = get_series_metadata_rows()
-    inspected = {str(row["_project_id"]) for row in latest_rows if row.get("_project_id")}
-    membership = {
-        str(row["_project_id"]): row
-        for row in latest_rows
-        if row.get("_project_id")
-        and not row.get("series_membership_removed")
-        and str(row.get("series_name") or "").strip()
-    }
-    # Older projects sometimes have their explicit series link only in a
-    # prior project session; later saves may omit the relationship. Search
-    # newest-first until a confirmed link is found. A manually removed link
-    # always wins because its series_metadata tombstone is in inspected.
-    try:
-        sessions = get_saved_project_sessions_for_dropdown()
-    except Exception:
-        sessions = []
-    for row in sessions:
-        project_id = str(row.get("project_id") or "").strip()
-        if not project_id or project_id in inspected:
-            continue
-        try:
-            snapshot = json.loads(row.get("draft_content") or "{}")
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(snapshot, dict):
-            continue
-        name = str(snapshot.get("series_name") or "").strip()
-        scope = str(snapshot.get("project_scope") or "").strip()
-        if scope != "Book in a Series" or not name:
-            continue
-        inspected.add(project_id)
-        try:
-            number = int(snapshot.get("series_book_number") or 0)
-        except (TypeError, ValueError):
-            number = 0
-        membership[project_id] = {
-            "_project_id": project_id,
-            "_source": "saved_project_session",
-            "series_name": name,
-            "series_key": make_series_key(name),
-            "series_book_number": number,
-            "series_canon_notes": str(snapshot.get("series_canon_notes") or ""),
-            "project_title": str(snapshot.get("project_title") or ""),
-        }
-    # Series order is separate from saved-project chronology and revisions.
-    # Existing metadata may hold duplicate/incorrect historical numbers; the
-    # user-controlled series order is authoritative for the visible Book 1..N.
-    project_rows = get_projects_for_import()
-    creation_date = {str(row.get("id")): str(row.get("created_at") or "")
-                     for row in project_rows if row.get("id")}
-    by_series = {}
-    for project_id, item in membership.items():
-        by_series.setdefault(str(item.get("series_key") or ""), []).append(project_id)
-    orders = get_series_order_overrides()
-    for series_key, ids in by_series.items():
-        chosen = [pid for pid in orders.get(series_key, []) if pid in ids]
-        remaining = sorted((pid for pid in ids if pid not in chosen),
-                           key=lambda pid: (creation_date.get(pid, ""), pid))
-        # Original Oakhaven book order, as confirmed by the author. Only apply
-        # as a display hint when NO explicit reordered list has been saved.
-        # Match project IDs using unique titles; never infer or write membership.
-        if not chosen and series_key == make_series_key("Oakhaven"):
-            titles = {
-                str(row.get("id")): str(row.get("project_title") or "").strip().casefold()
-                for row in project_rows if row.get("id")
-            }
-            requested_titles = (
-                "It's Not Safe", "Return To Sender", "The Dead Letters Covenant",
-                "Chronos' Grasp", "Blood Of The Ancient",
-            )
-            for title in requested_titles:
-                matches = [pid for pid in remaining if titles.get(pid) == title.casefold()]
-                if len(matches) == 1:  # Multiple project IDs with one title are ambiguous.
-                    chosen.append(matches[0])
-            remaining = [pid for pid in remaining if pid not in chosen]
-        for number, pid in enumerate(chosen + remaining, 1):
-            membership[pid] = dict(membership[pid])
-            membership[pid]["series_book_number"] = number
-    return membership
-
-
-def get_series_membership_slots(series_key, exclude_project_id=None):
-    """One row per project ID; flag duplicate volume numbers, never guess."""
-    slots = {}
-    for project_id, metadata in get_series_metadata_by_project().items():
-        if str(metadata.get("series_key") or "") != str(series_key or ""):
-            continue
-        if exclude_project_id and str(project_id) == str(exclude_project_id):
-            continue
-        try:
-            number = int(metadata.get("series_book_number") or 0)
-        except (ValueError, TypeError):
-            continue
-        if 1 <= number <= 100:
-            slots.setdefault(number, []).append((str(project_id), metadata))
-    return slots
-
-
-def get_unambiguous_series_project_ids(series_key, before_number=None):
-    """Only unique saved volume numbers may enter automatic continuity."""
-    slots = get_series_membership_slots(series_key)
     return {
-        project_id
-        for number, entries in slots.items()
-        if len(entries) == 1 and (before_number is None or number < before_number)
-        for project_id, _metadata in entries
+        row.get("_project_id"): row
+        for row in get_series_metadata_rows()
+        if row.get("_project_id")
     }
 
 
 def get_existing_series_names():
-    names = {}
-    for metadata in get_series_metadata_by_project().values():
+    names = []
+    for metadata in get_series_metadata_rows():
         series_name = str(metadata.get("series_name") or "").strip()
-        if series_name:
-            names.setdefault(series_name.casefold(), series_name)
-    return sorted(names.values(), key=str.lower)
+        if series_name and series_name not in names:
+            names.append(series_name)
+    return sorted(names, key=str.lower)
 
 
 def get_next_series_book_number(series_name, exclude_project_id=None):
@@ -5680,7 +4445,7 @@ def get_next_series_book_number(series_name, exclude_project_id=None):
         return 1
 
     book_numbers = []
-    for metadata in get_series_metadata_by_project().values():
+    for metadata in get_series_metadata_rows():
         if str(metadata.get("series_key") or "") != series_key:
             continue
 
@@ -5702,7 +4467,7 @@ def get_next_series_book_number(series_name, exclude_project_id=None):
 def get_inherited_series_canon_notes(series_key, current_book_number):
     inherited = []
     seen = set()
-    for metadata in get_series_metadata_by_project().values():
+    for metadata in get_series_metadata_rows():
         if str(metadata.get("series_key") or "") != str(series_key or ""):
             continue
         book_number = int(metadata.get("series_book_number") or 0)
@@ -5740,12 +4505,6 @@ def save_series_metadata_for_project(project_id=None):
         "project_title": get_project_title_for_display(),
         "saved_at": datetime.now(timezone.utc).isoformat(),
     }
-    previous = get_series_metadata_by_project().get(str(project_id)) or {}
-    if make_series_key(previous.get("series_name")) == series_key:
-        for source_field in ("series_source_type", "series_source_id",
-                             "series_source_words", "series_source_label"):
-            if source_field in previous:
-                metadata[source_field] = previous[source_field]
 
     return (
         supabase.table("writersblock_project_drafts")
@@ -5762,100 +4521,38 @@ def save_series_metadata_for_project(project_id=None):
 
 
 def assign_existing_project_to_series(project_id, series_name, book_number, project_title=""):
-    """Explicit membership assignment. Never edit manuscript/version records."""
     user_id = get_current_user_id()
     clean_series_name = str(series_name or "").strip()
     if not user_id or not project_id or not clean_series_name:
-        raise ValueError("A signed-in account, saved project, and series are required.")
-    if str(project_id) == str(get_active_project_id() or ""):
-        raise ValueError("Use the Project Relationship controls for the active project.")
-    try:
-        number = int(book_number)
-    except (ValueError, TypeError):
-        raise ValueError("Choose a valid series number.") from None
-    if not 1 <= number <= 100:
-        raise ValueError("Series number must be between 1 and 100.")
-
-    # Verify ownership against the parent table before any write.
-    project = next(
-        (row for row in get_projects_for_import() if str(row.get("id")) == str(project_id)),
-        None,
-    )
-    if not project:
-        raise ValueError("The selected project does not belong to your account.")
+        return None
 
     series_key = make_series_key(clean_series_name)
-    for other_project_id, metadata in get_series_metadata_by_project().items():
-        if (str(other_project_id) != str(project_id)
-                and str(metadata.get("series_key") or "") == series_key
-                and int(metadata.get("series_book_number") or 0) == number):
-            raise ValueError(
-                f"Series #{number} is already assigned. Correct the conflicting link first; "
-                "no project was modified."
-            )
-
-    old = get_series_metadata_by_project().get(str(project_id)) or {}
-    if str(old.get("series_key") or "") == series_key and int(old.get("series_book_number") or 0) == number:
-        raise ValueError("That project is already assigned to this series and number.")
-
     metadata = {
         "series_key": series_key,
         "series_name": clean_series_name,
-        "series_book_number": number,
+        "series_book_number": int(book_number or 1),
         "series_continuity_mode": "Strict",
         "series_reference_ids": [],
-        "series_canon_notes": str(old.get("series_canon_notes") or ""),
-        "project_title": str(project.get("project_title") or project_title or "Untitled Project"),
+        "series_canon_notes": "",
+        "project_title": str(project_title or get_project_title_from_project_id(project_id) or "Untitled Project").strip(),
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "assigned_from_existing_project": True,
-        "confirmed_manual_series_assignment": True,
     }
-    result = (
+
+    return (
         supabase.table("writersblock_project_drafts")
         .insert({
             "project_id": project_id,
             "user_id": user_id,
-            "draft_title": f"{clean_series_name} — Series #{number} Membership",
+            "draft_title": (
+                f"{clean_series_name} — Book {metadata['series_book_number']} Series Metadata"
+            ),
             "draft_type": "series_metadata",
             "draft_content": json.dumps(metadata),
-            "version_number": number,
-        }).execute()
+            "version_number": metadata["series_book_number"],
+        })
+        .execute()
     )
-    if not getattr(result, "data", None):
-        raise RuntimeError("Series membership was not confirmed saved; no manuscript was changed.")
-    return result
-
-
-def remove_project_from_series(project_id, current_series_name):
-    """Clear membership with a new metadata row; preserve all saved writing."""
-    user_id = get_current_user_id()
-    if not user_id or not project_id or str(project_id) == str(get_active_project_id() or ""):
-        raise ValueError("Select a different saved project from your account.")
-    owned = next((row for row in get_projects_for_import()
-                  if str(row.get("id")) == str(project_id)), None)
-    if not owned:
-        raise ValueError("The selected project does not belong to your account.")
-    old = get_series_metadata_by_project().get(str(project_id))
-    if not old or str(old.get("series_key") or "") != make_series_key(current_series_name):
-        raise ValueError("That project is not currently assigned to this series.")
-    # Explicit tombstone beats old project sessions and retains an audit trail.
-    metadata = {
-        "series_name": "", "series_key": "", "series_book_number": 0,
-        "series_membership_removed": True,
-        "previous_series_name": str(old.get("series_name") or ""),
-        "previous_series_book_number": int(old.get("series_book_number") or 0),
-        "project_title": str(owned.get("project_title") or "Untitled Project"),
-        "saved_at": datetime.now(timezone.utc).isoformat(),
-    }
-    result = (supabase.table("writersblock_project_drafts")
-              .insert({"project_id": project_id, "user_id": user_id,
-                       "draft_title": "Series membership corrected (writing preserved)",
-                       "draft_type": "series_metadata",
-                       "draft_content": json.dumps(metadata), "version_number": 0})
-              .execute())
-    if not getattr(result, "data", None):
-        raise RuntimeError("Series link correction was not confirmed saved.")
-    return result
 
 
 def get_series_reference_candidates():
@@ -5889,7 +4586,7 @@ def get_series_reference_candidates():
         metadata = metadata_by_project.get(project_id, {})
         book_number = int(metadata.get("series_book_number") or 0)
         series_name = str(metadata.get("series_name") or "").strip()
-        prefix = f"{series_name} — Book {book_number} — " if series_name and book_number else ""
+        prefix = f"{series_name} — Series #{book_number} — " if series_name and book_number else ""
         version_number = int(version.get("version_number") or 1)
         created_at = str(version.get("created_at") or "")
 
@@ -5942,22 +4639,9 @@ def get_series_reference_candidates():
         manuscript_text = str(
             snapshot.get("current_draft_output")
             or snapshot.get("rewritten_manuscript")
-            or snapshot.get("final_output_text")
             or snapshot.get("manuscript_text")
             or ""
         ).strip()
-        # Saved Concept/Plot Architecture projects may not yet have a draft.
-        # Include their approved concept as a REFERENCE only; never present it
-        # as a completed manuscript or change its saved content.
-        reference_kind = "Saved Project"
-        if not manuscript_text:
-            manuscript_text = str(
-                snapshot.get("story_seed")
-                or snapshot.get("chosen_option_text")
-                or snapshot.get("plot_outline")
-                or ""
-            ).strip()
-            reference_kind = "Saved Concept"
         if not manuscript_text:
             continue
 
@@ -5967,16 +4651,14 @@ def get_series_reference_candidates():
             or "Untitled Project"
         ).strip()
         metadata = metadata_by_project.get(project_id, {})
-        # Use the authoritative index only. The project may have been removed
-        # from its old series by an explicit metadata correction (tombstone).
-        book_number = int(metadata.get("series_book_number") or 0)
-        series_name = str(metadata.get("series_name") or "").strip()
-        series_key = str(metadata.get("series_key") or "")
-        prefix = f"{series_name} — Book {book_number} — " if series_name and book_number else ""
+        book_number = int(metadata.get("series_book_number") or snapshot.get("series_book_number") or 0)
+        series_name = str(metadata.get("series_name") or snapshot.get("series_name") or "").strip()
+        series_key = str(metadata.get("series_key") or snapshot.get("series_key") or "")
+        prefix = f"{series_name} — Series #{book_number} — " if series_name and book_number else ""
 
         candidates.append({
             "id": f"session:{saved_row.get('id')}",
-            "label": f"{prefix}{title} — {reference_kind} — {count_words(manuscript_text):,} words",
+            "label": f"{prefix}{title} — Saved Project — {count_words(manuscript_text):,} words",
             "project_id": project_id,
             "title": title,
             "book_number": book_number,
@@ -5987,46 +4669,6 @@ def get_series_reference_candidates():
             "version_number": int(saved_row.get("version_number") or snapshot.get("manuscript_version") or 1),
         })
         seen_session_projects.add(project_id)
-
-    # The author's chosen saved version is the ONLY continuity source for a
-    # pinned book; never silently substitute the most recent (possibly shorter)
-    # revision. Older series members without a selection retain legacy behavior.
-    for _p_id, _meta in metadata_by_project.items():
-        _kind = str(_meta.get("series_source_type") or "")
-        _v_id = str(_meta.get("series_source_id") or "")
-        if not _kind or not _v_id or str(_p_id) == str(current_project_id or ""):
-            continue
-        _matched = None
-        if _kind == "manuscript_version":
-            _matched = next((r for r in manuscript_versions
-                             if str(r.get("id") or "") == _v_id and str(r.get("project_id") or "") == str(_p_id)), None)
-            _content = str((_matched or {}).get("manuscript_content") or "")
-        elif _kind == "project_session":
-            _matched = next((r for r in saved_sessions
-                             if str(r.get("id") or "") == _v_id and str(r.get("project_id") or "") == str(_p_id)), None)
-            try:
-                _snapshot = json.loads((_matched or {}).get("draft_content") or "{}")
-            except (ValueError, TypeError):
-                _snapshot = {}
-            _content = get_best_saved_manuscript_source(_snapshot) if isinstance(_snapshot, dict) and _snapshot else ""
-            if not _content and isinstance(_snapshot, dict):
-                _content = str(_snapshot.get("story_seed") or "")
-        else:
-            continue
-        # If selected ID is missing, omit the reference instead of selecting
-        # an unrelated version with a similar title.
-        candidates = [c for c in candidates if str(c.get("project_id") or "") != str(_p_id)]
-        if _matched and _content.strip():
-            _title = str(get_project_title_from_project_id(_p_id) or _meta.get("project_title") or "Untitled Project")
-            candidates.append({
-                "id": f"{_kind}:{_v_id}", "project_id": _p_id,
-                "label": f"{_meta.get('series_name') or ''} — {_title} — confirmed saved version — {count_words(_content):,} words",
-                "title": _title, "book_number": int(_meta.get("series_book_number") or 0),
-                "series_name": str(_meta.get("series_name") or ""),
-                "series_key": str(_meta.get("series_key") or ""),
-                "text": _content, "created_at": str(_matched.get("created_at") or ""),
-                "version_number": int(_matched.get("version_number") or 1),
-            })
 
     candidates.sort(
         key=lambda item: (
@@ -6096,7 +4738,7 @@ def build_series_context_text(max_total_chars=60000, per_source_chars=25000):
     parts = [
         "SERIES CONTINUITY PACKAGE",
         f"Series Name: {series_name}",
-        f"Current Book: {book_number}",
+        f"Current Series Number: {book_number}",
         f"Continuity Mode: {st.session_state.get('series_continuity_mode', 'Strict')}",
         f"Continuity Rule: {get_series_continuity_instruction()}",
     ]
@@ -6337,86 +4979,6 @@ def sandbox_output_is_usable(sandbox_output):
         and sandbox_output.get("Option C")
         and not sandbox_output.get("error_message")
     )
-
-
-
-def wbs_can_generate_first_paths_for_saved_concept():
-    """Allow a saved *concept-only* master to develop its first paths.
-
-    Fail closed on ambiguous history. Never overwrite a saved session or change
-    the owning project ID. An eligible project's first paths become a new
-    immutable project-session version via the normal version-save routine.
-    """
-    project_id = str(get_active_project_id() or "")
-    user_id = get_current_user_id()
-    if not project_id or not user_id or st.session_state.get("project_stage") != "Intake":
-        return False, "First-time path generation requires a saved Concept Development project."
-    if wbs_has_saved_master() is not True:
-        return False, "Cannot verify the saved master. Reload this project before continuing."
-    if (str(st.session_state.get("_wbs_loaded_project_id") or "") != project_id
-            or str(st.session_state.get("_wbs_loaded_project_title") or "").strip() != get_project_title()):
-        return False, "Saved project identity is not confirmed. Reload the exact saved project."
-    if get_project_title_from_project_id(project_id) != get_project_title():
-        return False, "Database project title does not match the open project. Nothing was changed."
-    format_id = str(st.session_state.get("active_format_id") or "")
-    if (not format_id or format_id != str(st.session_state.get("wbs_locked_format_id") or "")
-            or str(st.session_state.get("_wbs_locked_project_id") or "") != project_id):
-        return False, "Saved writing format cannot be verified; reload the saved project."
-    if not st.session_state.get("_wbs_active_saved_session_row_id"):
-        return False, "The active saved version cannot be verified. Reload V-1 before continuing."
-    # This route is for writer-entered or Quill concepts, not imported/saved
-    # manuscripts. No working manuscript or downstream scene may be reset.
-    if str(st.session_state.get("version_source_mode") or "") not in {"Custom Plot Line", "Quill Assisted"}:
-        return False, "Only saved concept-only starting points can generate first paths this way."
-    if (st.session_state.get("imported_source_text") or st.session_state.get("saved_version_source_text")):
-        return False, "A saved or imported manuscript is attached. Its existing content was protected."
-    downstream_fields = (
-        "sandbox_slates", "chosen_option", "chosen_option_text", "plot_outline",
-        "current_draft_output", "rewritten_manuscript", "manuscript_text",
-        "scene_blocks", "completed_beats", "rolling_lore_book", "final_output_text",
-        "final_output_saved_signature", "picture_book_layout_spreads",
-    )
-    def has_downstream_content(record):
-        return any(bool(record.get(key)) for key in downstream_fields)
-    if has_downstream_content(st.session_state):
-        return False, "This project already contains downstream writing. No paths were regenerated."
-
-    try:
-        manuscripts = (supabase.table("writersblock_manuscript_versions")
-                       .select("id").eq("project_id", project_id)
-                       .eq("user_id", user_id).limit(1).execute())
-        if getattr(manuscripts, "data", None):
-            return False, "This project has saved manuscript versions; existing work was protected."
-        draft_rows = (supabase.table("writersblock_project_drafts")
-                      .select("id,draft_type,draft_content").eq("project_id", project_id)
-                      .eq("user_id", user_id).limit(101).execute())
-        rows = getattr(draft_rows, "data", None)
-        if not isinstance(rows, list) or not rows or len(rows) >= 101:
-            return False, "Saved project history is incomplete or too large to verify safely."
-        found_active = False
-        for row in rows:
-            kind = str(row.get("draft_type") or "")
-            if kind == "series_metadata":
-                continue
-            if kind != "project_session":
-                return False, "This project has other saved writing stages; no paths were generated."
-            if str(row.get("id") or "") == str(st.session_state.get("_wbs_active_saved_session_row_id")):
-                found_active = True
-            snap = json.loads(row.get("draft_content") or "{}")
-            if not isinstance(snap, dict):
-                return False, "The project history contains an invalid saved record."
-            if (str(snap.get("current_project_id") or project_id) != project_id
-                    or str(snap.get("active_format_id") or "") != format_id
-                    or str(snap.get("project_stage") or "Intake") != "Intake"
-                    or has_downstream_content(snap)):
-                return False, "An earlier saved version contains different or downstream work."
-        if not found_active:
-            return False, "The selected saved version is missing from this project's history."
-    except (ValueError, TypeError, AttributeError, KeyError):
-        return False, "Saved project history could not be checked safely. No work was changed."
-    except Exception:
-        return False, "Database history could not be verified. No paths were generated."
-    return True, ""
 
 
 def get_user_by_email(email: str):
@@ -6874,131 +5436,6 @@ with st.sidebar.expander(
 
 st.sidebar.markdown("---")
 
-# WBS 2026-10-24: Quill and new-story state must not leak into another project.
-def wbs_clear_new_project_ui_state():
-    """Clear old Quill dialogue and cached concept widgets; keep the login intact."""
-    reset_prefixes = (
-        "wbs_quill_", "quill_", "_wbs_quill_", "format_field_",
-        "starting_source_", "wbs_quill_starting_", "save_as_version_name_",
-    )
-    reset_exact = {
-        "quill_chat_history", "quill_last_response", "quill_conversation",
-        "quill_last_spoken", "quill_message_input", "project_version_name",
-    }
-    for state_key in list(st.session_state.keys()):
-        key_text = str(state_key).lower()
-        if key_text in reset_exact or key_text.startswith(reset_prefixes):
-            st.session_state.pop(state_key, None)
-    st.session_state.format_template_values = {}
-    st.session_state.quill_starting_direction = ""
-    st.session_state.pop("wbs_pending_stage_change", None)
-    st.session_state.pop("_wbs_last_saved_work_signature", None)
-    st.session_state.pop("_wbs_last_saved_project_id", None)
-    st.session_state.pop("_wbs_active_saved_session_row_id", None)
-    st.session_state.pop("_wbs_loaded_saved_session_id", None)
-    st.session_state.pop("_wbs_loaded_quill_concept", None)
-
-if st.sidebar.button("⚠️ Start New Project", key="global_reset", use_container_width=True, type="secondary"):
-    wbs_clear_new_project_ui_state()
-    st.session_state.pop("_wbs_unlocked_saved_stage", None)
-    st.session_state.project_stage = "Intake"
-    st.session_state.project_title = ""
-    st.session_state.project_version_name = "Original"
-    st.session_state.concept_change_areas = []
-    st.session_state.pop("_wbs_loaded_concept_version_baseline", None)
-    st.session_state.project_scope = "Standalone Book"
-    st.session_state.series_key = ""
-    st.session_state.series_name = ""
-    st.session_state.series_book_number = 1
-    st.session_state.series_continuity_mode = "Strict"
-    st.session_state.series_reference_ids = []
-    st.session_state.series_canon_notes = ""
-    st.session_state.series_selection_signature = ""
-    st.session_state.pop("series_reference_selector", None)
-    st.session_state.pop("series_choice_selector", None)
-    st.session_state.pop("series_name_input", None)
-    st.session_state.pop("_wbs_simple_series_context", None)
-    st.session_state.pop("wbs_simple_series_choice", None)
-    st.session_state.pop("wbs_simple_series_new_name", None)
-    st.session_state.pop("wbs_confirm_series_link", None)
-    st.session_state.pop("wbs_confirm_series_removal", None)
-    st.session_state.pop("series_book_number_input", None)
-    st.session_state.pop("series_book_number_auto_signature", None)
-    st.session_state.pop("custom_plot_line_input", None)
-    st.session_state.story_seed = (
-        "An antique shop owner buys a heavy iron safe that cannot be opened, "
-        "only to realize that every night, the ticking sounds coming from inside it get faster."
-    )
-    st.session_state.starting_source_mode = "Story Idea"
-    st.session_state.version_source_mode = "Custom Plot Line"
-    st.session_state.saved_version_source_text = ""
-    st.session_state.saved_version_source_name = ""
-    st.session_state.saved_version_source_word_count = 0
-    st.session_state.imported_source_text = ""
-    st.session_state.imported_source_name = ""
-    st.session_state.imported_source_word_count = 0
-    st.session_state.pop("concept_existing_draft_upload", None)
-    st.session_state.pop("wbs_locked_format_id", None)
-    st.session_state.pop("_wbs_locked_project_id", None)
-    st.session_state.pop("_wbs_loaded_project_id", None)
-    st.session_state.pop("_wbs_loaded_project_title", None)
-    st.session_state.pop("_wbs_loaded_saved_session_id", None)
-    st.session_state.pop("_wbs_loaded_manuscript_version_id", None)
-    st.session_state.pop("_wbs_draft_scope_id", None)
-    st.session_state.active_format_id = "novel_prose_novella"
-    st.session_state.format_type = "Novel / Prose"
-    st.session_state.active_format_template = get_wbs_format_template("novel_prose_novella")
-    st.session_state.quill_format_instructions = get_wbs_quill_instructions("novel_prose_novella")
-    st.session_state.quill_format_name = get_wbs_format_display_name("novel_prose_novella")
-    st.session_state.pop("wbs_format_template_selector", None)
-    st.session_state.dialogue_style = "Story-Driven / Automatic"
-    st.session_state.audiobook_length = "30 Minutes"
-    st.session_state.audiobook_target_word_count = 4000
-    st.session_state.audiobook_production_script = ""
-    st.session_state.audiobook_production_source_signature = ""
-    st.session_state.audiobook_production_cue_level = "Voices + Minimal SFX"
-    st.session_state.audiobook_production_preview_id = 0
-    st.session_state.tone_style = "Gritty Noir Mystery"
-    st.session_state.author_style = ""
-    st.session_state.sandbox_slates = None
-    st.session_state.chosen_option = None
-    st.session_state.chosen_option_text = None
-    st.session_state.plot_outline = None
-    st.session_state.current_draft_output = ""
-    st.session_state.rolling_lore_book = ""
-    st.session_state.completed_beats = []
-    st.session_state.scene_blocks = {}
-    st.session_state.current_processing_beat = 1
-    st.session_state.revision_report = ""
-    st.session_state.rewritten_manuscript = ""
-    st.session_state.manuscript_version = 0
-    st.session_state.current_manuscript_save_status = ""
-    st.session_state.current_manuscript_save_stage = ""
-    st.session_state.current_manuscript_save_version = 0
-    st.session_state.rewrite_applied_message = ""
-    st.session_state.current_project_id = None
-    st.session_state.revision_report = ""
-    st.session_state.export_view = False
-    st.session_state.final_output_format = ""
-    st.session_state.final_output_text = ""
-    st.session_state.final_output_source_signature = ""
-    st.session_state.final_output_preview_id = 0
-    st.session_state.final_output_saved_signature = ""
-    st.session_state.project_integrity_report = ""
-    st.session_state.project_integrity_source_signature = ""
-    st.session_state.project_integrity_status = ""
-    st.session_state.show_saved_version_manager = False
-    st.session_state.project_saved_notice = False
-    st.session_state.picture_book_layout_spreads = []
-    st.session_state.picture_book_layout_source_signature = ""
-    st.session_state.picture_book_layout_preview_id = 0
-    st.session_state.picture_book_page_size = DEFAULT_PICTURE_BOOK_PAGE_SIZE
-    st.session_state.rewrite_preview_id = 0
-    st.session_state.rewrite_target_length = "Keep Current Length"
-    st.rerun()
-
-st.sidebar.markdown("---")
-
 # Video Director is intentionally excluded from the public writing edition.
 with st.sidebar.container(border=True):
     st.markdown("**📊 Project Status**")
@@ -7106,45 +5543,11 @@ with st.sidebar.expander("Saved Projects / Versions", expanded=False):
             )
 
             selected_saved_item = saved_lookup.get(selected_saved_label)
-            if selected_saved_item:
-                chosen_project_id = str((selected_saved_item.get("row") or {}).get("project_id") or "")
-                selected_title = str(selected_saved_label).split(" — V-", 1)[0].strip()
-                live_project_id = str(get_active_project_id() or "")
-                live_title = get_project_title()
-                if (chosen_project_id != live_project_id or (selected_title and selected_title != live_title)):
-                    st.caption("Selected saved item is not the active story. Click **Load Selected Saved Item** to open it.")
-
-            # Detect a legacy cross-linked project BEFORE the writer tries to
-            # load it. This check is read-only and never changes series,
-            # manuscript, title, or version records.
-            if selected_saved_item and selected_saved_item.get("type") == "project_session":
-                _row = selected_saved_item.get("row") or {}
-                try:
-                    _snapshot = json.loads(_row.get("draft_content") or "{}")
-                except (ValueError, TypeError):
-                    _snapshot = {}
-                _entry_title = str((_snapshot if isinstance(_snapshot, dict) else {}).get("project_title") or "").strip()
-                _parent_title = get_project_title_from_project_id(_row.get("project_id"))
-                if _entry_title and _parent_title and _entry_title.casefold() != _parent_title.casefold():
-                    st.error(
-                        f'Saved entry "{_entry_title}" is linked to database project '
-                        f'"{_parent_title}". Loading has been blocked to prevent '
-                        'mixing projects. No data was saved or changed.'
-                    )
 
             if st.button("Load Selected Saved Item", key="sidebar_load_saved_item", use_container_width=True):
                 if selected_saved_item and selected_saved_item["type"] == "project_session":
-                    _identity_ok, _identity_message = wbs_saved_project_identity_preflight(
-                        selected_saved_item["row"]
-                    )
-                    if not _identity_ok:
-                        st.error(_identity_message)
-                        st.stop()
                     if load_saved_project_session_to_state(selected_saved_item["row"]):
-                        st.session_state.pop("_wbs_loaded_manuscript_version_id", None)
                         st.session_state["_wbs_loaded_saved_session_id"] = str(selected_saved_item["row"].get("id") or "")
-                        st.session_state["_wbs_loaded_project_id"] = str(selected_saved_item["row"].get("project_id") or "")
-                        st.session_state["_wbs_loaded_project_title"] = get_project_title()
                         st.session_state.pop("_wbs_stage3_clean_editor", None)
                         st.session_state.pop("_wbs_stage3_clean_source", None)
                         st.success("Saved project loaded.")
@@ -7161,52 +5564,21 @@ with st.sidebar.expander("Saved Projects / Versions", expanded=False):
                     saved_project_state = get_latest_saved_project_session_for_project(
                         selected_project_id,
                         version_name=branch_name,
-                        checkpoint_created_at=selected_version.get("created_at"),
                     )
-                    if not saved_project_state:
-                        st.error(
-                            "Cannot safely load this manuscript version: its matching "
-                            "saved project session was not found. The current project "
-                            "has NOT been replaced or mixed with another story."
-                        )
-                        st.stop()
-                    # Validate the selected record and title BEFORE applying any
-                    # saved state. A previous project must survive a failed load.
-                    loaded_project_title = str(
-                        get_project_title_from_project_id(selected_project_id)
-                        or selected_version.get("project_title")
-                        or ""
-                    ).strip()
-                    if not selected_project_id or not loaded_project_title:
-                        st.error("The selected manuscript has no valid project identity. Load cancelled.")
-                        st.stop()
-                    if str(saved_project_state.get("project_id") or "") != str(selected_project_id):
-                        st.error("The saved session belongs to a different project. Load cancelled.")
-                        st.stop()
-                    _identity_ok, _identity_message = wbs_saved_project_identity_preflight(
-                        saved_project_state
-                    )
-                    if not _identity_ok:
-                        st.error(_identity_message)
-                        st.stop()
-                    if not load_saved_project_session_to_state(saved_project_state):
-                        st.error("The manuscript was not loaded because its project session failed validation.")
-                        st.stop()
-                    if str(st.session_state.get("current_project_id") or "") != str(selected_project_id):
-                        st.error("Project ID mismatch. The manuscript was not applied.")
-                        st.stop()
+                    if saved_project_state:
+                        load_saved_project_session_to_state(saved_project_state)
 
-                    # A checkpoint title is bound to its parent project, never to
-                    # the previously open project or a stale input widget.
                     st.session_state.current_project_id = selected_project_id
                     st.session_state.project_version_name = branch_name
+
+                    loaded_project_title = str(
+                        selected_version.get("project_title")
+                        or get_project_title_from_project_id(selected_version.get("project_id"))
+                        or get_project_title()
+                        or "Untitled Project"
+                    ).strip()
+
                     st.session_state.project_title = loaded_project_title
-                    st.session_state["_wbs_loaded_project_id"] = str(selected_project_id)
-                    st.session_state["_wbs_loaded_project_title"] = loaded_project_title
-                    st.session_state["_wbs_loaded_saved_session_id"] = str(saved_project_state.get("id") or "")
-                    # This checkpoint ID gives stage navigation a read-only,
-                    # user-scoped way to verify project provenance after a rerun.
-                    st.session_state["_wbs_loaded_manuscript_version_id"] = str(selected_version.get("id") or "")
                     st.session_state.current_draft_output = str(selected_version.get("manuscript_content") or "")
                     st.session_state.manuscript_version = int(selected_version.get("version_number") or 0)
 
@@ -7227,9 +5599,6 @@ with st.sidebar.expander("Saved Projects / Versions", expanded=False):
                     st.session_state.current_manuscript_save_version = int(selected_version.get("version_number") or 0)
                     st.session_state.rewritten_manuscript = ""
                     st.session_state.rewrite_applied_message = ""
-                    # Exact writer-selected checkpoint, no phantom version on reload.
-                    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature()
-                    st.session_state["_wbs_last_saved_project_id"] = str(selected_project_id)
                     st.session_state.show_saved_version_manager = False
 
                     # Open at Concept but unlock review of all reached stages.
@@ -7305,100 +5674,15 @@ def wbs_stage_title(stage, export_view=False):
         return "8. Final Output" if export_view else "5. Script Lock"
     return _WBS_STAGE_TITLES.get(stage, str(stage))
 
-def wbs_verify_navigation_project_identity():
-    """Read-only reconciliation of a stale active ID for a loaded checkpoint.
-
-    The loaded saved-version record, saved-session record, user, format and
-    manuscript content must all agree before restoring an active project ID.
-    Never auto-save, auto-rename, or substitute one project's content.
-    """
-    state = st.session_state
-    expected_id = str(state.get("_wbs_loaded_project_id") or "")
-    active_id = str(get_active_project_id() or "")
-    if not expected_id or active_id == expected_id:
-        return True
-
-    # Absence of a checkpoint identity must NOT cause us to guess based on title.
-    version_id = str(state.get("_wbs_loaded_manuscript_version_id") or "")
-    saved_session_id = str(state.get("_wbs_loaded_saved_session_id") or "")
-    user_id = str(get_current_user_id() or "")
-    expected_title = str(state.get("_wbs_loaded_project_title") or "").strip()
-    displayed_title = get_project_title()
-    source_text = str(state.get("saved_version_source_text") or "")
-    if not (version_id and saved_session_id and user_id and expected_title
-            and displayed_title == expected_title and source_text):
-        return False
-    try:
-        version_result = (
-            supabase.table("writersblock_manuscript_versions")
-            .select("id,project_id,manuscript_content")
-            .eq("id", version_id).eq("user_id", user_id).limit(1).execute()
-        )
-        saved_result = (
-            supabase.table("writersblock_project_drafts")
-            .select("id,project_id,draft_type,draft_content")
-            .eq("id", saved_session_id).eq("user_id", user_id).limit(1).execute()
-        )
-        versions = getattr(version_result, "data", None) or []
-        sessions = getattr(saved_result, "data", None) or []
-        if len(versions) != 1 or len(sessions) != 1:
-            return False
-        version, session = versions[0], sessions[0]
-        if (str(version.get("project_id") or "") != expected_id
-                or str(session.get("project_id") or "") != expected_id
-                or session.get("draft_type") != "project_session"
-                or str(version.get("manuscript_content") or "").strip() != source_text.strip()):
-            return False
-        snapshot = json.loads(session.get("draft_content") or "{}")
-        if not isinstance(snapshot, dict):
-            return False
-        # Reject any persisted session which is itself tagged with another ID.
-        if str(snapshot.get("current_project_id") or expected_id) != expected_id:
-            return False
-        saved_format = str(snapshot.get("active_format_id") or "")
-        if saved_format and saved_format != str(state.get("active_format_id") or ""):
-            return False
-        # Parent title must agree with the loaded screen title.
-        if get_project_title_from_project_id(expected_id).strip() != expected_title:
-            return False
-    except (ValueError, TypeError, KeyError, AttributeError):
-        return False
-    except Exception:
-        # Database/network failures cannot authorize identity repair.
-        return False
-    # All verification above was read-only. This repairs only an in-memory ID.
-    state["current_project_id"] = expected_id
-    return True
-
-
 def wbs_request_stage_change(destination, export_view=None):
     """Go directly to the requested writing stage; never display a second save gate.
 
-    Project saving is a master-first action; later edits create new versions.
+    Project saving remains available through the normal Save Project control.
     """
     current = st.session_state.get("project_stage", "Intake")
     current_export = bool(st.session_state.get("export_view", False))
     target_export = current_export if export_view is None else bool(export_view)
     if current == destination and (destination != "Isolation Guardrail" or current_export == target_export):
-        return
-    # Stop cross-project leakage before stage 2/3/4 displays cached story text.
-    anchor_id = str(st.session_state.get("_wbs_loaded_project_id") or "")
-    anchor_title = str(st.session_state.get("_wbs_loaded_project_title") or "").strip()
-    active_id = str(get_active_project_id() or "")
-    active_title = get_project_title()
-    if anchor_id and anchor_id != active_id:
-        if not wbs_verify_navigation_project_identity():
-            st.error(
-                "Project identity needs verification. Navigation was blocked; "
-                "no work was saved or overwritten. Reload the exact saved item."
-            )
-            return
-        active_id = str(get_active_project_id() or "")
-    if anchor_id and anchor_title and current == "Intake" and destination != "Intake" and active_title != anchor_title:
-        st.error(
-            f'Project title changed from "{anchor_title}" to "{active_title}". '
-            "Use Rename Project to change the title before moving to another stage."
-        )
         return
     st.session_state["wbs_pending_stage_change"] = {
         "target": destination, "export_view": target_export,
@@ -7521,27 +5805,6 @@ with st.sidebar.container(border=True):
             st.session_state.get("project_version_name") or "Original"
         ) or "Original"
         st.caption(f"Version: {current_version_name}")
-        _loaded_id = str(st.session_state.get("_wbs_loaded_saved_session_id") or "")
-        _manuscript_id = str(st.session_state.get("_wbs_loaded_manuscript_version_id") or "")
-        _loaded_words = None
-        for _item in _saved_status_items:
-            _row = _item.get("row") or {}
-            if str(_row.get("project_id") or "") != str(get_active_project_id() or ""):
-                continue
-            if _item.get("type") == "manuscript_version" and _manuscript_id and str(_row.get("id") or "") == _manuscript_id:
-                _loaded_words = count_words(_row.get("manuscript_content") or "")
-                break
-            if _item.get("type") == "project_session" and _loaded_id and str(_row.get("id") or "") == _loaded_id:
-                try:
-                    _snap = json.loads(_row.get("draft_content") or "{}")
-                except (ValueError, TypeError):
-                    _snap = {}
-                _text = get_best_saved_manuscript_source(_snap) if isinstance(_snap, dict) and _snap else ""
-                if not _text and isinstance(_snap, dict):
-                    _text = str(_snap.get("story_seed") or "")
-                _loaded_words = count_words(_text)
-        if _loaded_words is not None:
-            st.caption(f"Loaded Version Word Total: {_loaded_words:,}")
         if st.session_state.get("project_scope") == "Book in a Series":
             st.caption(
                 f"{st.session_state.get('series_name') or 'Unnamed Series'} — "
@@ -7563,35 +5826,145 @@ with st.sidebar.container(border=True):
         else:
             st.caption("First name the project, then select Save Project")
 
-    # Saved project format is immutable here. A format conversion is not a
-    # metadata-only operation: the Concept setup and downstream writing differ.
-    # Removing the old metadata-change button prevents accidental loss of the
-    # project's true template and the creation of spurious numbered revisions.
-    if active_project_title and get_active_project_id():
-        current_saved_format_id = str(st.session_state.get("active_format_id") or "")
-        if current_saved_format_id in WBS_FORMAT_IDS:
-            st.caption(f"Format: {get_wbs_format_display_name(current_saved_format_id)}")
-        if st.session_state.pop("_wbs_concept_recovered_for_review", False):
-            st.info("Concept setup was restored from an earlier save of this same project. Review it before saving.")
+    # Existing saved projects may need a format correction without restarting
+    # the project. This changes only format metadata and preserves all project work.
+    active_project_id = get_active_project_id()
+    if (
+        active_project_title
+        and active_project_id
+        and not st.session_state.get("demo_mode")
+    ):
+        current_saved_format_id = str(
+            st.session_state.get("active_format_id")
+            or WBS_TEMPLATE_ID_BY_LEGACY_FORMAT.get(
+                str(st.session_state.get("format_type") or "Novel / Prose"),
+                "novel_prose_novella",
+            )
+        )
+        if current_saved_format_id not in WBS_FORMAT_IDS:
+            current_saved_format_id = "novel_prose_novella"
 
-with st.sidebar:
-    if st.session_state.get("demo_mode"):
-        if st.button("💾 Save Project 🔒", key="save_current_project_session_trial", use_container_width=True, type="secondary"):
-            full_version_only_notice("Saved Projects")
-    else:
-        _sidebar_has_master = wbs_has_saved_master()
-        if _sidebar_has_master is None:
-            st.warning("Cannot verify saved project history; saving is disabled.")
-        elif _sidebar_has_master:
-            render_save_as_named_version_control("sidebar")
-        elif st.button("💾 Save Project — Create Master", key="save_current_project_session", use_container_width=True, type="secondary"):
-            if not get_project_title():
-                st.warning("Name the project in Concept Development first.")
-            else:
-                _master_result = save_current_project_session_to_supabase()
-                if _master_result and not getattr(_master_result, "unchanged", False):
-                    st.success("Master project saved. Future changes become versions.")
-                    st.rerun()
+        st.caption(
+            f"Format: {get_wbs_format_display_name(current_saved_format_id)}"
+        )
+
+        with st.expander("Change Project Format", expanded=False):
+            saved_project_format_choice = st.selectbox(
+                "Project Format:",
+                options=WBS_FORMAT_IDS,
+                index=WBS_FORMAT_IDS.index(current_saved_format_id),
+                format_func=get_wbs_format_display_name,
+                key="saved_project_format_change_selector",
+            )
+
+            st.caption(
+                "Changes the format for this saved project only. "
+                "Manuscript, beats, revisions, versions, and current workflow position are preserved."
+            )
+
+            if st.button(
+                "Apply Format Change",
+                key="apply_saved_project_format_change",
+                use_container_width=True,
+                type="secondary",
+            ):
+                if saved_project_format_choice == current_saved_format_id:
+                    st.info("This project is already using that format.")
+                else:
+                    previous_format_id = current_saved_format_id
+                    previous_format_type = str(
+                        st.session_state.get("format_type") or "Novel / Prose"
+                    )
+                    previous_final_output_format = str(
+                        st.session_state.get("final_output_format") or ""
+                    )
+
+                    try:
+                        new_format_type = WBS_LEGACY_FORMAT_BY_TEMPLATE_ID.get(
+                            saved_project_format_choice,
+                            "Novel / Prose",
+                        )
+
+                        # Format metadata only. Do not change project_stage,
+                        # manuscript, plot, scenes, revisions, or version history.
+                        st.session_state.active_format_id = saved_project_format_choice
+                        st.session_state.format_type = new_format_type
+                        st.session_state.active_format_template = get_wbs_format_template(
+                            saved_project_format_choice
+                        )
+                        st.session_state.quill_format_instructions = (
+                            get_wbs_quill_instructions(saved_project_format_choice)
+                        )
+                        st.session_state.quill_format_name = (
+                            get_wbs_format_display_name(saved_project_format_choice)
+                        )
+
+                        # Keep the Step 1 selector synchronized if the writer later opens it.
+                        st.session_state["wbs_format_template_selector"] = (
+                            saved_project_format_choice
+                        )
+
+                        # If Final Output was simply following the old project format,
+                        # move it with the corrected project format. Preserve any
+                        # deliberately different Final Output selection.
+                        if (
+                            not previous_final_output_format
+                            or previous_final_output_format == previous_format_type
+                        ):
+                            st.session_state.final_output_format = new_format_type
+
+                        # Keep the parent project record consistent with the saved session.
+                        supabase.table("writersblock_projects").update(
+                            {"project_type": new_format_type}
+                        ).eq("id", active_project_id).execute()
+
+                        save_result = save_current_project_session_to_supabase()
+                        if not save_result:
+                            raise RuntimeError("The updated project session was not saved.")
+
+                        st.success(
+                            f"Project format changed to "
+                            f"{get_wbs_format_display_name(saved_project_format_choice)}. "
+                            "Existing project work was preserved."
+                        )
+                        st.rerun()
+
+                    except Exception as exc:
+                        # Restore format state if persistence fails.
+                        st.session_state.active_format_id = previous_format_id
+                        st.session_state.format_type = previous_format_type
+                        st.session_state.active_format_template = get_wbs_format_template(
+                            previous_format_id
+                        )
+                        st.session_state.quill_format_instructions = (
+                            get_wbs_quill_instructions(previous_format_id)
+                        )
+                        st.session_state.quill_format_name = (
+                            get_wbs_format_display_name(previous_format_id)
+                        )
+                        st.session_state.final_output_format = (
+                            previous_final_output_format
+                        )
+                        st.error(f"Project format was not changed: {exc}")
+
+if st.session_state.get("demo_mode"):
+    if st.sidebar.button("💾 Save Project 🔒", key="save_current_project_session_trial", use_container_width=True, type="secondary"):
+        full_version_only_notice("Saved Projects")
+else:
+    if st.sidebar.button("💾 Save Project", key="save_current_project_session", use_container_width=True, type="secondary"):
+        ensure_project_title_loaded()
+
+        if not get_project_title():
+            st.sidebar.warning("Project title could not be found. Return to Concept Development and name the project before saving.")
+        else:
+            result = save_current_project_session_to_supabase()
+            if result:
+                st.sidebar.success("Project saved. Your latest project is available in Saved Projects / Versions.")
+                st.rerun()
+
+if not st.session_state.get("demo_mode"):
+    with st.sidebar:
+        render_save_as_named_version_control("sidebar")
 
 if st.session_state.get("demo_mode"):
     if st.sidebar.button("📚 Saved Version Manager 🔒", key="sidebar_saved_version_manager_trial", use_container_width=True, type="secondary"):
@@ -7602,6 +5975,115 @@ elif can_navigate_to_guardrail and can_use_safety:
         wbs_request_stage_change("Isolation Guardrail", export_view=True)
 else:
     st.sidebar.button("🔒 Saved Version Manager", key="sidebar_saved_version_manager_locked", disabled=True, use_container_width=True, type="secondary")
+
+# WBS 2026-10-24: Quill and new-story state must not leak into another project.
+def wbs_clear_new_project_ui_state():
+    """Clear old Quill dialogue and cached concept widgets; keep the login intact."""
+    reset_prefixes = (
+        "wbs_quill_", "quill_", "_wbs_quill_", "format_field_",
+        "starting_source_", "wbs_quill_starting_", "save_as_version_name_",
+    )
+    reset_exact = {
+        "quill_chat_history", "quill_last_response", "quill_conversation",
+        "quill_last_spoken", "quill_message_input", "project_version_name",
+    }
+    for state_key in list(st.session_state.keys()):
+        key_text = str(state_key).lower()
+        if key_text in reset_exact or key_text.startswith(reset_prefixes):
+            st.session_state.pop(state_key, None)
+    st.session_state.format_template_values = {}
+    st.session_state.quill_starting_direction = ""
+    st.session_state.pop("wbs_pending_stage_change", None)
+    st.session_state.pop("_wbs_last_saved_work_signature", None)
+    st.session_state.pop("_wbs_last_saved_project_id", None)
+    st.session_state.pop("_wbs_loaded_quill_concept", None)
+
+if st.sidebar.button("⚠️ Start New Project", key="global_reset", use_container_width=True, type="secondary"):
+    wbs_clear_new_project_ui_state()
+    st.session_state.pop("_wbs_unlocked_saved_stage", None)
+    st.session_state.project_stage = "Intake"
+    st.session_state.project_title = ""
+    st.session_state.project_version_name = "Original"
+    st.session_state.concept_change_areas = []
+    st.session_state.pop("_wbs_loaded_concept_version_baseline", None)
+    st.session_state.project_scope = "Standalone Book"
+    st.session_state.series_key = ""
+    st.session_state.series_name = ""
+    st.session_state.series_book_number = 1
+    st.session_state.series_continuity_mode = "Strict"
+    st.session_state.series_reference_ids = []
+    st.session_state.series_canon_notes = ""
+    st.session_state.series_selection_signature = ""
+    st.session_state.pop("series_reference_selector", None)
+    st.session_state.pop("series_choice_selector", None)
+    st.session_state.pop("series_name_input", None)
+    st.session_state.pop("series_book_number_input", None)
+    st.session_state.pop("series_book_number_auto_signature", None)
+    st.session_state.pop("custom_plot_line_input", None)
+    st.session_state.story_seed = (
+        "An antique shop owner buys a heavy iron safe that cannot be opened, "
+        "only to realize that every night, the ticking sounds coming from inside it get faster."
+    )
+    st.session_state.starting_source_mode = "Story Idea"
+    st.session_state.version_source_mode = "Custom Plot Line"
+    st.session_state.saved_version_source_text = ""
+    st.session_state.saved_version_source_name = ""
+    st.session_state.saved_version_source_word_count = 0
+    st.session_state.imported_source_text = ""
+    st.session_state.imported_source_name = ""
+    st.session_state.imported_source_word_count = 0
+    st.session_state.pop("concept_existing_draft_upload", None)
+    st.session_state.active_format_id = "novel_prose_novella"
+    st.session_state.format_type = "Novel / Prose"
+    st.session_state.active_format_template = get_wbs_format_template("novel_prose_novella")
+    st.session_state.quill_format_instructions = get_wbs_quill_instructions("novel_prose_novella")
+    st.session_state.quill_format_name = get_wbs_format_display_name("novel_prose_novella")
+    st.session_state.pop("wbs_format_template_selector", None)
+    st.session_state.dialogue_style = "Story-Driven / Automatic"
+    st.session_state.audiobook_length = "30 Minutes"
+    st.session_state.audiobook_target_word_count = 4000
+    st.session_state.audiobook_production_script = ""
+    st.session_state.audiobook_production_source_signature = ""
+    st.session_state.audiobook_production_cue_level = "Voices + Minimal SFX"
+    st.session_state.audiobook_production_preview_id = 0
+    st.session_state.tone_style = "Gritty Noir Mystery"
+    st.session_state.author_style = ""
+    st.session_state.sandbox_slates = None
+    st.session_state.chosen_option = None
+    st.session_state.chosen_option_text = None
+    st.session_state.plot_outline = None
+    st.session_state.current_draft_output = ""
+    st.session_state.rolling_lore_book = ""
+    st.session_state.completed_beats = []
+    st.session_state.scene_blocks = {}
+    st.session_state.current_processing_beat = 1
+    st.session_state.revision_report = ""
+    st.session_state.rewritten_manuscript = ""
+    st.session_state.manuscript_version = 0
+    st.session_state.current_manuscript_save_status = ""
+    st.session_state.current_manuscript_save_stage = ""
+    st.session_state.current_manuscript_save_version = 0
+    st.session_state.rewrite_applied_message = ""
+    st.session_state.current_project_id = None
+    st.session_state.revision_report = ""
+    st.session_state.export_view = False
+    st.session_state.final_output_format = ""
+    st.session_state.final_output_text = ""
+    st.session_state.final_output_source_signature = ""
+    st.session_state.final_output_preview_id = 0
+    st.session_state.final_output_saved_signature = ""
+    st.session_state.project_integrity_report = ""
+    st.session_state.project_integrity_source_signature = ""
+    st.session_state.project_integrity_status = ""
+    st.session_state.show_saved_version_manager = False
+    st.session_state.project_saved_notice = False
+    st.session_state.picture_book_layout_spreads = []
+    st.session_state.picture_book_layout_source_signature = ""
+    st.session_state.picture_book_layout_preview_id = 0
+    st.session_state.picture_book_page_size = DEFAULT_PICTURE_BOOK_PAGE_SIZE
+    st.session_state.rewrite_preview_id = 0
+    st.session_state.rewrite_target_length = "Keep Current Length"
+    st.rerun()
 
 # ==========================================
 # PHASE 1: CONCEPT DEVELOPMENT
@@ -7709,32 +6191,22 @@ if st.session_state.project_stage == "Intake":
         if current_format_id not in WBS_FORMAT_IDS:
             current_format_id = "novel_prose_novella"
 
-        # Initialize the dropdown only when the widget has no saved value.
-        # Streamlit updates its keyed value BEFORE rerunning the script when a writer
-        # selects another format. Resetting it on every rerun silently undoes the click.
-        # Saved-project loading explicitly restores this key from its validated format.
-        if "wbs_format_template_selector" not in st.session_state:
+        # Synchronize the displayed format BEFORE constructing the keyed widget.
+        # Loading any saved project must never reinterpret it as the last-used format.
+        if st.session_state.get("wbs_format_template_selector") != current_format_id:
             st.session_state["wbs_format_template_selector"] = current_format_id
 
         _format_control_col, _format_spacer_col = st.columns([1.6, 1.25], gap="small")
         with _format_control_col:
-            if get_active_project_id():
-                st.markdown(f"**{get_wbs_format_display_name(current_format_id)}**")
-                selected_format_id = current_format_id
-            else:
-                selected_format_id = st.selectbox(
-                    "Choose Writing Format",
-                    options=WBS_FORMAT_IDS,
-                    index=WBS_FORMAT_IDS.index(current_format_id),
-                    format_func=get_wbs_format_display_name,
-                    key="wbs_format_template_selector",
-                    label_visibility="collapsed",
-                )
+            selected_format_id = st.selectbox(
+                "Choose Writing Format",
+                options=WBS_FORMAT_IDS,
+                index=WBS_FORMAT_IDS.index(current_format_id),
+                format_func=get_wbs_format_display_name,
+                key="wbs_format_template_selector",
+                label_visibility="collapsed",
+            )
 
-        if selected_format_id != st.session_state.get("active_format_id") and get_active_project_id():
-            st.session_state["wbs_format_template_selector"] = st.session_state.active_format_id
-            st.warning("Saved project formats are protected. Start a new project to use a different writing format.")
-            st.rerun()
         if selected_format_id != st.session_state.get("active_format_id"):
             st.session_state.active_format_id = selected_format_id
             st.session_state.active_format_template = get_wbs_format_template(selected_format_id)
@@ -7749,80 +6221,20 @@ if st.session_state.project_stage == "Intake":
         concept_ui = get_active_concept_ui()
         st.markdown(f"##### {concept_ui.get('step_subtitle') or 'Build the foundation for your project.'}")
 
-        # Every format names this field PROJECT TITLE, never a saved version.
-        # Format-specific title wording stays in the registry for other consumers.
-        _format_title_prefix = next(
-            (name for format_id, name in WBS_FORMAT_OPTIONS
-             if format_id == st.session_state.get("active_format_id")),
-            "Project",
-        )
-        _project_title_label = f"{_format_title_prefix} / Project Title:"
-
         if get_active_project_id():
-            st.caption("Loaded saved project — saved Concept Development choices are restored where recorded.")
-            with st.expander("Verify Saved Development Setup (read-only)", expanded=False):
-                _saved_setup_audit = wbs_get_saved_concept_setup_audit()
-                if not _saved_setup_audit.get("ok"):
-                    st.warning(_saved_setup_audit.get("message") or "Saved settings could not be verified.")
-                else:
-                    _recorded = _saved_setup_audit["recorded"]
-                    _missing = _saved_setup_audit["missing"]
-                    st.caption(f"Exact saved revision: {_saved_setup_audit['saved_revision_id']}")
-                    st.write(f"Recorded Development Setup fields: **{len(_recorded)}**; "
-                             f"not recorded: **{len(_missing)}**.")
-                    if _missing:
-                        st.warning("This saved revision does not contain every Development Setup "
-                                   "selection. Current form defaults are NOT proof of the "
-                                   "writer's original choices; the saved record was not modified.")
-                    else:
-                        for _key, _label, _value in _recorded:
-                            st.caption(f"{_label}: {_value}")
-                    if _missing:
-                        st.caption("Not recorded in this revision: " +
-                                   ", ".join(label for _, label in _missing))
-            if st.session_state.get("_wbs_saved_concept_missing_fields"):
-                # Older saved projects may not contain every newer template
-                # field. Preserve that audit fact without displaying the same
-                # alarming yellow warning on every Streamlit rerun.
-                with st.expander("Historical Development Setup details", expanded=False):
-                    st.caption(
-                        "Some settings were not included in this saved project's "
-                        "historical records. Those fields show current template "
-                        "defaults, not verified original choices. Loading is read-only."
-                    )
-            if st.session_state.get("_wbs_series_conflict_for_review"):
-                st.caption("Historical series positions differed. Current Book order is managed separately "
-                           "in Series Library; saved stories were not changed.")
-            elif st.session_state.get("_wbs_series_recovered_for_review"):
-                st.info("Series relationship recovered from this project's saved records; "
-                        "no changes were written to the database.")
-
-            # This is a saved project's MASTER title, never an editable concept
-            # field. The writer can change it only with the separate Rename
-            # Project action. Do not feed a stale widget value back into state:
-            # doing so changed "Return To Sender" to the previous project title
-            # while leaving its manuscript/project ID untouched.
-            _active_title_project_id = str(get_active_project_id() or "")
-            _title_anchor = (
-                str(st.session_state.get("_wbs_loaded_project_title") or "").strip()
-                if str(st.session_state.get("_wbs_loaded_project_id") or "")
-                == _active_title_project_id else ""
+            st.caption(
+                "Loaded saved project — original Concept Development settings are shown below. "
+                "Change any setting you want, then Save Project."
             )
-            if _title_anchor and st.session_state.get("project_title") != _title_anchor:
-                st.session_state.project_title = _title_anchor
-            _display_master_title = _title_anchor or get_project_title()
-            st.markdown(f"**{_project_title_label}**")
-            st.markdown(
-                '<div style="background:#262730;color:#ffffff;padding:0.65rem 0.8rem;'
-                'border:1px solid #41444f;border-radius:0.45rem;min-height:2.4rem;">'
-                + html.escape(_display_master_title) + '</div>',
-                unsafe_allow_html=True,
-            )
-            render_confirmed_project_rename("step_1_concept")
-            render_save_open_project_to_series()
+            st.session_state.project_title = st.text_input(
+                concept_ui.get("title_label") or "Project / Story Title:",
+                value=st.session_state.get("project_title", ""),
+                placeholder="Example: It's Not Safe",
+                key="saved_project_title_input",
+            ).strip()
         else:
             st.session_state.project_title = st.text_input(
-                _project_title_label,
+                concept_ui.get("title_label") or "Project / Story Title:",
                 value=st.session_state.get("project_title", ""),
                 placeholder="Example: It's Not Safe",
                 key="project_title_input",
@@ -7830,98 +6242,218 @@ if st.session_state.project_stage == "Intake":
 
         st.markdown("### " + str(concept_ui.get('project_connection_heading') or 'Project Relationship'))
 
-        # Simple series membership. No bulk assignment, book-order UI, or manuscript writes.
-        # The Project Type selection is a proposal for saved projects; it takes
-        # effect ONLY after explicit confirmation (metadata-only). For a new
-        # project the original master-save flow still creates the series link.
         project_scope_options = ["Standalone Book", "Book in a Series"]
-        current_project_id = str(get_active_project_id() or "")
-        membership = get_series_metadata_by_project() if get_current_user_id() else {}
-        current_member = membership.get(current_project_id) or {}
-        registered_series = str(current_member.get("series_name") or "").strip()
-        saved_scope = "Book in a Series" if registered_series else "Standalone Book"
-        selected_scope_default = (saved_scope if current_project_id else
-                                  str(st.session_state.get("project_scope") or "Standalone Book"))
-        context = f"{current_project_id or 'new'}:{registered_series}"
-        # A project load resets the controls once. A normal Streamlit rerun must
-        # not erase the writer's proposed selection or checkbox state.
-        if st.session_state.get("_wbs_simple_series_context") != context:
-            st.session_state["_wbs_simple_series_context"] = context
-            st.session_state["project_scope_selector"] = selected_scope_default
-            st.session_state["wbs_confirm_series_link"] = False
-            st.session_state["wbs_confirm_series_removal"] = False
-            st.session_state.pop("wbs_simple_series_choice", None)
-            st.session_state.pop("wbs_simple_series_new_name", None)
+        current_project_scope = str(st.session_state.get("project_scope", "Standalone Book"))
 
-        project_scope_labels = concept_ui.get("scope_labels") or {}
-        chosen_scope = st.radio(
-                "Project Type:", project_scope_options, horizontal=True,
-                key="project_scope_selector",
-                format_func=lambda v: project_scope_labels.get(v, v),
-            )
-        # For existing projects the recorded membership is authoritative even
-        # when the user previews the other radio button. This protects version
-        # saves, navigation, and Quill continuity from unsaved changes.
-        if current_project_id:
-            st.session_state.project_scope = saved_scope
-            st.session_state.series_name = registered_series
-            st.session_state.series_key = make_series_key(registered_series)
-            if registered_series:
-                st.session_state.series_book_number = int(current_member.get("series_book_number") or 1)
-        else:
-            st.session_state.project_scope = chosen_scope
+        scope_labels = concept_ui.get("scope_labels") or {}
+        st.session_state.project_scope = st.radio(
+            "Project Type:",
+            project_scope_options,
+            index=project_scope_options.index(current_project_scope)
+            if current_project_scope in project_scope_options else 0,
+            horizontal=True,
+            key="project_scope_selector",
+            format_func=lambda value: scope_labels.get(value, value),
+        )
 
-        if chosen_scope == "Book in a Series":
-            known_series = get_existing_series_names()
-            choice_options = list(known_series) + ["Create New Series"]
-            existing_name = (registered_series if current_project_id else
-                             str(st.session_state.get("series_name") or "").strip())
-            if "wbs_simple_series_choice" not in st.session_state:
-                st.session_state["wbs_simple_series_choice"] = (
-                    existing_name if existing_name in known_series else "Create New Series")
-            with st.columns([1, 1], gap="small")[0]:
-                selected_choice = st.selectbox(
-                    "Select Series:", choice_options, key="wbs_simple_series_choice")
-                if selected_choice == "Create New Series":
-                    selected_series = st.text_input(
-                        "New Series Name:", key="wbs_simple_series_new_name",
-                        max_chars=80).strip()
-                else:
-                    selected_series = selected_choice
-            if not current_project_id:
-                # Initial master project save has always included its series
-                # metadata; retain that behavior, without making a new version.
-                st.session_state.series_name = selected_series
-                st.session_state.series_key = make_series_key(selected_series)
-                st.session_state.series_continuity_mode = "Strict"
-                if selected_series:
-                    st.session_state.series_book_number = get_next_series_book_number(selected_series)
-                    st.caption("This new project will join the selected series when you save its master project.")
-                else:
-                    st.caption("Enter a series name before saving the project.")
+        if st.session_state.project_scope == "Book in a Series":
+            existing_series_names = get_existing_series_names()
+            series_choice_options = existing_series_names + ["Create New Series"]
+            current_series_name = str(st.session_state.get("series_name", "") or "").strip()
+            default_series_choice = current_series_name if current_series_name in existing_series_names else "Create New Series"
+
+            _series_control_col, _series_spacer_col = st.columns([3.0, 1.2])
+            with _series_control_col:
+                selected_series_choice = st.selectbox(
+                    "Select Series:",
+                    series_choice_options,
+                    index=series_choice_options.index(default_series_choice),
+                    key="series_choice_selector",
+                )
+
+            if selected_series_choice == "Create New Series":
+                st.session_state.series_name = st.text_input(
+                    "Series Name:",
+                    value=current_series_name,
+                    placeholder="Example: Oakhaven",
+                    key="series_name_input",
+                ).strip()
             else:
-                # Saved projects are changed ONLY with the version-aware action
-                # directly below Rename Project, never from an unconfirmed radio.
-                pass
-        elif not current_project_id:
-            st.session_state.series_name = ""
-            st.session_state.series_key = ""
-        else:
-            st.session_state.series_name = ""
-            st.session_state.series_key = ""
+                st.session_state.series_name = selected_series_choice
 
-        # Automatic series continuity still uses confirmed earlier projects.
-        if st.session_state.project_scope == "Book in a Series" and st.session_state.get("series_name"):
+            resolved_series_name = str(st.session_state.get("series_name") or "").strip()
+            resolved_series_key = make_series_key(resolved_series_name)
+            auto_number_signature = (
+                f"{resolved_series_key}:{st.session_state.get('current_project_id') or 'new-project'}"
+            )
+
+            if (
+                resolved_series_key
+                and st.session_state.get("series_book_number_auto_signature")
+                != auto_number_signature
+            ):
+                next_book_number = get_next_series_book_number(
+                    resolved_series_name,
+                    exclude_project_id=st.session_state.get("current_project_id"),
+                )
+                st.session_state.series_book_number = next_book_number
+                st.session_state.series_book_number_input = next_book_number
+                st.session_state.series_book_number_auto_signature = auto_number_signature
+
+            st.session_state.series_book_number = int(
+                st.number_input(
+                    "Series Number:",
+                    min_value=1,
+                    max_value=100,
+                    value=int(st.session_state.get("series_book_number", 1) or 1),
+                    step=1,
+                    key="series_book_number_input",
+                )
+            )
+
+            # Series continuity is automatic and always strict.
             st.session_state.series_continuity_mode = "Strict"
+            st.caption("Continuity Protection: Strict — automatic")
+
+            st.session_state.series_key = make_series_key(st.session_state.series_name)
+
             candidates = get_series_reference_candidates()
-            project_ids = get_unambiguous_series_project_ids(
-                st.session_state.series_key,
-                before_number=st.session_state.get("series_book_number") or 1)
-            st.session_state.series_reference_ids = [
-                c["id"] for c in candidates if str(c.get("project_id")) in project_ids]
+            id_to_candidate = {candidate["id"]: candidate for candidate in candidates}
+
+            # One-time setup for books written before series support was added.
+            unassigned_candidates = [
+                candidate
+                for candidate in candidates
+                if not str(candidate.get("series_key") or "").strip()
+            ]
+
+            if unassigned_candidates and st.session_state.series_name:
+                st.markdown("**Add Previously Created Projects to This Series (One-Time Setup):**")
+                setup_label_to_candidate = {
+                    candidate["label"]: candidate for candidate in unassigned_candidates
+                }
+                selected_existing_labels = st.multiselect(
+                    "Existing Saved Projects:",
+                    options=list(setup_label_to_candidate.keys()),
+                    key="series_existing_book_selector",
+                    help=(
+                        "Select books already written before series support was added. "
+                        "They will be numbered automatically by their original saved date."
+                    ),
+                )
+
+                selected_existing_records = [
+                    setup_label_to_candidate[label]
+                    for label in selected_existing_labels
+                    if label in setup_label_to_candidate
+                ]
+                selected_existing_records.sort(
+                    key=lambda item: (
+                        str(item.get("created_at") or ""),
+                        str(item.get("title") or "").lower(),
+                    )
+                )
+
+                if selected_existing_records:
+                    st.caption("Automatic series order:")
+                    for assigned_number, record in enumerate(selected_existing_records, start=1):
+                        st.write(f"Series #{assigned_number}: {record.get('title', 'Untitled Project')}")
+
+                    if st.button(
+                        "Add Selected Projects to Series",
+                        key="assign_existing_books_to_series",
+                        use_container_width=True,
+                    ):
+                        for assigned_number, record in enumerate(selected_existing_records, start=1):
+                            assign_existing_project_to_series(
+                                project_id=record.get("project_id"),
+                                series_name=st.session_state.series_name,
+                                book_number=assigned_number,
+                                project_title=record.get("title"),
+                            )
+
+                        st.session_state.series_book_number = max(
+                            int(st.session_state.get("series_book_number", 1) or 1),
+                            len(selected_existing_records) + 1,
+                        )
+                        st.session_state.series_existing_book_selector = []
+                        st.success("Existing projects added to the series.")
+                        st.rerun()
+
+            valid_saved_ids = [
+                reference_id
+                for reference_id in (st.session_state.get("series_reference_ids", []) or [])
+                if reference_id in id_to_candidate
+            ]
+            prior_series_ids = [
+                candidate["id"]
+                for candidate in candidates
+                if (
+                    st.session_state.series_key
+                    and candidate.get("series_key") == st.session_state.series_key
+                    and int(candidate.get("book_number") or 0) > 0
+                    and int(candidate.get("book_number") or 0) < st.session_state.series_book_number
+                )
+            ]
+
+            # Preserve any books already attached during first-time series setup, then automatically
+            # include every earlier book already saved under the same series.
+            automatic_ids = []
+            for reference_id in valid_saved_ids + prior_series_ids:
+                if reference_id not in automatic_ids:
+                    automatic_ids.append(reference_id)
+            st.session_state.series_reference_ids = automatic_ids
             st.session_state.series_selection_signature = (
-                f"{st.session_state.series_key}:{st.session_state.get('series_book_number') or 1}")
+                f"{st.session_state.series_key}:{st.session_state.series_book_number}"
+            )
+            st.session_state.pop("series_reference_selector", None)
+
+            automatic_records = [
+                id_to_candidate[reference_id]
+                for reference_id in automatic_ids
+                if reference_id in id_to_candidate
+            ]
+
+            
+            _series_reference_heading = {
+                "podcast_script": "**Previous Podcast Automatically Referenced:**",
+                "youtube_shorts": "**Previous Series Projects Automatically Referenced:**",
+            }.get(
+                str(st.session_state.get("active_format_id") or ""),
+                "**Previous Series Projects Automatically Referenced:**",
+            )
+            st.markdown(_series_reference_heading)
+            if automatic_records:
+                for record in automatic_records:
+                    st.write(f"✓ {record.get('title', 'Untitled Project')}")
+            elif st.session_state.series_book_number > 1:
+                st.warning(
+                    "No earlier projects are currently saved under this series. Existing projects only need "
+                    "to be assigned to the series once; future projects will include them automatically."
+                )
+            else:
+                st.caption("This is the first project in the series.")
+
+            inherited_canon = get_inherited_series_canon_notes(
+                st.session_state.series_key,
+                st.session_state.series_book_number,
+            )
+            if inherited_canon:
+                st.markdown("**Inherited Series Reference:** Automatically loaded from earlier series projects.")
+
+            # Series continuity is derived automatically from earlier manuscripts and saved metadata.
+            # No manual facts field is shown or required.
+            st.session_state.series_canon_notes = ""
+            st.session_state.pop("series_canon_notes_input", None)
+
+            reference_count = len(st.session_state.get("series_reference_ids", []) or [])
+            st.success(
+                f"Series Continuity Active: {st.session_state.series_name or 'Name Required'} — "
+                f"Series #{st.session_state.series_book_number} — {reference_count} earlier "
+                f"project{'' if reference_count == 1 else 's'} automatically included."
+            )
         else:
+            st.session_state.series_key = ""
             st.session_state.series_reference_ids = []
 
         # Render the selected format's independent development fields.
@@ -8373,62 +6905,12 @@ if st.session_state.project_stage == "Intake":
         # Save is deliberately visible BEFORE the advance action on every format page.
         render_format_template_save_reminder()
 
-        # A loaded saved project may already contain its Scripting options.
-        # Continue READ-ONLY: never regenerate its paths, reset its manuscript,
-        # or create another writersblock_projects row under a new identity.
-        _wbs_is_loaded_project = bool(get_active_project_id())
-        _wbs_has_saved_paths = (
-            _wbs_is_loaded_project
-            and isinstance(st.session_state.get("sandbox_slates"), dict)
-            and sandbox_output_is_usable(st.session_state.get("sandbox_slates"))
-        )
-        _wbs_paths_button_label = (
-            "Continue to Scripting — Existing Paths"
-            if _wbs_has_saved_paths
-            else str(concept_ui.get("button_label") or "Develop Project Paths 🚀")
-        )
         if st.button(
-            _wbs_paths_button_label,
+            str(concept_ui.get("button_label") or "Develop Project Paths 🚀"),
             key="generate_sandbox_paths",
             type="primary",
             use_container_width=True,
         ):
-            if _wbs_has_saved_paths:
-                # Reuse only paths that match the currently saved snapshot.
-                # In particular, after a failed write, keep the generated paths
-                # in memory so the user can save them without another API call.
-                if (wbs_has_saved_master() is not True
-                        or wbs_work_has_changed() is not False):
-                    st.error(
-                        "These scripting paths or concept changes are not yet saved. "
-                        "Use 'Save Project Changes As A New Version' above, then "
-                        "continue to Scripting. No AI regeneration is required."
-                    )
-                    st.stop()
-                wbs_request_stage_change("Sandbox")
-                st.stop()
-            _wbs_create_saved_first_paths = False
-            if _wbs_is_loaded_project:
-                # Saved V-1 concept-only projects must not be trapped before
-                # Scripting. Protect *all* existing versions and other stages.
-                _wbs_create_saved_first_paths, _wbs_first_paths_error = (
-                    wbs_can_generate_first_paths_for_saved_concept()
-                )
-                if not _wbs_create_saved_first_paths:
-                    st.error(_wbs_first_paths_error)
-                    st.stop()
-                _audit = wbs_get_saved_concept_setup_audit()
-                if not _audit.get("ok"):
-                    st.error((_audit.get("message") or "Cannot verify saved setup.") +
-                             " No AI generation was started.")
-                    st.stop()
-                if _audit.get("missing"):
-                    st.error("This saved revision is missing Development Setup selections: "
-                             + ", ".join(label for _, label in _audit["missing"][:12])
-                             + ". The displayed template defaults are NOT proven "
-                               "to be your original instructions. No AI generation "
-                               "was started. Review the saved Setup audit.")
-                    st.stop()
             require_product_access("sandbox")
             require_demo_action_available("sandbox")
 
@@ -8543,40 +7025,13 @@ if st.session_state.project_stage == "Intake":
                 )
                 st.session_state["_wbs_agent_bridge_last_success"] = True
 
-                if not sandbox_output_is_usable(st.session_state.sandbox_slates):
-                    st.error("Quill did not return three usable paths. Nothing was saved.")
-                    st.stop()
-                mark_demo_action_used("sandbox")
+                if sandbox_output_is_usable(st.session_state.sandbox_slates):
+                    mark_demo_action_used("sandbox")
 
-                if _wbs_create_saved_first_paths:
-                    # INSERT ONLY: V-1 remains intact, first generated paths
-                    # are committed as the next saved project version (V-2).
-                    first_paths_save = save_current_project_session_to_supabase(
-                        version_name="First Scripting Paths", save_as_new_version=True,
-                    )
-                    if not first_paths_save or getattr(first_paths_save, "unchanged", False):
-                        st.error(
-                            "Generated paths remain in this session but were NOT saved. "
-                            "Use 'Save Project Changes As A New Version' above to "
-                            "retry the save without another AI generation."
-                        )
-                        st.stop()
-                    st.session_state.project_saved_notice = True
-                    wbs_request_stage_change("Sandbox")
-                    st.stop()
-
-                # A genuinely new project creates its parent only once.
-                # NEVER replace current_project_id while editing saved work.
-                if get_active_project_id():
-                    st.error("Existing project detected. No new project was created or saved.")
-                    st.stop()
-                new_project_result = save_project_to_supabase(
+                save_project_to_supabase(
                     project_title=get_project_title_for_display()[:80],
                     project_type=st.session_state.format_type,
                 )
-                if not new_project_result or not get_active_project_id():
-                    st.error("New project creation could not be confirmed. Scripting was not opened.")
-                    st.stop()
 
                 if st.session_state.get("project_scope") == "Book in a Series":
                     save_series_metadata_for_project(
@@ -8800,36 +7255,6 @@ if st.session_state.project_stage == "Plot Architect":
             st.error("Plot generation did not produce a usable result. Return to Scripting and select a path again.")
             st.stop()
 
-    # Stage 3 display guard: planning language can be embedded inside a SCENE
-    # field (without a tag). Never display it as part of the reader's story.
-    def _wbs_reader_scene_text(raw):
-        raw = str(raw or "").strip()
-        # Strip editorial/generation commentary only when a clause explicitly
-        # discusses the scene, narration, directive or writer, not the action.
-        raw = re.sub(
-            r"(?is)(?:^|(?<=[.!?])\s+)(?:The scene (?:emphasizes|focuses on|is carried|will be|relies on|should|uses|highlights|establishes)|"
-            r"Narration (?:carries|highlights|focuses|will|should|describes)|"
-            r"The narration (?:carries|highlights|focuses|will|should|describes)|"
-            r"This (?:beat|scene) (?:emphasizes|focuses|should|uses|is designed)|"
-            r"(?:Use|Maintain|Employ|Apply|Analyze and apply) (?:active syntax|descriptive|style syntax|narration|dialogue)).*?(?:[.!?](?=\s|$)|$)",
-            " ", raw,
-        )
-        return re.sub(r"[ \t]{2,}", " ", raw).strip()
-
-    def _wbs_reader_outline_preview(raw):
-        # Preserve source tags internally, but present only scene titles and
-        # prose during review; all format controls still use the raw outline.
-        beats = re.split(r"(?im)^\s*\[BEAT\s+\d+\]\s*", str(raw or ""))
-        displayed = []
-        for section in beats:
-            title = re.search(r"(?is)\[SCENE TITLE\]\s*:\s*(.*?)(?=\[[A-Z][A-Z\s&0-9]*\]\s*:|$)", section)
-            scene = re.search(r"(?is)\[(?:SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*)\]\s*:\s*(.*?)(?=\[[A-Z][A-Z\s&0-9]*\]\s*:|$)", section)
-            if scene:
-                prose = _wbs_reader_scene_text(scene.group(1))
-                if prose:
-                    displayed.append(((title.group(1).strip() + "\n\n") if title else "") + prose)
-        return "\n\n".join(displayed)
-
     # Single Stage 3 workspace: source on the left, editing / rewrite on the right.
     # The tagged outline remains authoritative for every writing format.
     _outline_now = str(st.session_state.get("plot_outline") or "").strip()
@@ -8855,62 +7280,41 @@ if st.session_state.project_stage == "Plot Architect":
         st.session_state["_wbs_stage3_edit_source"] = _selected_outline
         st.session_state["_wbs_stage3_edit_signature"] = _edit_signature
 
-    # The left workspace must show the active manuscript text when the
-    # selected beat already has a drafted scene. Do not show an obsolete
-    # plot-outline scene after the writer accepts a manuscript rewrite.
-    _visible_blocks = st.session_state.get("scene_blocks") or {}
-    _visible_beat = int(_selected_number) if _selected_number else None
-    _visible_draft = (
-        str(_visible_blocks.get(_visible_beat, _visible_blocks.get(str(_visible_beat), "")) or "").strip()
-        if _visible_beat is not None and isinstance(_visible_blocks, dict)
-        else ""
-    )
-    _visible_draft = _visible_draft if str(st.session_state.get("current_draft_output") or "").strip() else ""
-
     with _source_col:
         st.subheader(f"Beat {_selected_number} — Scene {_selected_number}" if _selected_number else "Full Storyline")
         if not _selected_outline:
             st.info("No scene content is available yet.")
         else:
-            # Approved manuscript rewrites immediately appear in this left panel.
-            if _visible_draft:
-                st.caption("Current working manuscript scene")
-                for _paragraph in re.split(r"\n\s*\n", _wbs_reader_scene_text(_visible_draft)):
-                    if _paragraph.strip():
-                        st.write(_paragraph.strip())
-            # Otherwise display the outline's story text, never its directives.
-            elif _selected_number:
-                _title_match = re.search(r"\[SCENE TITLE\]\s*:\s*", _selected_outline, flags=re.I)
-                _scene_match = re.search(
-                    r"\[(?:SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*)\]\s*:\s*",
-                    _selected_outline, flags=re.I)
-                _next_header = re.compile(r"\[(?:BEAT\s*\d+|SCENE TITLE|CORE OBJECTIVE|SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*|THE\s+CONFLICT|STYLE\s*&\s*SYNTAX DIRECTIVE)\]", re.I)
-                if _title_match:
-                    _tail = _selected_outline[_title_match.end():]
-                    _next = _next_header.search(_tail)
-                    _title = _tail[:_next.start() if _next else len(_tail)].strip().strip("=").strip()
-                    if _title:
-                        st.markdown(f"**{_title}**")
-                if _scene_match:
-                    _tail = _selected_outline[_scene_match.end():]
-                    _next = _next_header.search(_tail)
-                    _scene_text = _wbs_reader_scene_text(_tail[:_next.start() if _next else len(_tail)].strip().strip("=").strip())
-                    if _scene_text:
-                        st.markdown("**Scene**")
-                        for _paragraph in re.split(r"\n\s*\n", _scene_text):
-                            if _paragraph.strip():
-                                st.write(_paragraph.strip())
-                elif not _title_match:
-                    st.info("Scene text is unavailable for this beat.")
+            _field_patterns = (
+                ("Scene Title", r"\[SCENE TITLE\]\s*:\s*"),
+                ("Core Objective", r"\[CORE OBJECTIVE\]\s*:\s*"),
+                ("Scene", r"\[SCENE DETAILS(?:\s*&\s*CONFLICT)?\]\s*:\s*"),
+                ("Style & Syntax Directive", r"\[STYLE\s*&\s*SYNTAX DIRECTIVE\]\s*:\s*"),
+            )
+            if _selected_number:
+                _matches = []
+                for _heading, _pat in _field_patterns:
+                    _m = re.search(_pat, _selected_outline, flags=re.I)
+                    if _m:
+                        _matches.append((_m.start(), _m.end(), _heading))
+                _matches.sort()
+                if _matches:
+                    for _fi, (_a, _b, _heading) in enumerate(_matches):
+                        _stop = _matches[_fi + 1][0] if _fi + 1 < len(_matches) else len(_selected_outline)
+                        _content = _selected_outline[_b:_stop].strip().strip("=").strip()
+                        st.markdown(f"**{_heading}**")
+                        st.write(_content)
+                        st.write("")
+                else:
+                    st.text(_selected_outline)
             else:
-                st.caption("Select an individual beat to read its scene.")
+                st.text(_selected_outline)
 
     with _edit_col:
         st.markdown("#### Script Rewrite Controls")
-        # Creative modes stay in the rewrite dropdown. Exact/direct changes
-        # have their own explicit control immediately above the text box.
         _mode = st.selectbox("Rewrite Mode", [
             "Creative Script Rewrite / Improve Scene",
+            "Direct Script Change / Obey My Instructions Exactly",
             "Polish Only / Do Not Change Story",
         ], key="_wbs_stage3_rewrite_mode")
         _length = st.selectbox("Target Length", [
@@ -8924,27 +7328,9 @@ if st.session_state.project_stage == "Plot Architect":
         _dialogue = st.selectbox("Dialogue Style for Rewrite", [
             "Use Current Project Dialogue Style", *DIALOGUE_STYLE_OPTIONS,
         ], key="_wbs_stage3_rewrite_dialogue")
-        _exact_script_change = st.checkbox(
-            "Direct Script Change / Obey My Instructions Exactly",
-            key="_wbs_stage3_direct_script_change",
-            help="Use the text below as an exact replacement rather than a creative rewrite.")
-        if _exact_script_change:
-            _mode = "Direct Script Change / Obey My Instructions Exactly"
-        rewrite_direction = st.text_area(
-            "Replacement Text" if _exact_script_change else "Specific Rewrite Direction (optional)",
+        rewrite_direction = st.text_area("Specific Rewrite Direction (optional)",
             key="_wbs_stage3_rewrite_direction", height=130,
-            placeholder=("Paste replacement text for the selected scene."
-                         if _exact_script_change else
-                         "Describe changes to the selected beat or entire storyline."))
-        # If the scene is already drafted, this editor must rewrite the ACTUAL
-        # manuscript scene, rather than silently changing only its old outline.
-        _draft_blocks = st.session_state.get("scene_blocks") or {}
-        _draft_beat_num = int(_selected_number) if _selected_number else None
-        _draft_scene = (str(_draft_blocks.get(_draft_beat_num, _draft_blocks.get(str(_draft_beat_num), "")) or "").strip()
-                        if _draft_beat_num is not None and isinstance(_draft_blocks, dict) else "")
-        _rewrite_existing_draft = bool(_draft_scene and str(st.session_state.get("current_draft_output") or "").strip())
-        if _rewrite_existing_draft:
-            st.caption("Editing the existing manuscript scene. Accept Rewrite will replace this scene in the working draft.")
+            placeholder="Describe changes to the selected beat or entire storyline.")
         if st.button("Preview Rewritten Storyline", key="_wbs_stage3_rewrite_preview_button",
                      use_container_width=True):
             backend = st.session_state.get("backend")
@@ -8963,50 +7349,28 @@ if st.session_state.project_stage == "Plot Architect":
                     "Keep every original [BEAT N] heading, [SCENE TITLE], [CORE OBJECTIVE], "
                     "[SCENE DETAILS & CONFLICT] and [STYLE & SYNTAX DIRECTIVE] so later generation works. "
                     "Preserve the writer's format, characters, continuity, voice, and development tense. "
-                    "In SCENE DETAILS & CONFLICT write story events only. NEVER add commentary about "
-                    "the scene, narration, objectives, pacing, syntax or writing technique to story text. "
-                    "Put all such instructions solely in CORE OBJECTIVE or STYLE & SYNTAX DIRECTIVE. "
                     f"Mode: {_mode}. Target length: {_target}. Dialogue: {_dialogue_rule}. "
                     f"Development: {get_active_format_development_context()}. "
                     f"Writer's direction: {rewrite_direction or 'Improve selected outline.'}\n\n"
                     f"SOURCE OUTLINE:\n{_selected_outline}")
-                if _rewrite_existing_draft:
-                    _instruction = (
-                        "Rewrite the following FINISHED MANUSCRIPT SCENE according to the writer's instructions. "
-                        "Return only replacement story prose, no headers, beat markers, meta commentary, "
-                        "writing instructions or explanation. Preserve story continuity, characters, "
-                        "format, voice and existing scene length unless requested otherwise. "
-                        f"Mode: {_mode}. Target length: {_target}. Dialogue: {_dialogue_rule}. "
-                        f"Writer's direction: {rewrite_direction or 'Improve this scene.'}\n\n"
-                        f"EXISTING MANUSCRIPT SCENE:\n{_draft_scene}"
-                    )
                 try:
                     _response = client.models.generate_content(model=model, contents=_instruction)
                     _preview = str(getattr(_response, "text", "") or "").strip()
-                    if _rewrite_existing_draft:
-                        _valid = bool(_preview) and not re.search(
-                            r"(?im)^\s*\[(?:BEAT|CORE OBJECTIVE|STYLE\s*&\s*SYNTAX DIRECTIVE)", _preview)
-                    else:
-                        _old_ids = re.findall(_beat_pattern, _selected_outline)
-                        _new_ids = re.findall(_beat_pattern, _preview)
-                        _tags = ("[SCENE TITLE]", "[CORE OBJECTIVE]", "[SCENE DETAILS & CONFLICT]", "[STYLE & SYNTAX DIRECTIVE]")
-                        _valid = bool(_preview) and _old_ids == _new_ids and not any(
-                            _preview.upper().count(tag) != len(_old_ids) for tag in _tags)
-                    if not _valid:
-                        st.error("The rewrite did not preserve the required scene format. Original retained.")
+                    _old_ids = re.findall(_beat_pattern, _selected_outline)
+                    _new_ids = re.findall(_beat_pattern, _preview)
+                    _tags = ("[SCENE TITLE]", "[CORE OBJECTIVE]", "[SCENE DETAILS & CONFLICT]", "[STYLE & SYNTAX DIRECTIVE]")
+                    if not _preview or _old_ids != _new_ids or any(
+                        _preview.upper().count(tag) != len(_old_ids) for tag in _tags):
+                        st.error("The rewrite did not preserve the scene structure. Original retained.")
                     else:
                         st.session_state["_wbs_stage3_rewrite_preview"] = _preview
                         st.session_state["_wbs_stage3_rewrite_origin"] = get_text_signature(_outline_now)
                         st.session_state["_wbs_stage3_rewrite_target"] = _location
-                        st.session_state["_wbs_stage3_rewrite_draft_beat"] = _draft_beat_num if _rewrite_existing_draft else None
-                        st.session_state["_wbs_stage3_rewrite_draft_signature"] = get_text_signature(_draft_scene) if _rewrite_existing_draft else ""
                 except Exception as exc:
                     st.error(f"Rewrite could not be completed: {exc}")
         _preview = str(st.session_state.get("_wbs_stage3_rewrite_preview") or "").strip()
         if _preview:
-            st.text_area("Review proposed rewrite before approval",
-                         value=(_preview if st.session_state.get("_wbs_stage3_rewrite_draft_beat") is not None
-                                else _wbs_reader_outline_preview(_preview)),
+            st.text_area("Review proposed rewrite before approval", value=_preview,
                          height=240, disabled=True, key="_wbs_stage3_rewrite_display")
             _accept, _discard = st.columns(2)
             with _accept:
@@ -9014,23 +7378,6 @@ if st.session_state.project_stage == "Plot Architect":
                     _original = str(st.session_state.get("plot_outline") or "")
                     if st.session_state.get("_wbs_stage3_rewrite_origin") != get_text_signature(_original):
                         st.error("Source changed. Generate another preview first.")
-                    elif st.session_state.get("_wbs_stage3_rewrite_draft_beat") is not None:
-                        _n = int(st.session_state["_wbs_stage3_rewrite_draft_beat"])
-                        _blocks = st.session_state.get("scene_blocks") or {}
-                        _old_scene = str(_blocks.get(_n, _blocks.get(str(_n), "")) or "").strip()
-                        if get_text_signature(_old_scene) != st.session_state.get("_wbs_stage3_rewrite_draft_signature"):
-                            st.error("The manuscript scene changed. Generate another preview before accepting.")
-                        elif _preview != _old_scene:
-                            _blocks[_n] = _preview
-                            _blocks.pop(str(_n), None)
-                            st.session_state.scene_blocks = _blocks
-                            st.session_state.current_draft_output = "\n\n".join(
-                                str(_blocks[k]).strip() for k in sorted(_blocks, key=lambda v: int(v))
-                                if str(_blocks[k] or "").strip())
-                            st.session_state["_wbs_stage3_manuscript_rewrite_notice"] = f"Scene {_n} rewrite applied to working manuscript. Save when ready."
-                            for _key in ("_wbs_stage3_rewrite_preview", "_wbs_stage3_rewrite_origin", "_wbs_stage3_rewrite_target", "_wbs_stage3_rewrite_draft_beat", "_wbs_stage3_rewrite_draft_signature"):
-                                st.session_state.pop(_key, None)
-                            st.rerun()
                     else:
                         _target = st.session_state.get("_wbs_stage3_rewrite_target") or ""
                         if _target == "Full Storyline":
@@ -9042,89 +7389,14 @@ if st.session_state.project_stage == "Plot Architect":
                         if _new_outline:
                             st.session_state.plot_outline = _new_outline
                             st.session_state["_wbs_stage3_unsaved_changes"] = True
-                            for _key in ("_wbs_stage3_rewrite_preview", "_wbs_stage3_rewrite_origin", "_wbs_stage3_rewrite_target", "_wbs_stage3_rewrite_draft_beat", "_wbs_stage3_rewrite_draft_signature"):
+                            for _key in ("_wbs_stage3_rewrite_preview", "_wbs_stage3_rewrite_origin", "_wbs_stage3_rewrite_target"):
                                 st.session_state.pop(_key, None)
                             st.rerun()
             with _discard:
                 if st.button("Discard", key="_wbs_stage3_discard_rewrite", use_container_width=True):
-                    for _key in ("_wbs_stage3_rewrite_preview", "_wbs_stage3_rewrite_origin", "_wbs_stage3_rewrite_target", "_wbs_stage3_rewrite_draft_beat", "_wbs_stage3_rewrite_draft_signature"):
+                    for _key in ("_wbs_stage3_rewrite_preview", "_wbs_stage3_rewrite_origin", "_wbs_stage3_rewrite_target"):
                         st.session_state.pop(_key, None)
                     st.rerun()
-
-    if st.session_state.get("_wbs_stage3_manuscript_rewrite_notice"):
-        st.success(st.session_state.pop("_wbs_stage3_manuscript_rewrite_notice"))
-    # Review all approved manuscript scenes before leaving Plot Architecture.
-    # This is an inspection and in-place checkpoint, never a new version.
-    _preview_scene_blocks = st.session_state.get("scene_blocks") or {}
-    _preview_scenes = []
-    if isinstance(_preview_scene_blocks, dict):
-        for _scene_key, _scene_value in sorted(_preview_scene_blocks.items(), key=lambda kv: int(kv[0])):
-            _scene_text = str(_scene_value or "").strip()
-            if _scene_text:
-                _preview_scenes.append((int(_scene_key), _scene_text))
-    if _preview_scenes:
-        st.markdown("---")
-        st.subheader("Final Working Manuscript Preview")
-        st.caption("Review all scenes together before saving Plot Architecture. This preview uses the accepted working manuscript; no AI generation.")
-        _preview_complete_text = "\n\n".join(_text for _, _text in _preview_scenes)
-        for _scene_id, _scene_text in _preview_scenes:
-            st.markdown(f"**Scene {_scene_id}**")
-            for _paragraph in re.split(r"\n\s*\n", _scene_text):
-                if _paragraph.strip():
-                    st.write(_paragraph.strip())
-        _original_full_draft = str(st.session_state.get("current_draft_output") or "").strip()
-        if _original_full_draft != _preview_complete_text:
-            st.warning("The working manuscript and scene list do not match. Saving is blocked to avoid losing accepted edits.")
-        elif st.button("💾 Save Working Manuscript to Current Revision", key="_wbs_stage3_save_existing_revision", use_container_width=True, disabled=bool(st.session_state.get("demo_mode"))):
-            _row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "").strip()
-            _project_id = get_active_project_id()
-            _user_id = get_current_user_id()
-            if not _row_id or not _project_id or not _user_id:
-                st.error("Cannot identify the exact current saved revision. No record changed.")
-            else:
-                try:
-                    _query = (supabase.table("writersblock_project_drafts")
-                        .select("id, draft_content")
-                        .eq("id", _row_id)
-                        .eq("project_id", _project_id)
-                        .eq("user_id", _user_id)
-                        .eq("draft_type", "project_session")
-                        .limit(1).execute())
-                    _rows = getattr(_query, "data", None) or []
-                    if not _rows:
-                        st.error("The selected saved revision was not found. No record changed.")
-                    else:
-                        _snapshot = json.loads(_rows[0].get("draft_content") or "{}")
-                        if not isinstance(_snapshot, dict):
-                            raise ValueError("The existing revision data is invalid")
-                        _previous_text = str(_snapshot.get("current_draft_output") or "").strip()
-                        _previous_blocks = _snapshot.get("scene_blocks") or {}
-                        _new_blocks = {str(_n): _text for _n, _text in _preview_scenes}
-                        if _previous_text == _preview_complete_text and _previous_blocks == _new_blocks:
-                            st.info("Current revision already contains these scenes. No changes or new version created.")
-                        else:
-                            _snapshot["current_draft_output"] = _preview_complete_text
-                            _snapshot["scene_blocks"] = _new_blocks
-                            # Any previous integrity report applied to different prose is no longer current.
-                            _snapshot.pop("project_integrity_report", None)
-                            _snapshot.pop("project_integrity_source_signature", None)
-                            _snapshot.pop("project_integrity_status", None)
-                            _updated = (supabase.table("writersblock_project_drafts")
-                                .update({"draft_content": json.dumps(_snapshot)})
-                                .eq("id", _row_id)
-                                .eq("project_id", _project_id)
-                                .eq("user_id", _user_id)
-                                .eq("draft_type", "project_session")
-                                .execute())
-                            if not getattr(_updated, "data", None):
-                                raise RuntimeError("The database did not confirm the update")
-                            st.session_state.current_draft_output = _preview_complete_text
-                            st.session_state.pop("project_integrity_report", None)
-                            st.session_state.pop("project_integrity_source_signature", None)
-                            st.session_state.pop("project_integrity_status", None)
-                            st.success("Working manuscript saved to the existing revision. No new version created.")
-                except Exception as _save_exc:
-                    st.error(f"Manuscript was not saved: {_save_exc}")
 
     st.markdown("---")
     st.caption("Save and continue. Unchanged storylines retain their existing version number.")
@@ -10780,9 +9052,6 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             wbs_clear_new_project_ui_state()
             st.session_state.project_title = ""
             st.session_state.current_project_id = None
-            for _key in ("_wbs_loaded_project_id", "_wbs_loaded_project_title", "_wbs_loaded_saved_session_id",
-                         "_wbs_loaded_manuscript_version_id", "wbs_locked_format_id", "_wbs_locked_project_id"):
-                st.session_state.pop(_key, None)
             st.session_state.project_version_name = "Original"
             st.session_state.project_stage = "Intake"
             st.session_state.project_scope = "Standalone Book"
@@ -11490,7 +9759,7 @@ elif st.session_state.project_stage == "Rewrite Engine":
                 else:
                     st.session_state.rewrite_applied_message = (
                         st.session_state.rewrite_applied_message
-                        + " Project session was not saved automatically. Use Save Project Changes As A New Version before leaving."
+                        + " Project session was not saved automatically. Use Save Project before leaving."
                     )
 
                 wbs_request_stage_change("Isolation Guardrail", export_view=True)
