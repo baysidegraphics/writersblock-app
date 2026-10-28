@@ -7401,6 +7401,26 @@ def wbs_request_stage_change(destination, export_view=None):
             "Use Rename Project to change the title before moving to another stage."
         )
         return
+    # Universal review navigation: moving among already developed stages is
+    # read-only navigation, not permission to discard pending writer edits.
+    # A missing save baseline is not proof that the current work is saved.
+    if wbs_has_saved_master() is not True or wbs_work_has_changed() is not False:
+        st.warning("Save Current Stage before leaving. Unsaved changes are preserved.")
+        return
+    # Never unlock a future stage through direct navigation.
+    review_levels = {"Intake": 1, "Sandbox": 2, "Plot Architect": 3,
+                     "Drafting Engine": 4, "Isolation Guardrail": 4,
+                     "Revision Engine": 4, "Rewrite Engine": 4}
+    target_level = 5 if destination == "Isolation Guardrail" and target_export else review_levels.get(destination, 99)
+    unlocked = int(st.session_state.get("_wbs_unlocked_saved_stage") or 1)
+    available = {1: True,
+                 2: st.session_state.get("sandbox_slates") is not None or unlocked >= 2,
+                 3: st.session_state.get("chosen_option") is not None or unlocked >= 3,
+                 4: bool(st.session_state.get("plot_outline")) or bool(st.session_state.get("current_draft_output")) or unlocked >= 4,
+                 5: bool(st.session_state.get("final_output_text")) or bool(st.session_state.get("export_view")) or unlocked >= 5}
+    if target_level > unlocked and not available.get(target_level, False):
+        st.warning("This stage has not been developed yet.")
+        return
     st.session_state["wbs_pending_stage_change"] = {
         "target": destination, "export_view": target_export,
         "source": current, "source_export_view": current_export,
@@ -7413,25 +7433,8 @@ def wbs_complete_stage_change():
         return
     target = pending["target"]
     previous = pending["source"]
-    # Clear downstream work only AFTER the source stage has been saved or
-    # the writer explicitly chose to continue without saving.
-    if (previous == "Intake" and target == "Sandbox"
-            and not st.session_state.get("_wbs_unlocked_saved_stage")):
-        st.session_state.chosen_option = None
-        st.session_state.chosen_option_text = None
-        st.session_state.plot_outline = None
-        st.session_state.current_draft_output = ""
-        st.session_state.rolling_lore_book = ""
-        st.session_state.completed_beats = []
-        st.session_state.scene_blocks = {}
-        st.session_state.current_processing_beat = 1
-    if (previous == "Plot Architect" and target == "Drafting Engine"
-            and not st.session_state.get("_wbs_unlocked_saved_stage")):
-        st.session_state.current_draft_output = ""
-        st.session_state.rolling_lore_book = ""
-        st.session_state.completed_beats = []
-        st.session_state.scene_blocks = {}
-        st.session_state.current_processing_beat = 1
+    # Review navigation must not clear or regenerate any developed content.
+    # Downstream invalidation belongs to an explicit edit/generation action.
     st.session_state.project_stage = target
     if target == "Isolation Guardrail":
         st.session_state.export_view = bool(pending["export_view"])
