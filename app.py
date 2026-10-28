@@ -1208,6 +1208,8 @@ def _wbs_restore_missing_concept_fields(saved_snapshot, project_id, as_of=None):
 
 def load_saved_project_session_to_state(saved_session_row):
     st.session_state.pop("_wbs_stage1_continue_approval", None)
+    st.session_state.pop("_wbs_stage2_choose_new", None)
+    st.session_state.pop("_wbs_stage2_pending_path", None)
     if not saved_session_row:
         st.warning("No saved project session found.")
         return False
@@ -8679,72 +8681,92 @@ elif st.session_state.project_stage == "Sandbox":
             ("Option B", "Twisted Perspective", "A stranger version with a hidden truth or reversal."),
             ("Option C", "High-Impact Version", "A faster, more intense story path."),
         )
-        _wbs_stage2_cols = st.columns(3)
-        for _wbs_stage2_col, (_wbs_opt, _wbs_name, _wbs_subtitle) in zip(_wbs_stage2_cols, _wbs_stage2_options):
-            with _wbs_stage2_col:
-                st.subheader(f"{_wbs_opt}: {_wbs_name}")
-                st.markdown(f"*{_wbs_subtitle}*")
-                st.info(sandbox_slates.get(_wbs_opt, ""))
-                if st.button(f"Select Path {_wbs_opt[-1]} 🎯", key=f"wbs_stage2_select_{_wbs_opt[-1]}", use_container_width=True,
-                             type="primary" if st.session_state.get("_wbs_stage2_pending_path") == _wbs_opt else "secondary"):
-                    # Only explicit selection sets a pending choice. Saved paths are untouched.
-                    st.session_state["_wbs_stage2_pending_path"] = _wbs_opt
-                    st.session_state.pop("_wbs_stage2_saved_path_approval", None)
+        # Stage 2: a verified saved choice is shown alone. Legacy records with
+        # missing selection remain visibly unverified; never infer the choice.
+        _wbs_choice = str(st.session_state.get("chosen_option") or "").split(":", 1)[0].strip()
+        _wbs_text = str(st.session_state.get("chosen_option_text") or "")
+        _wbs_valid = (_wbs_choice in ("Option A", "Option B", "Option C")
+                      and bool(_wbs_text.strip())
+                      and _wbs_text == str(sandbox_slates.get(_wbs_choice) or ""))
+        _wbs_review = bool(_wbs_valid and st.session_state.get("_wbs_active_saved_session_row_id")
+                           and not st.session_state.get("_wbs_stage2_choose_new"))
+        if _wbs_review:
+            st.success(f"Saved selection: {_wbs_choice}")
+            st.markdown(f"### {_wbs_choice}")
+            st.info(_wbs_text)
+            _wbs_next, _wbs_new = st.columns(2, gap="small")
+            with _wbs_next:
+                if st.button("Continue to Stage 3", key="wbs_stage2_saved_continue", type="primary", use_container_width=True):
+                    # Saved outline is displayed by Stage 3 unchanged; missing
+                    # outline follows the existing explicit development path.
+                    wbs_request_stage_change("Plot Architect")
+            with _wbs_new:
+                if st.button("Select a New Plot", key="wbs_stage2_choose_new", use_container_width=True):
+                    st.session_state["_wbs_stage2_choose_new"] = True
+                    st.session_state.pop("_wbs_stage2_pending_path", None)
                     st.rerun()
-        _wbs_pending = st.session_state.get("_wbs_stage2_pending_path")
-        _wbs_selected = str(st.session_state.get("chosen_option") or "")
-        _wbs_selected_key = _wbs_selected.split(":", 1)[0] if _wbs_selected else ""
-        if _wbs_pending:
-            st.caption(f"Selected for review: {_wbs_pending}. No saved path changes until you click Save.")
-        elif _wbs_selected_key in ("Option A", "Option B", "Option C"):
-            st.caption(f"Current saved selection: {_wbs_selected_key}. No changes have been made.")
         else:
-            st.caption("Select a path to continue. Reviewing this page does not modify saved work.")
-        st.markdown("---")
-        _wbs_save_col, _wbs_develop_col = st.columns(2, gap="small")
-        _wbs_stage2_approved = st.session_state.get("_wbs_stage2_saved_path_approval")
-        _wbs_stage2_expected = (str(get_active_project_id() or ""), _wbs_selected_key,
-                                str(st.session_state.get("_wbs_last_saved_work_signature") or ""))
-        _wbs_stage2_ready = bool(_wbs_stage2_approved == _wbs_stage2_expected and _wbs_selected_key)
-        with _wbs_save_col:
-            _wbs_save_stage2 = st.button("Save And/Or Continue To Next Stage", key="wbs_stage2_save_continue",
-                                          type="secondary" if _wbs_stage2_ready else "primary", use_container_width=True)
-        if _wbs_save_stage2:
-            _wbs_choice = st.session_state.get("_wbs_stage2_pending_path")
-            if _wbs_choice:
-                _wbs_new_title = next((f"{key}: {name}" for key, name, _ in _wbs_stage2_options if key == _wbs_choice), None)
-                if _wbs_new_title:
-                    _wbs_new_text = sandbox_slates.get(_wbs_choice, "")
-                    _wbs_changed_choice = (_wbs_new_title != st.session_state.get("chosen_option") or
-                                           _wbs_new_text != st.session_state.get("chosen_option_text"))
-                    st.session_state.chosen_option = _wbs_new_title
-                    st.session_state.chosen_option_text = _wbs_new_text
-                    if _wbs_changed_choice:
-                        st.session_state.plot_outline = None
-                st.session_state.pop("_wbs_stage2_pending_path", None)
-            _wbs_changed = wbs_work_has_changed()
-            if _wbs_changed is None:
-                st.error("Cannot verify saved version. Reload the selected saved project before continuing.")
-                st.stop()
-            if _wbs_changed:
-                _wbs_saved = save_current_project_session_to_supabase()
-                if not _wbs_saved:
-                    st.error("Stage 2 save was not confirmed. No advancement authorized.")
+            if st.session_state.get("_wbs_active_saved_session_row_id") and not _wbs_valid:
+                st.warning("Original selection was not saved in this revision. All three paths are shown; no original choice is assumed.")
+            if st.session_state.get("_wbs_stage2_choose_new"):
+                st.info("Choose another path. The original saved revision will remain unchanged.")
+            _wbs_cols = st.columns(3)
+            for _wbs_col, (_wbs_opt, _wbs_name, _wbs_subtitle) in zip(_wbs_cols, _wbs_stage2_options):
+                with _wbs_col:
+                    st.subheader(f"{_wbs_opt}: {_wbs_name}")
+                    st.markdown(f"*{_wbs_subtitle}*")
+                    st.info(sandbox_slates.get(_wbs_opt, ""))
+                    if st.button(f"Select Path {_wbs_opt[-1]}", key=f"wbs_stage2_select_{_wbs_opt[-1]}",
+                                 type="primary" if st.session_state.get("_wbs_stage2_pending_path") == _wbs_opt else "secondary",
+                                 use_container_width=True):
+                        st.session_state["_wbs_stage2_pending_path"] = _wbs_opt
+                        st.rerun()
+            _wbs_pending = st.session_state.get("_wbs_stage2_pending_path")
+            if _wbs_pending:
+                st.caption(f"Selected: {_wbs_pending}. Save to create a new revision.")
+            else:
+                st.caption("Select A, B, or C before saving. No saved work changes during review.")
+            st.markdown("---")
+            if st.button("Save Selected Path", key="wbs_stage2_save_selected", type="primary",
+                         disabled=not bool(_wbs_pending), use_container_width=True):
+                _wbs_selected_text = str(sandbox_slates.get(_wbs_pending) or "")
+                if not _wbs_selected_text.strip():
+                    st.error("Selected path has no text; nothing was saved.")
                     st.stop()
-            _wbs_selected_key = str(st.session_state.get("chosen_option") or "").split(":", 1)[0]
-            st.session_state["_wbs_stage2_saved_path_approval"] = (
-                str(get_active_project_id() or ""), _wbs_selected_key,
-                str(st.session_state.get("_wbs_last_saved_work_signature") or ""))
-            st.session_state["_wbs_unlocked_saved_stage"] = max(int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 3)
-            st.rerun()
-        with _wbs_develop_col:
-            _wbs_develop_stage2 = st.button("Develop Plot Architecture", key="wbs_stage2_develop_plot",
-                                             type="primary" if _wbs_stage2_ready else "secondary",
-                                             disabled=not _wbs_stage2_ready, use_container_width=True)
-        if _wbs_develop_stage2:
-            require_product_access("plot")
-            # No automatic re-selection or regeneration of saved paths.
-            wbs_request_stage_change("Plot Architect")
+                _wbs_title = next(f"{key}: {name}" for key, name, _ in _wbs_stage2_options if key == _wbs_pending)
+                st.session_state.chosen_option = _wbs_title
+                st.session_state.chosen_option_text = _wbs_selected_text
+                # Changing the selected direction invalidates downstream work
+                # in the NEW revision only; older revisions remain untouched.
+                st.session_state.plot_outline = None
+                st.session_state.current_draft_output = None
+                st.session_state.rewritten_manuscript = None
+                st.session_state.final_output_text = None
+                _wbs_result = save_current_project_session_to_supabase()
+                if not _wbs_result or getattr(_wbs_result, "unchanged", False):
+                    st.error("New path revision was not confirmed. Reload before continuing.")
+                    st.stop()
+                _wbs_row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
+                try:
+                    _wbs_rows = (supabase.table("writersblock_project_drafts")
+                                 .select("id, project_id, draft_content")
+                                 .eq("id", _wbs_row_id)
+                                 .eq("project_id", get_active_project_id())
+                                 .eq("user_id", get_current_user_id())
+                                 .eq("draft_type", "project_session").limit(1).execute()).data or []
+                    _wbs_verified = json.loads(_wbs_rows[0]["draft_content"]) if len(_wbs_rows) == 1 else {}
+                except Exception as _wbs_exc:
+                    st.error(f"Path was inserted but could not be verified: {_wbs_exc}. Do not advance.")
+                    st.stop()
+                if (_wbs_verified.get("chosen_option") != _wbs_title
+                        or _wbs_verified.get("chosen_option_text") != _wbs_selected_text):
+                    st.error("Saved revision does not contain the exact selected path. Do not advance.")
+                    st.stop()
+                st.session_state.pop("_wbs_stage2_pending_path", None)
+                st.session_state.pop("_wbs_stage2_choose_new", None)
+                st.session_state["_wbs_unlocked_saved_stage"] = max(
+                    int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 3)
+                st.rerun()
 
 # ==========================================
 # PHASE 3: PLOT ARCHITECT ENGINE
