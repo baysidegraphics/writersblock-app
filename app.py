@@ -6367,41 +6367,36 @@ def wbs_can_generate_first_paths_for_saved_concept():
     if has_downstream_content(st.session_state):
         return False, "This project already contains downstream writing. No paths were regenerated."
 
+    # Check ONLY the explicitly loaded immutable project-session revision.
+    # Other revisions may contain paths, drafts or manuscripts; their existence
+    # must never block development of this selected concept-only revision.
+    row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
     try:
-        manuscripts = (supabase.table("writersblock_manuscript_versions")
-                       .select("id").eq("project_id", project_id)
-                       .eq("user_id", user_id).limit(1).execute())
-        if getattr(manuscripts, "data", None):
-            return False, "This project has saved manuscript versions; existing work was protected."
-        draft_rows = (supabase.table("writersblock_project_drafts")
-                      .select("id,draft_type,draft_content").eq("project_id", project_id)
-                      .eq("user_id", user_id).limit(101).execute())
-        rows = getattr(draft_rows, "data", None)
-        if not isinstance(rows, list) or not rows or len(rows) >= 101:
-            return False, "Saved project history is incomplete or too large to verify safely."
-        found_active = False
-        for row in rows:
-            kind = str(row.get("draft_type") or "")
-            if kind == "series_metadata":
-                continue
-            if kind != "project_session":
-                return False, "This project has other saved writing stages; no paths were generated."
-            if str(row.get("id") or "") == str(st.session_state.get("_wbs_active_saved_session_row_id")):
-                found_active = True
-            snap = json.loads(row.get("draft_content") or "{}")
-            if not isinstance(snap, dict):
-                return False, "The project history contains an invalid saved record."
-            if (str(snap.get("current_project_id") or project_id) != project_id
-                    or str(snap.get("active_format_id") or "") != format_id
-                    or str(snap.get("project_stage") or "Intake") != "Intake"
-                    or has_downstream_content(snap)):
-                return False, "An earlier saved version contains different or downstream work."
-        if not found_active:
-            return False, "The selected saved version is missing from this project's history."
+        result = (supabase.table("writersblock_project_drafts")
+                  .select("id,project_id,user_id,draft_type,draft_content")
+                  .eq("id", row_id).eq("project_id", project_id)
+                  .eq("user_id", user_id).eq("draft_type", "project_session")
+                  .limit(1).execute())
+        rows = getattr(result, "data", None) or []
+        if len(rows) != 1:
+            return False, "The exact selected saved revision could not be verified."
+        snap = json.loads(rows[0].get("draft_content") or "{}")
+        if not isinstance(snap, dict):
+            return False, "The selected revision contains invalid saved data."
+        if (str(snap.get("current_project_id") or project_id) != project_id
+                or str(snap.get("active_format_id") or "") != format_id):
+            return False, "The selected revision's project or format does not match."
+        if str(snap.get("project_stage") or "Intake") != "Intake":
+            return False, "The selected revision is not a Concept Development checkpoint."
+        if has_downstream_content(snap):
+            return False, "This selected revision already contains downstream writing; it was preserved."
+        # Never generate against unsaved changes or a different revision.
+        if wbs_work_has_changed() is not False:
+            return False, "The selected concept has unsaved changes. Save them first."
     except (ValueError, TypeError, AttributeError, KeyError):
-        return False, "Saved project history could not be checked safely. No work was changed."
+        return False, "The selected revision could not be checked safely."
     except Exception:
-        return False, "Database history could not be verified. No paths were generated."
+        return False, "The database could not verify the selected revision."
     return True, ""
 
 
