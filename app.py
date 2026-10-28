@@ -8397,16 +8397,19 @@ if st.session_state.project_stage == "Intake":
             render_format_template_save_reminder()
         else:
             st.markdown("---")
-            # Universal Stage 1: one action saves pending work (if any) and
-            # advances to Scripting without regenerating existing story paths.
+            # Universal Stage 1: save/approve first, then enable the separate
+            # format-specific Develop Paths button to generate and enter Stage 2.
             _ss_master = wbs_has_saved_master()
             _ss_changed = wbs_work_has_changed() if _ss_master is True else True
-            if st.button(
+            _wbs_stage1_save_col, _wbs_stage1_develop_col = st.columns(2, gap="small")
+            with _wbs_stage1_save_col:
+                _wbs_stage1_save_clicked = st.button(
                 "Save And/Or Continue To Next Stage",
                 key="wbs_stage1_save_or_continue",
                 use_container_width=True,
                 type="primary",
-            ):
+            )
+            if _wbs_stage1_save_clicked:
                 if _ss_master is not True or _ss_changed is not False:
                     _ss_result = save_current_project_session_to_supabase()
                     if not _ss_result:
@@ -8419,7 +8422,8 @@ if st.session_state.project_stage == "Intake":
                 st.session_state["_wbs_unlocked_saved_stage"] = max(
                     int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 2
                 )
-                st.session_state.project_stage = "Sandbox"
+                # Stage 1 checkpoint only: unlock the development button below.
+                # The user explicitly chooses when to generate paths and enter Stage 2.
                 st.rerun()
             _ss_approval = st.session_state.get("_wbs_stage1_continue_approval")
             _ss_expected = (
@@ -8446,13 +8450,15 @@ if st.session_state.project_stage == "Intake":
             if _wbs_has_saved_paths
             else str(concept_ui.get("button_label") or "Develop Project Paths 🚀")
         )
-        if st.button(
-            _wbs_paths_button_label,
-            key="generate_sandbox_paths",
-            type="primary",
-            use_container_width=True,
-            disabled=(_wbs_short_story_stage1 and not _ss_can_continue),
-        ):
+        with _wbs_stage1_develop_col:
+            _wbs_develop_clicked = st.button(
+                _wbs_paths_button_label,
+                key="generate_sandbox_paths",
+                type="primary",
+                use_container_width=True,
+                disabled=(_wbs_short_story_stage1 and not _ss_can_continue),
+            )
+        if _wbs_develop_clicked:
             if _wbs_has_saved_paths:
                 # Reuse only paths that match the currently saved snapshot.
                 # In particular, after a failed write, keep the generated paths
