@@ -7702,12 +7702,13 @@ if st.session_state.project_stage == "Intake":
     with writer_main_col:
         st.header("🗺️ Step 1: Concept Development")
 
-        st.markdown("### Writing Format")
         current_format_id = str(
             st.session_state.get("active_format_id") or "novel_prose_novella"
         )
         if current_format_id not in WBS_FORMAT_IDS:
             current_format_id = "novel_prose_novella"
+
+        st.markdown(f"### Writing Format — {get_wbs_format_display_name(current_format_id)}")
 
         # Initialize the dropdown only when the widget has no saved value.
         # Streamlit updates its keyed value BEFORE rerunning the script when a writer
@@ -7756,7 +7757,7 @@ if st.session_state.project_stage == "Intake":
              if format_id == st.session_state.get("active_format_id")),
             "Project",
         )
-        _project_title_label = "Project Title/Revision"
+        _project_title_label = f"{_format_title_prefix} / Project Title/Revision"
 
         if get_active_project_id():
             st.caption("Loaded saved project — saved Concept Development choices are restored where recorded.")
