@@ -8407,7 +8407,11 @@ if st.session_state.project_stage == "Intake":
                 "Save And/Or Continue To Next Stage",
                 key="wbs_stage1_save_or_continue",
                 use_container_width=True,
-                type="primary",
+                type="secondary" if st.session_state.get("_wbs_stage1_continue_approval") == (
+                    str(get_active_project_id() or ""),
+                    str(st.session_state.get("active_format_id") or ""),
+                    str(st.session_state.get("_wbs_last_saved_work_signature") or ""),
+                ) else "primary",
             )
             if _wbs_stage1_save_clicked:
                 if _ss_master is not True or _ss_changed is not False:
@@ -8454,7 +8458,7 @@ if st.session_state.project_stage == "Intake":
             _wbs_develop_clicked = st.button(
                 _wbs_paths_button_label,
                 key="generate_sandbox_paths",
-                type="primary",
+                type="primary" if _ss_can_continue else "secondary",
                 use_container_width=True,
                 disabled=(_wbs_short_story_stage1 and not _ss_can_continue),
             )
