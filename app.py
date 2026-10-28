@@ -5198,32 +5198,17 @@ def render_save_open_project_to_series():
 
 
 def render_project_title_banner(stage_key):
-    """
-    Prominent Current Project banner plus database-safe rename control.
-    Render this once near the top of each workflow stage.
-    """
+    """Universal format-aware title/revision; series assignment unchanged."""
     current_title = get_project_title_for_display()
-    project_id = str(get_active_project_id() or "new")
-    safe_stage = re.sub(r"[^A-Za-z0-9_-]+", "_", str(stage_key or "stage"))
-
-    with st.container(border=True):
-        st.markdown("### 📘 CURRENT PROJECT")
-        st.markdown(f"## {current_title}")
-
-        if (
-            st.session_state.get("project_stage") != "Intake"
-            and (st.session_state.get("licensed_mode") or st.session_state.get("demo_mode"))
-        ):
-            render_quill_for_current_stage(st_module=st, show_prelude=True)
-
-        if st.session_state.get("demo_mode"):
-            st.caption(
-                "Project rename/save is a full Writer Edition feature. "
-                "The current title remains visible during the trial."
-            )
-            return
-
-        render_confirmed_project_rename(stage_key)
+    format_name = str(st.session_state.get("format_type") or st.session_state.get("active_format_id") or "Project")
+    revision = str(globals().get("_active_version_number") or st.session_state.get("current_version_number") or "").strip()
+    # Match the active saved revision displayed in Project Status.
+    revision_display = revision if revision.upper().startswith("V-") else ("V-" + revision if revision.isdigit() else "")
+    st.markdown(f"**{format_name} / Project Title/Revision**")
+    st.text_input("Project Title/Revision", value=(current_title + (" — " + revision_display if revision_display and revision_display not in current_title else "")), disabled=True, label_visibility="collapsed", key=f"wbs_stage_title_{stage_key}")
+    if st.session_state.get("project_stage") != "Intake" and (st.session_state.get("licensed_mode") or st.session_state.get("demo_mode")):
+        render_quill_for_current_stage(st_module=st, show_prelude=True)
+    if not st.session_state.get("demo_mode"):
         render_save_open_project_to_series()
 
 
@@ -8654,6 +8639,15 @@ if st.session_state.project_stage == "Intake":
                     )
 
 
+                # Persist generated Stage 2 paths to the launched project's
+                # session snapshot before leaving Concept Development. A saved
+                # version must restore the actual generated paths, not rerun AI.
+                paths_checkpoint = save_current_project_session_to_supabase(
+                    version_name="First Scripting Paths", save_as_new_version=False,
+                )
+                if not paths_checkpoint:
+                    st.error("Generated paths were not saved. Stage 2 was not opened. Retry saving without regenerating.")
+                    st.stop()
                 st.session_state.project_saved_notice = True
                 wbs_request_stage_change("Sandbox")
 
@@ -8675,120 +8669,87 @@ elif st.session_state.project_stage == "Sandbox":
     st.header("🗺️ Step 2: Scripting")
     render_project_title_banner("step_2_scripting")
     st.markdown("##### Shape the first working script paths from your concept.")
-    st.caption(
-        f"Dialogue Style: {get_dialogue_style_display()} — inherited from Concept Development. "
-        "Project type controls dialogue formatting."
-    )
+    st.caption(f"Dialogue Style: {get_dialogue_style_display()} — inherited from Concept Development. Project type controls dialogue formatting.")
     st.markdown("---")
-
     if st.session_state.get("project_saved_notice"):
         st.session_state.project_saved_notice = False
-
     sandbox_slates = st.session_state.get("sandbox_slates", {})
-
     if not sandbox_slates:
         st.warning("No story paths are available yet. Return to Concept Development and generate story paths first.")
     else:
         if sandbox_slates.get("is_fallback", False):
             st.warning("AI connection issue detected. Temporary local story paths are being shown.")
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            st.subheader("Option A: Classic Structure")
-            st.markdown("*A clear, traditional story path.*")
-            st.info(sandbox_slates.get("Option A", ""))
-
-            if st.button("Select Path A 🎯", key="btn_a", type="primary", use_container_width=True):
-                require_product_access("plot")
-
-                _wbs_same_saved_path = (
-                    st.session_state.get("chosen_option") == "Option A: Classic Structure"
-                    and st.session_state.get("chosen_option_text") == sandbox_slates.get("Option A", "")
-                    and st.session_state.get("plot_outline") is not None
-                )
-                st.session_state.chosen_option = "Option A: Classic Structure"
-                st.session_state.chosen_option_text = sandbox_slates.get("Option A", "")
-
-                active_project_id = get_active_project_id()
-
-                if active_project_id:
-                    supabase.table("writersblock_project_drafts").insert({
-                        "project_id": active_project_id,
-                        "user_id": get_current_user_id(),
-                        "draft_title": "Option A: Classic Structure",
-                        "draft_type": "sandbox_option",
-                        "draft_content": st.session_state.chosen_option_text,
-                        "version_number": 1,
-                    }).execute()
-
-                if not _wbs_same_saved_path:
-                    st.session_state.plot_outline = None
-                wbs_request_stage_change("Plot Architect")
-
-        with col2:
-            st.subheader("Option B: Twisted Perspective")
-            st.markdown("*A stranger version with a hidden truth or reversal.*")
-            st.info(sandbox_slates.get("Option B", ""))
-
-            if st.button("Select Path B 🎯", key="btn_b", type="primary", use_container_width=True):
-                require_product_access("plot")
-
-                _wbs_same_saved_path = (
-                    st.session_state.get("chosen_option") == "Option B: Twisted Perspective"
-                    and st.session_state.get("chosen_option_text") == sandbox_slates.get("Option B", "")
-                    and st.session_state.get("plot_outline") is not None
-                )
-                st.session_state.chosen_option = "Option B: Twisted Perspective"
-                st.session_state.chosen_option_text = sandbox_slates.get("Option B", "")
-
-                active_project_id = get_active_project_id()
-
-                if active_project_id:
-                    supabase.table("writersblock_project_drafts").insert({
-                        "project_id": active_project_id,
-                        "user_id": get_current_user_id(),
-                        "draft_title": "Option B: Twisted Perspective",
-                        "draft_type": "sandbox_option",
-                        "draft_content": st.session_state.chosen_option_text,
-                        "version_number": 1,
-                    }).execute()
-
-                if not _wbs_same_saved_path:
-                    st.session_state.plot_outline = None
-                wbs_request_stage_change("Plot Architect")
-
-        with col3:
-            st.subheader("Option C: High-Impact Version")
-            st.markdown("*A faster, more intense story path.*")
-            st.info(sandbox_slates.get("Option C", ""))
-
-            if st.button("Select Path C 🎯", key="btn_c", type="primary", use_container_width=True):
-                require_product_access("plot")
-
-                _wbs_same_saved_path = (
-                    st.session_state.get("chosen_option") == "Option C: High-Impact Version"
-                    and st.session_state.get("chosen_option_text") == sandbox_slates.get("Option C", "")
-                    and st.session_state.get("plot_outline") is not None
-                )
-                st.session_state.chosen_option = "Option C: High-Impact Version"
-                st.session_state.chosen_option_text = sandbox_slates.get("Option C", "")
-
-                active_project_id = get_active_project_id()
-
-                if active_project_id:
-                    supabase.table("writersblock_project_drafts").insert({
-                        "project_id": active_project_id,
-                        "user_id": get_current_user_id(),
-                        "draft_title": "Option C: High-Impact Version",
-                        "draft_type": "sandbox_option",
-                        "draft_content": st.session_state.chosen_option_text,
-                        "version_number": 1,
-                    }).execute()
-
-                if not _wbs_same_saved_path:
-                    st.session_state.plot_outline = None
-                wbs_request_stage_change("Plot Architect")
+        _wbs_stage2_options = (
+            ("Option A", "Classic Structure", "A clear, traditional story path."),
+            ("Option B", "Twisted Perspective", "A stranger version with a hidden truth or reversal."),
+            ("Option C", "High-Impact Version", "A faster, more intense story path."),
+        )
+        _wbs_stage2_cols = st.columns(3)
+        for _wbs_stage2_col, (_wbs_opt, _wbs_name, _wbs_subtitle) in zip(_wbs_stage2_cols, _wbs_stage2_options):
+            with _wbs_stage2_col:
+                st.subheader(f"{_wbs_opt}: {_wbs_name}")
+                st.markdown(f"*{_wbs_subtitle}*")
+                st.info(sandbox_slates.get(_wbs_opt, ""))
+                if st.button(f"Select Path {_wbs_opt[-1]} 🎯", key=f"wbs_stage2_select_{_wbs_opt[-1]}", use_container_width=True,
+                             type="primary" if st.session_state.get("_wbs_stage2_pending_path") == _wbs_opt else "secondary"):
+                    # Only explicit selection sets a pending choice. Saved paths are untouched.
+                    st.session_state["_wbs_stage2_pending_path"] = _wbs_opt
+                    st.session_state.pop("_wbs_stage2_saved_path_approval", None)
+                    st.rerun()
+        _wbs_pending = st.session_state.get("_wbs_stage2_pending_path")
+        _wbs_selected = str(st.session_state.get("chosen_option") or "")
+        _wbs_selected_key = _wbs_selected.split(":", 1)[0] if _wbs_selected else ""
+        if _wbs_pending:
+            st.caption(f"Selected for review: {_wbs_pending}. No saved path changes until you click Save.")
+        elif _wbs_selected_key in ("Option A", "Option B", "Option C"):
+            st.caption(f"Current saved selection: {_wbs_selected_key}. No changes have been made.")
+        else:
+            st.caption("Select a path to continue. Reviewing this page does not modify saved work.")
+        st.markdown("---")
+        _wbs_save_col, _wbs_develop_col = st.columns(2, gap="small")
+        _wbs_stage2_approved = st.session_state.get("_wbs_stage2_saved_path_approval")
+        _wbs_stage2_expected = (str(get_active_project_id() or ""), _wbs_selected_key,
+                                str(st.session_state.get("_wbs_last_saved_work_signature") or ""))
+        _wbs_stage2_ready = bool(_wbs_stage2_approved == _wbs_stage2_expected and _wbs_selected_key)
+        with _wbs_save_col:
+            _wbs_save_stage2 = st.button("Save And/Or Continue To Next Stage", key="wbs_stage2_save_continue",
+                                          type="secondary" if _wbs_stage2_ready else "primary", use_container_width=True)
+        if _wbs_save_stage2:
+            _wbs_choice = st.session_state.get("_wbs_stage2_pending_path")
+            if _wbs_choice:
+                _wbs_new_title = next((f"{key}: {name}" for key, name, _ in _wbs_stage2_options if key == _wbs_choice), None)
+                if _wbs_new_title:
+                    _wbs_new_text = sandbox_slates.get(_wbs_choice, "")
+                    _wbs_changed_choice = (_wbs_new_title != st.session_state.get("chosen_option") or
+                                           _wbs_new_text != st.session_state.get("chosen_option_text"))
+                    st.session_state.chosen_option = _wbs_new_title
+                    st.session_state.chosen_option_text = _wbs_new_text
+                    if _wbs_changed_choice:
+                        st.session_state.plot_outline = None
+                st.session_state.pop("_wbs_stage2_pending_path", None)
+            _wbs_changed = wbs_work_has_changed()
+            if _wbs_changed is None:
+                st.error("Cannot verify saved version. Reload the selected saved project before continuing.")
+                st.stop()
+            if _wbs_changed:
+                _wbs_saved = save_current_project_session_to_supabase()
+                if not _wbs_saved:
+                    st.error("Stage 2 save was not confirmed. No advancement authorized.")
+                    st.stop()
+            _wbs_selected_key = str(st.session_state.get("chosen_option") or "").split(":", 1)[0]
+            st.session_state["_wbs_stage2_saved_path_approval"] = (
+                str(get_active_project_id() or ""), _wbs_selected_key,
+                str(st.session_state.get("_wbs_last_saved_work_signature") or ""))
+            st.session_state["_wbs_unlocked_saved_stage"] = max(int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 3)
+            st.rerun()
+        with _wbs_develop_col:
+            _wbs_develop_stage2 = st.button("Develop Plot Architecture", key="wbs_stage2_develop_plot",
+                                             type="primary" if _wbs_stage2_ready else "secondary",
+                                             disabled=not _wbs_stage2_ready, use_container_width=True)
+        if _wbs_develop_stage2:
+            require_product_access("plot")
+            # No automatic re-selection or regeneration of saved paths.
+            wbs_request_stage_change("Plot Architect")
 
 # ==========================================
 # PHASE 3: PLOT ARCHITECT ENGINE
