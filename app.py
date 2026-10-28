@@ -7760,26 +7760,6 @@ if st.session_state.project_stage == "Intake":
 
         if get_active_project_id():
             st.caption("Loaded saved project — saved Concept Development choices are restored where recorded.")
-            with st.expander("Verify Saved Development Setup (read-only)", expanded=False):
-                _saved_setup_audit = wbs_get_saved_concept_setup_audit()
-                if not _saved_setup_audit.get("ok"):
-                    st.warning(_saved_setup_audit.get("message") or "Saved settings could not be verified.")
-                else:
-                    _recorded = _saved_setup_audit["recorded"]
-                    _missing = _saved_setup_audit["missing"]
-                    st.caption(f"Exact saved revision: {_saved_setup_audit['saved_revision_id']}")
-                    st.write(f"Recorded Development Setup fields: **{len(_recorded)}**; "
-                             f"not recorded: **{len(_missing)}**.")
-                    if _missing:
-                        st.warning("This saved revision does not contain every Development Setup "
-                                   "selection. Current form defaults are NOT proof of the "
-                                   "writer's original choices; the saved record was not modified.")
-                    else:
-                        for _key, _label, _value in _recorded:
-                            st.caption(f"{_label}: {_value}")
-                    if _missing:
-                        st.caption("Not recorded in this revision: " +
-                                   ", ".join(label for _, label in _missing))
             if st.session_state.get("_wbs_saved_concept_missing_fields"):
                 # Older saved projects may not contain every newer template
                 # field. Preserve that audit fact without displaying the same
@@ -8378,7 +8358,7 @@ if st.session_state.project_stage == "Intake":
             st.markdown("---")
             _ss_save_col, _ss_continue_col = st.columns(2)
             with _ss_save_col:
-                if st.button("SAVE CURRENT STAGE", key="short_story_save_stage_1", use_container_width=True):
+                if st.button("SAVE CURRENT STAGE", key="short_story_save_stage_1", use_container_width=True, type="primary"):
                     _ss_result = save_current_project_session_to_supabase()
                     if _ss_result:
                         st.success("Current stage saved; no duplicate version created when unchanged.")
@@ -8390,7 +8370,6 @@ if st.session_state.project_stage == "Intake":
                 st.caption("CONTINUE TO NEXT STAGE: use the enabled development button below.")
             if not _ss_can_continue:
                 st.caption("Save the current stage before proceeding.")
-            render_save_as_named_version_control("short_story_stage1")
 
         # A loaded saved project may already contain its Scripting options.
         # Continue READ-ONLY: never regenerate its paths, reset its manuscript,
