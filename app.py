@@ -7395,12 +7395,13 @@ def wbs_request_stage_change(destination, export_view=None):
             )
             return
         active_id = str(get_active_project_id() or "")
-    if anchor_id and anchor_title and current == "Intake" and destination != "Intake" and active_title != anchor_title:
-        st.error(
-            f'Project title changed from "{anchor_title}" to "{active_title}". '
-            "Use Rename Project to change the title before moving to another stage."
-        )
-        return
+    # A display-only revision suffix is not a project rename. Compare the
+    # canonical project title, not the editable/display label.
+    if anchor_id and anchor_title and current == "Intake" and destination != "Intake":
+        canonical_title = get_project_title_from_project_id(anchor_id)
+        if canonical_title and canonical_title.strip() != anchor_title.strip():
+            st.error("Saved project identity does not match. Reload the saved project.")
+            return
     # Sidebar review is non-destructive: preserve all in-memory edits and
     # generated work. Saving is required by the development/advance controls,
     # not by read-only movement among already developed stages.
@@ -7452,6 +7453,10 @@ def wbs_reached_review_level(state):
         level = max(level, 4)
     if str(state.get("final_output_text") or "").strip() or bool(state.get("export_view")):
         level = max(level, 5)
+    if str(state.get("current_manuscript_save_status") or "").upper() == "FINAL":
+        level = max(level, 5)
+    elif str(state.get("saved_version_source_text") or "").strip():
+        level = max(level, 4)
     return min(level, 5)
 
 _wbs_unlocked = wbs_reached_review_level(st.session_state)
@@ -7477,7 +7482,7 @@ else:
 
 if st.session_state.project_stage == "Sandbox":
     st.sidebar.button("🔵 2. Scripting (Active)", key="nav_sandbox_active", use_container_width=True)
-elif can_navigate_to_sandbox and can_use_sandbox:
+elif can_navigate_to_sandbox:
     if st.sidebar.button("⚪ 2. Scripting", key="nav_sandbox", use_container_width=True):
         wbs_request_stage_change("Sandbox")
 else:
@@ -7485,7 +7490,7 @@ else:
 
 if st.session_state.project_stage == "Plot Architect":
     st.sidebar.button("🔵 3. Plot Architecture (Active)", key="nav_plot_active", use_container_width=True)
-elif can_navigate_to_plot and can_use_plot:
+elif can_navigate_to_plot:
     if st.sidebar.button("⚪ 3. Plot Architecture", key="nav_plot", use_container_width=True):
         wbs_request_stage_change("Plot Architect")
 else:
@@ -7500,7 +7505,7 @@ _is_draft_review = (st.session_state.project_stage in {"Isolation Guardrail", "R
                     and not (st.session_state.project_stage == "Isolation Guardrail" and st.session_state.get("export_view", False)))
 if _is_draft_review:
     st.sidebar.button("🔵 4. Editorial & Publisher Review (Active)", key="nav_guard_active", use_container_width=True)
-elif can_navigate_to_guardrail and can_use_safety:
+elif can_navigate_to_guardrail:
     if st.sidebar.button("⚪ 4. Editorial & Publisher Review", key="nav_guard", use_container_width=True):
         wbs_request_stage_change("Isolation Guardrail", export_view=False)
 else:
@@ -7509,7 +7514,7 @@ else:
 stage_8_label = "Manuscript Review" if st.session_state.get("demo_mode") else "Final Manuscript"
 if st.session_state.project_stage == "Isolation Guardrail" and st.session_state.get("export_view", False):
     st.sidebar.button(f"🔵 5. {stage_8_label} (Active)", key="nav_export_active", use_container_width=True)
-elif (bool(st.session_state.get("final_output_text")) or bool(st.session_state.get("export_view")) or _wbs_unlocked >= 5) and can_use_safety:
+elif _wbs_unlocked >= 5:
     if st.sidebar.button(f"⚪ 5. {stage_8_label}", key="nav_export", use_container_width=True):
         wbs_request_stage_change("Isolation Guardrail", export_view=True)
 else:
