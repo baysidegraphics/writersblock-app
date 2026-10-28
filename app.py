@@ -7404,18 +7404,11 @@ def wbs_request_stage_change(destination, export_view=None):
     # Sidebar review is non-destructive: preserve all in-memory edits and
     # generated work. Saving is required by the development/advance controls,
     # not by read-only movement among already developed stages.
-    # Never unlock a future stage through direct navigation.
     review_levels = {"Intake": 1, "Sandbox": 2, "Plot Architect": 3,
                      "Drafting Engine": 4, "Isolation Guardrail": 4,
                      "Revision Engine": 4, "Rewrite Engine": 4}
     target_level = 5 if destination == "Isolation Guardrail" and target_export else review_levels.get(destination, 99)
-    unlocked = int(st.session_state.get("_wbs_unlocked_saved_stage") or 1)
-    available = {1: True,
-                 2: st.session_state.get("sandbox_slates") is not None or unlocked >= 2,
-                 3: st.session_state.get("chosen_option") is not None or unlocked >= 3,
-                 4: bool(st.session_state.get("plot_outline")) or bool(st.session_state.get("current_draft_output")) or unlocked >= 4,
-                 5: bool(st.session_state.get("final_output_text")) or bool(st.session_state.get("export_view")) or unlocked >= 5}
-    if target_level > unlocked and not available.get(target_level, False):
+    if target_level > wbs_reached_review_level(st.session_state):
         st.warning("This stage has not been developed yet.")
         return
     st.session_state["wbs_pending_stage_change"] = {
@@ -7441,13 +7434,33 @@ def wbs_render_stage_save_gate():
     """Legacy compatibility: the redundant confirmation screen is retired."""
     return
 
-_wbs_unlocked = int(st.session_state.get("_wbs_unlocked_saved_stage") or 1)
-can_navigate_to_sandbox = st.session_state.sandbox_slates is not None or _wbs_unlocked >= 2
-can_navigate_to_plot = st.session_state.chosen_option is not None or _wbs_unlocked >= 3
-can_navigate_to_drafting = st.session_state.plot_outline is not None or _wbs_unlocked >= 4
-can_navigate_to_guardrail = bool(st.session_state.current_draft_output.strip()) or _wbs_unlocked >= 4
-can_navigate_to_revision = bool(st.session_state.current_draft_output.strip())
-can_navigate_to_rewrite = bool(st.session_state.current_draft_output.strip())
+def wbs_reached_review_level(state):
+    """Furthest reached milestone; earlier rooms remain reviewable even if
+    intermediate generated data was not retained in an older saved version.
+    Does not unlock any undeveloped stage or change manuscript state.
+    """
+    level = int(state.get("_wbs_unlocked_saved_stage") or 1)
+    current = str(state.get("project_stage") or "Intake")
+    level = max(level, {"Intake": 1, "Sandbox": 2, "Plot Architect": 3,
+                        "Drafting Engine": 4, "Isolation Guardrail": 4,
+                        "Revision Engine": 4, "Rewrite Engine": 4}.get(current, 1))
+    if state.get("sandbox_slates") is not None:
+        level = max(level, 2)
+    if state.get("chosen_option") is not None or str(state.get("plot_outline") or "").strip():
+        level = max(level, 3)
+    if str(state.get("current_draft_output") or "").strip() or str(state.get("rewritten_manuscript") or "").strip():
+        level = max(level, 4)
+    if str(state.get("final_output_text") or "").strip() or bool(state.get("export_view")):
+        level = max(level, 5)
+    return min(level, 5)
+
+_wbs_unlocked = wbs_reached_review_level(st.session_state)
+can_navigate_to_sandbox = _wbs_unlocked >= 2
+can_navigate_to_plot = _wbs_unlocked >= 3
+can_navigate_to_drafting = _wbs_unlocked >= 4
+can_navigate_to_guardrail = _wbs_unlocked >= 4
+can_navigate_to_revision = _wbs_unlocked >= 4
+can_navigate_to_rewrite = _wbs_unlocked >= 4
 
 can_use_sandbox = access_allows("sandbox")
 can_use_plot = access_allows("plot")
