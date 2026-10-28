@@ -8397,35 +8397,40 @@ if st.session_state.project_stage == "Intake":
             render_format_template_save_reminder()
         else:
             st.markdown("---")
-            _ss_save_col, _ss_continue_col = st.columns(2)
-            with _ss_save_col:
-                if st.button("SAVE CURRENT STAGE", key="short_story_save_stage_1", use_container_width=True, type="primary"):
+            # Universal Stage 1: one action saves pending work (if any) and
+            # advances to Scripting without regenerating existing story paths.
+            _ss_master = wbs_has_saved_master()
+            _ss_changed = wbs_work_has_changed() if _ss_master is True else True
+            if st.button(
+                "Save And/Or Continue To Next Stage",
+                key="wbs_stage1_save_or_continue",
+                use_container_width=True,
+                type="primary",
+            ):
+                if _ss_master is not True or _ss_changed is not False:
                     _ss_result = save_current_project_session_to_supabase()
-                    if _ss_result:
-                        # Arm the development action only after this explicit save.
-                        st.session_state["_wbs_stage1_continue_approval"] = (
-                            str(get_active_project_id() or ""),
-                            str(st.session_state.get("active_format_id") or ""),
-                            str(st.session_state.get("_wbs_last_saved_work_signature") or ""),
-                        )
-                        st.success("Current stage saved; no duplicate version created when unchanged.")
-                        st.rerun()
-            with _ss_continue_col:
-                _ss_master = wbs_has_saved_master()
-                _ss_changed = wbs_work_has_changed() if _ss_master is True else True
-                _ss_approval = st.session_state.get("_wbs_stage1_continue_approval")
-                _ss_expected = (
+                    if not _ss_result:
+                        st.stop()
+                st.session_state["_wbs_stage1_continue_approval"] = (
                     str(get_active_project_id() or ""),
                     str(st.session_state.get("active_format_id") or ""),
                     str(st.session_state.get("_wbs_last_saved_work_signature") or ""),
                 )
-                _ss_can_continue = (
-                    _ss_master is True and _ss_changed is False
-                    and _ss_approval == _ss_expected
+                st.session_state["_wbs_unlocked_saved_stage"] = max(
+                    int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 2
                 )
-                st.caption("CONTINUE TO NEXT STAGE: use the enabled development button below.")
-            if not _ss_can_continue:
-                st.caption("Save the current stage before proceeding.")
+                st.session_state.project_stage = "Sandbox"
+                st.rerun()
+            _ss_approval = st.session_state.get("_wbs_stage1_continue_approval")
+            _ss_expected = (
+                str(get_active_project_id() or ""),
+                str(st.session_state.get("active_format_id") or ""),
+                str(st.session_state.get("_wbs_last_saved_work_signature") or ""),
+            )
+            _ss_can_continue = (
+                _ss_master is True and _ss_changed is False
+                and _ss_approval == _ss_expected
+            )
 
         # A loaded saved project may already contain its Scripting options.
         # Continue READ-ONLY: never regenerate its paths, reset its manuscript,
