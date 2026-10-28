@@ -270,10 +270,6 @@ def save_project_draft_to_supabase(project_id, draft_title, draft_type, draft_co
 
 
 def get_project_session_snapshot():
-    # SHORT STORY ONLY: flush the live Development Setup widgets into the
-    # authoritative format state BEFORE building the V-n snapshot.
-    _short_story_development_values = capture_live_short_story_development_values()
-
     snapshot_keys = [
         "project_stage",
         "story_seed",
@@ -353,12 +349,6 @@ def get_project_session_snapshot():
             snapshot[key] = {str(k): v for k, v in value.items()}
         else:
             snapshot[key] = value
-
-    if _short_story_development_values:
-        # Keep an explicit copy beside the normal format_template_values map.
-        # This makes Short Story development restoration resilient even if an
-        # older widget-state path later changes.
-        snapshot["short_story_development_values"] = dict(_short_story_development_values)
 
     snapshot["saved_at"] = datetime.now(timezone.utc).isoformat()
     return snapshot
@@ -540,6 +530,30 @@ def wbs_save_state_signature(snapshot=None):
     return get_text_signature(json.dumps(relevant, sort_keys=True, default=str))
 
 
+def wbs_short_story_stage_controls_enabled():
+    """Format-scoped guard; never affects Children's Picture Book or other formats."""
+    return (str(st.session_state.get("active_format_id") or "") == "short_story"
+            and str(st.session_state.get("format_type") or "") == "Short Story")
+
+
+def wbs_short_story_stage_number(stage=None, export_view=None):
+    stage = str(stage if stage is not None else st.session_state.get("project_stage") or "Intake")
+    if stage == "Intake":
+        return 1
+    if stage == "Sandbox":
+        return 2
+    if stage == "Plot Architect":
+        return 3
+    if stage == "Isolation Guardrail" and bool(st.session_state.get("export_view") if export_view is None else export_view):
+        return 5
+    return 4
+
+
+def wbs_short_story_stage_signature():
+    """Saved-work comparison excludes navigation and transient save timestamps."""
+    return wbs_save_state_signature()
+
+
 def save_current_project_session_to_supabase(version_name=None, save_as_new_version=False):
     user_id = get_current_user_id()
 
@@ -568,6 +582,8 @@ def save_current_project_session_to_supabase(version_name=None, save_as_new_vers
     ) or "Original"
 
     if save_as_new_version:
+        if wbs_short_story_stage_controls_enabled():
+            st.session_state.pop("_wbs_short_story_saved_stage", None)
         st.session_state.project_version_name = requested_version_name
     elif not str(st.session_state.get("project_version_name") or "").strip():
         st.session_state.project_version_name = requested_version_name
@@ -594,6 +610,43 @@ def save_current_project_session_to_supabase(version_name=None, save_as_new_vers
         "project_title": get_project_title_for_display()[:80],
         "project_type": st.session_state.get("format_type", "story"),
     }).eq("id", project_id).execute()
+
+    # SHORT STORY ONLY: Save Current Stage updates the selected saved V-number in
+    # place. A fresh V-number is created exclusively through Save As New Version.
+    # Never update a sibling version or another project, user, or writing format.
+    if wbs_short_story_stage_controls_enabled() and not save_as_new_version:
+        row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "").strip()
+        if row_id:
+            existing = (supabase.table("writersblock_project_drafts")
+                        .select("id, project_id, user_id, draft_type, draft_content")
+                        .eq("id", row_id).eq("project_id", project_id)
+                        .eq("user_id", user_id).eq("draft_type", "project_session")
+                        .limit(1).execute())
+            rows = getattr(existing, "data", None) or []
+            if rows:
+                previous = json.loads(rows[0].get("draft_content") or "{}")
+                if (previous.get("active_format_id") == "short_story"
+                        and previous.get("format_type") == "Short Story"):
+                    if wbs_save_state_signature(previous) != wbs_save_state_signature(snapshot):
+                        updated = (supabase.table("writersblock_project_drafts")
+                                   .update({"draft_content": json.dumps(snapshot)})
+                                   .eq("id", row_id).eq("project_id", project_id)
+                                   .eq("user_id", user_id).eq("draft_type", "project_session")
+                                   .execute())
+                        if not getattr(updated, "data", None):
+                            st.error("Short Story save was not confirmed; remain at this stage.")
+                            return None
+                        result = updated
+                    else:
+                        result = existing
+                    set_loaded_concept_version_baseline(snapshot)
+                    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
+                    st.session_state["_wbs_last_saved_project_id"] = str(project_id)
+                    st.session_state["_wbs_saved_session_to_select"] = row_id
+                    return result
+            # Never create an accidental new V-number when the expected saved row disappeared.
+            st.error("Selected Short Story version could not be verified. No replacement version created.")
+            return None
 
     internal_version_number = get_next_project_session_internal_version(project_id)
 
@@ -876,34 +929,6 @@ def load_saved_project_session_to_state(saved_session_row):
             "novel_prose_novella",
         )
         st.session_state.active_format_id = restored_format_id
-
-    # SHORT STORY ONLY: the parent project record is authoritative for the title.
-    # Older saved snapshots/widget state must never overwrite the saved project title.
-    if restored_format_id == "short_story":
-        _short_story_project_title = get_project_title_from_project_id(
-            st.session_state.current_project_id
-        )
-        if _short_story_project_title:
-            st.session_state.project_title = _short_story_project_title
-
-        # Restore the exact Development Setup stored with THIS saved version.
-        # Prefer the explicit Short Story copy added to new snapshots; fall back
-        # to the normal namespaced format_template_values for older snapshots.
-        _saved_short_story_values = snapshot.get("short_story_development_values")
-        if not isinstance(_saved_short_story_values, dict) or not _saved_short_story_values:
-            _saved_format_values = snapshot.get("format_template_values") or {}
-            if isinstance(_saved_format_values, dict):
-                _saved_short_story_values = _saved_format_values.get("short_story") or {}
-
-        if isinstance(_saved_short_story_values, dict) and _saved_short_story_values:
-            _all_format_values = dict(st.session_state.get("format_template_values") or {})
-            _all_format_values["short_story"] = dict(_saved_short_story_values)
-            st.session_state.format_template_values = _all_format_values
-            # Keep a copy available for debugging/regression checks without
-            # exposing anything new in the writer-facing interface.
-            st.session_state["_wbs_loaded_short_story_development_values"] = dict(
-                _saved_short_story_values
-            )
 
     # Restore the Writing Format widget from the saved authoritative template.
     # A keyed Streamlit selectbox ignores its index= argument when an old widget
@@ -1890,42 +1915,6 @@ def set_active_format_template_value(field_key, value):
     values[str(field_key)] = value
     all_values[format_id] = values
     st.session_state.format_template_values = all_values
-
-
-def capture_live_short_story_development_values():
-    """Persist the CURRENT on-screen Short Story Development Setup before any save.
-
-    Short Story only. Streamlit widget keys can contain newer values than the
-    nested format_template_values cache during the same interaction. Pull those
-    live widget values into the authoritative short_story namespace so a saved
-    V-n snapshot cannot silently drop the writer's development instructions.
-    """
-    if str(st.session_state.get("active_format_id") or "") != "short_story":
-        return {}
-
-    template = st.session_state.get("active_format_template") or {}
-    all_values = dict(st.session_state.get("format_template_values") or {})
-    values = dict(all_values.get("short_story") or {})
-
-    for field in (template.get("concept_fields") or []):
-        if not isinstance(field, dict):
-            continue
-        field_key = str(field.get("key") or "").strip()
-        if not field_key:
-            continue
-        widget_key = f"format_field_short_story_{field_key}"
-        if widget_key in st.session_state:
-            values[field_key] = st.session_state.get(widget_key)
-
-        # Production Influence can use a separate custom-value widget.
-        if field_key == "production_influence":
-            custom_widget_key = "format_field_short_story_production_influence_custom"
-            if custom_widget_key in st.session_state:
-                values["production_influence_custom"] = st.session_state.get(custom_widget_key)
-
-    all_values["short_story"] = values
-    st.session_state.format_template_values = all_values
-    return dict(values)
 
 
 def get_development_writing_tense():
@@ -5758,6 +5747,24 @@ def wbs_request_stage_change(destination, export_view=None):
     target_export = current_export if export_view is None else bool(export_view)
     if current == destination and (destination != "Isolation Guardrail" or current_export == target_export):
         return
+    if wbs_short_story_stage_controls_enabled() and not st.session_state.get("demo_mode"):
+        source_number = wbs_short_story_stage_number(current, current_export)
+        destination_number = wbs_short_story_stage_number(destination, target_export)
+        if destination_number > source_number:
+            saved_here = (bool(get_active_project_id())
+                and st.session_state.get("_wbs_last_saved_project_id") == str(get_active_project_id())
+                and st.session_state.get("_wbs_last_saved_work_signature") == wbs_short_story_stage_signature()
+                and st.session_state.get("_wbs_short_story_saved_stage") == source_number)
+            if not saved_here:
+                st.warning("Short Story: SAVE CURRENT STAGE before continuing.")
+                return
+            review_from = int(st.session_state.get("_wbs_short_story_review_from_stage") or 5)
+            if destination_number == 5 and review_from < 5:
+                st.warning("Upstream Changes Applied — Review Required. Review and save all affected stages before Final Manuscript.")
+                return
+        # Returning to an earlier stage requires a fresh save before advancing again.
+        if destination_number < source_number:
+            st.session_state.pop("_wbs_short_story_saved_stage", None)
     st.session_state["wbs_pending_stage_change"] = {
         "target": destination, "export_view": target_export,
         "source": current, "source_export_view": current_export,
@@ -5858,6 +5865,52 @@ elif can_navigate_to_guardrail and can_use_safety:
         wbs_request_stage_change("Isolation Guardrail", export_view=True)
 else:
     st.sidebar.button(f"🔒 5. {stage_8_label} (Locked)", key="nav_export_locked", disabled=True, use_container_width=True)
+
+# SHORT STORY ONLY: explicit stage save, then separately enabled continuation.
+# Existing navigation and all other writing formats remain unchanged.
+if wbs_short_story_stage_controls_enabled() and not st.session_state.get("demo_mode"):
+    _ss_stage = wbs_short_story_stage_number()
+    _ss_saved = (bool(get_active_project_id())
+                 and st.session_state.get("_wbs_last_saved_project_id") == str(get_active_project_id())
+                 and st.session_state.get("_wbs_last_saved_work_signature") == wbs_short_story_stage_signature())
+    _ss_saved_stage = st.session_state.get("_wbs_short_story_saved_stage", None)
+    _ss_can_continue = _ss_saved and _ss_saved_stage == _ss_stage
+    if _ss_stage < 5:
+        st.sidebar.caption(f"Short Story — Stage {_ss_stage} Save & Continue")
+        _ss_left, _ss_right = st.sidebar.columns(2)
+        with _ss_left:
+            if st.button("💾 SAVE CURRENT STAGE", key=f"_ss_save_stage_{_ss_stage}", use_container_width=True):
+                _ss_previous_signature = st.session_state.get("_wbs_last_saved_work_signature")
+                _ss_work_changed = bool(_ss_previous_signature and
+                    _ss_previous_signature != wbs_short_story_stage_signature())
+                _ss_result = save_current_project_session_to_supabase()
+                if _ss_result:
+                    st.session_state["_wbs_short_story_saved_stage"] = _ss_stage
+                    if int(st.session_state.get("_wbs_short_story_review_from_stage") or 5) == _ss_stage:
+                        st.session_state["_wbs_short_story_review_from_stage"] = min(5, _ss_stage + 1)
+                    if _ss_work_changed:
+                        st.session_state["_wbs_short_story_review_from_stage"] = min(
+                            int(st.session_state.get("_wbs_short_story_review_from_stage") or 5), _ss_stage + 1)
+                    st.rerun()
+        with _ss_right:
+            if st.button("CONTINUE TO NEXT STAGE", key=f"_ss_continue_stage_{_ss_stage}",
+                         disabled=not _ss_can_continue, use_container_width=True):
+                if _ss_stage == 1:
+                    wbs_request_stage_change("Sandbox")
+                elif _ss_stage == 2:
+                    wbs_request_stage_change("Plot Architect")
+                elif _ss_stage == 3:
+                    if str(st.session_state.get("current_draft_output") or "").strip():
+                        wbs_request_stage_change("Isolation Guardrail", export_view=False)
+                    else:
+                        wbs_request_stage_change("Drafting Engine")
+                elif _ss_stage == 4:
+                    wbs_request_stage_change("Isolation Guardrail", export_view=True)
+        _ss_review = int(st.session_state.get("_wbs_short_story_review_from_stage") or 5)
+        if _ss_review <= _ss_stage:
+            st.sidebar.warning("Upstream Changes Applied — Review Required. Review and save this stage.")
+        if not _ss_saved:
+            st.sidebar.caption("Unsaved changes: save this stage before continuing.")
 
 st.sidebar.markdown("---")
 
@@ -6831,34 +6884,14 @@ if st.session_state.project_stage == "Intake":
                     st.error("Quill's writing service is unavailable. Please try again later.")
                 else:
                     development_context = get_active_format_development_context()
-                    _strict_short_story_guided = (
-                        guided_generation
-                        and str(st.session_state.get("active_format_id") or "") == "short_story"
+                    creative_direction = (
+                        "Build the story around the writer's specified theme, takeaway, and "
+                        "creative instructions in Development Setup. Honor those choices closely."
+                        if guided_generation else
+                        "Invent a fresh, original storyline. Honor the format, age range, genre, "
+                        "and required production constraints, but freely invent characters, conflict, "
+                        "and events rather than relying on a writer-specified theme or takeaway."
                     )
-                    if _strict_short_story_guided:
-                        creative_direction = (
-                            "STRICT SHORT STORY DEVELOPMENT MODE. The DEVELOPMENT SETUP below is the "
-                            "writer's CURRENT LIVE setup and is authoritative even if the project has "
-                            "not yet been saved. Every populated development field is mandatory. Do not "
-                            "omit, replace, contradict, generalize away, or reinterpret a populated field. "
-                            "Use the specified main character exactly; make the stated central conflict "
-                            "the actual story problem; use the selected setting as the story location; "
-                            "obey the selected point of view; honor the ending direction; write for the "
-                            "selected audience; and shape the eventual finished short story for the "
-                            "selected target length. If more than one tone/style field is populated, "
-                            "combine them rather than choosing one and ignoring the other. The 100–180 "
-                            "word output here is only the editable starting concept, so the target-length "
-                            "selection describes the later finished story, not this concept box."
-                        )
-                    else:
-                        creative_direction = (
-                            "Build the story around the writer's specified theme, takeaway, and "
-                            "creative instructions in Development Setup. Honor those choices closely."
-                            if guided_generation else
-                            "Invent a fresh, original storyline. Honor the format, age range, genre, "
-                            "and required production constraints, but freely invent characters, conflict, "
-                            "and events rather than relying on a writer-specified theme or takeaway."
-                        )
                     prompt = (
                         "You are Quill, writing an original STORY CONCEPT that a writer can edit. "
                         f"Write 100–180 words for {format_name}. "
@@ -7375,55 +7408,9 @@ if st.session_state.project_stage == "Plot Architect":
         st.session_state["_wbs_stage3_edit_signature"] = _edit_signature
 
     with _source_col:
-        # SHORT STORY REGRESSION GUARD:
-        # Writer-facing Plot Architecture must show ONLY the scene title and
-        # actual story text. Internal generation metadata stays in plot_outline
-        # for downstream drafting/rewrite, but is never rendered here.
-        _short_story_writer_view = (
-            str(st.session_state.get("active_format_id") or "") == "short_story"
-        )
-
-        if not _short_story_writer_view:
-            st.subheader(f"Beat {_selected_number} — Scene {_selected_number}" if _selected_number else "Full Storyline")
-
+        st.subheader(f"Beat {_selected_number} — Scene {_selected_number}" if _selected_number else "Full Storyline")
         if not _selected_outline:
             st.info("No scene content is available yet.")
-        elif _short_story_writer_view:
-            def _short_story_scene_parts(_section):
-                _section = str(_section or "")
-                _title_match = re.search(
-                    r"(?ims)\[SCENE TITLE\]\s*:\s*(.*?)(?=\n\s*\[(?:CORE OBJECTIVE|SCENE DETAILS(?:\s*&\s*CONFLICT)?|STYLE\s*&\s*SYNTAX DIRECTIVE)\]\s*:|\Z)",
-                    _section,
-                )
-                _scene_match = re.search(
-                    r"(?ims)\[SCENE DETAILS(?:\s*&\s*CONFLICT)?\]\s*:\s*(.*?)(?=\n\s*\[(?:STYLE\s*&\s*SYNTAX DIRECTIVE|CORE OBJECTIVE|SCENE TITLE)\]\s*:|\n\s*\[BEAT\s+\d+\]|\Z)",
-                    _section,
-                )
-                _title = _title_match.group(1).strip().strip("=").strip() if _title_match else ""
-                _scene = _scene_match.group(1).strip().strip("=").strip() if _scene_match else ""
-                return _title, _scene
-
-            if _selected_number:
-                _title, _scene = _short_story_scene_parts(_selected_outline)
-                if _title:
-                    st.markdown(f"**{_title}**")
-                if _scene:
-                    st.write(_scene)
-                if not (_title or _scene):
-                    st.info("No writer-facing scene text is available yet.")
-            else:
-                _rendered_any = False
-                for _num in _beat_numbers:
-                    _title, _scene = _short_story_scene_parts(_beat_sections.get(_num, ""))
-                    if _title:
-                        st.markdown(f"**{_title}**")
-                    if _scene:
-                        st.write(_scene)
-                    if _title or _scene:
-                        _rendered_any = True
-                        st.write("")
-                if not _rendered_any:
-                    st.info("No writer-facing scene text is available yet.")
         else:
             _field_patterns = (
                 ("Scene Title", r"\[SCENE TITLE\]\s*:\s*"),
