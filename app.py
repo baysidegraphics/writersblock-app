@@ -8370,8 +8370,27 @@ if st.session_state.project_stage == "Intake":
         if st.session_state.get("active_format_id") == "podcast_script":
             st.session_state.author_style = ""
 
-        # Save is deliberately visible BEFORE the advance action on every format page.
-        render_format_template_save_reminder()
+        # Short Story: explicit stage checkpoint, without altering other formats.
+        _wbs_short_story_stage1 = (st.session_state.get("active_format_id") == "short_story")
+        if not _wbs_short_story_stage1:
+            render_format_template_save_reminder()
+        else:
+            st.markdown("---")
+            _ss_save_col, _ss_continue_col = st.columns(2)
+            with _ss_save_col:
+                if st.button("SAVE CURRENT STAGE", key="short_story_save_stage_1", use_container_width=True):
+                    _ss_result = save_current_project_session_to_supabase()
+                    if _ss_result:
+                        st.success("Current stage saved; no duplicate version created when unchanged.")
+                        st.rerun()
+            with _ss_continue_col:
+                _ss_master = wbs_has_saved_master()
+                _ss_changed = wbs_work_has_changed() if _ss_master is True else True
+                _ss_can_continue = (_ss_master is True and _ss_changed is False)
+                st.caption("CONTINUE TO NEXT STAGE: use the enabled development button below.")
+            if not _ss_can_continue:
+                st.caption("Save the current stage before proceeding.")
+            render_save_as_named_version_control("short_story_stage1")
 
         # A loaded saved project may already contain its Scripting options.
         # Continue READ-ONLY: never regenerate its paths, reset its manuscript,
@@ -8392,6 +8411,7 @@ if st.session_state.project_stage == "Intake":
             key="generate_sandbox_paths",
             type="primary",
             use_container_width=True,
+            disabled=(_wbs_short_story_stage1 and not _ss_can_continue),
         ):
             if _wbs_has_saved_paths:
                 # Reuse only paths that match the currently saved snapshot.
