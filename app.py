@@ -7756,7 +7756,7 @@ if st.session_state.project_stage == "Intake":
              if format_id == st.session_state.get("active_format_id")),
             "Project",
         )
-        _project_title_label = ("Project Title/Revision" if st.session_state.get("active_format_id") == "short_story" else f"{_format_title_prefix} / Project Title:")
+        _project_title_label = "Project Title/Revision"
 
         if get_active_project_id():
             st.caption("Loaded saved project — saved Concept Development choices are restored where recorded.")
@@ -7793,7 +7793,7 @@ if st.session_state.project_stage == "Intake":
             _display_master_title = _title_anchor or get_project_title()
             # Show the exact active saved revision alongside the master title.
             # Never change the master project title stored in Supabase.
-            if st.session_state.get("active_format_id") == "short_story":
+            if True:  # Shared project/revision display across all formats.
                 _active_saved_row_id = str(st.session_state.get("_wbs_loaded_saved_session_id") or "")
                 _active_manuscript_row_id = str(st.session_state.get("_wbs_loaded_manuscript_version_id") or "")
                 _active_project_key = str(get_active_project_id() or "")
@@ -7819,8 +7819,7 @@ if st.session_state.project_stage == "Intake":
                 + html.escape(_display_master_title) + '</div>',
                 unsafe_allow_html=True,
             )
-            if st.session_state.get("active_format_id") != "short_story":
-                render_confirmed_project_rename("step_1_concept")
+            # Rename is available only in the Start New Project workflow.
             render_save_open_project_to_series()
         else:
             st.session_state.project_title = st.text_input(
@@ -8372,8 +8371,8 @@ if st.session_state.project_stage == "Intake":
         if st.session_state.get("active_format_id") == "podcast_script":
             st.session_state.author_style = ""
 
-        # Short Story: explicit stage checkpoint, without altering other formats.
-        _wbs_short_story_stage1 = (st.session_state.get("active_format_id") == "short_story")
+        # Shared Stage 1 checkpoint across all writing formats.
+        _wbs_short_story_stage1 = True
         if not _wbs_short_story_stage1:
             render_format_template_save_reminder()
         else:
