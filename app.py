@@ -7401,12 +7401,9 @@ def wbs_request_stage_change(destination, export_view=None):
             "Use Rename Project to change the title before moving to another stage."
         )
         return
-    # Universal review navigation: moving among already developed stages is
-    # read-only navigation, not permission to discard pending writer edits.
-    # A missing save baseline is not proof that the current work is saved.
-    if wbs_has_saved_master() is not True or wbs_work_has_changed() is not False:
-        st.warning("Save Current Stage before leaving. Unsaved changes are preserved.")
-        return
+    # Sidebar review is non-destructive: preserve all in-memory edits and
+    # generated work. Saving is required by the development/advance controls,
+    # not by read-only movement among already developed stages.
     # Never unlock a future stage through direct navigation.
     review_levels = {"Intake": 1, "Sandbox": 2, "Plot Architect": 3,
                      "Drafting Engine": 4, "Isolation Guardrail": 4,
@@ -7499,7 +7496,7 @@ else:
 stage_8_label = "Manuscript Review" if st.session_state.get("demo_mode") else "Final Manuscript"
 if st.session_state.project_stage == "Isolation Guardrail" and st.session_state.get("export_view", False):
     st.sidebar.button(f"🔵 5. {stage_8_label} (Active)", key="nav_export_active", use_container_width=True)
-elif can_navigate_to_guardrail and can_use_safety:
+elif (bool(st.session_state.get("final_output_text")) or bool(st.session_state.get("export_view")) or _wbs_unlocked >= 5) and can_use_safety:
     if st.sidebar.button(f"⚪ 5. {stage_8_label}", key="nav_export", use_container_width=True):
         wbs_request_stage_change("Isolation Guardrail", export_view=True)
 else:
