@@ -7756,7 +7756,7 @@ if st.session_state.project_stage == "Intake":
              if format_id == st.session_state.get("active_format_id")),
             "Project",
         )
-        _project_title_label = f"{_format_title_prefix} / Project Title:"
+        _project_title_label = ("Project Title/Revision" if st.session_state.get("active_format_id") == "short_story" else f"{_format_title_prefix} / Project Title:")
 
         if get_active_project_id():
             st.caption("Loaded saved project — saved Concept Development choices are restored where recorded.")
@@ -7819,7 +7819,8 @@ if st.session_state.project_stage == "Intake":
                 + html.escape(_display_master_title) + '</div>',
                 unsafe_allow_html=True,
             )
-            render_confirmed_project_rename("step_1_concept")
+            if st.session_state.get("active_format_id") != "short_story":
+                render_confirmed_project_rename("step_1_concept")
             render_save_open_project_to_series()
         else:
             st.session_state.project_title = st.text_input(
