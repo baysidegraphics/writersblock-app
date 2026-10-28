@@ -1207,6 +1207,7 @@ def _wbs_restore_missing_concept_fields(saved_snapshot, project_id, as_of=None):
 
 
 def load_saved_project_session_to_state(saved_session_row):
+    st.session_state.pop("_wbs_stage1_continue_approval", None)
     if not saved_session_row:
         st.warning("No saved project session found.")
         return False
@@ -8383,12 +8384,27 @@ if st.session_state.project_stage == "Intake":
                 if st.button("SAVE CURRENT STAGE", key="short_story_save_stage_1", use_container_width=True, type="primary"):
                     _ss_result = save_current_project_session_to_supabase()
                     if _ss_result:
+                        # Arm the development action only after this explicit save.
+                        st.session_state["_wbs_stage1_continue_approval"] = (
+                            str(get_active_project_id() or ""),
+                            str(st.session_state.get("active_format_id") or ""),
+                            str(st.session_state.get("_wbs_last_saved_work_signature") or ""),
+                        )
                         st.success("Current stage saved; no duplicate version created when unchanged.")
                         st.rerun()
             with _ss_continue_col:
                 _ss_master = wbs_has_saved_master()
                 _ss_changed = wbs_work_has_changed() if _ss_master is True else True
-                _ss_can_continue = (_ss_master is True and _ss_changed is False)
+                _ss_approval = st.session_state.get("_wbs_stage1_continue_approval")
+                _ss_expected = (
+                    str(get_active_project_id() or ""),
+                    str(st.session_state.get("active_format_id") or ""),
+                    str(st.session_state.get("_wbs_last_saved_work_signature") or ""),
+                )
+                _ss_can_continue = (
+                    _ss_master is True and _ss_changed is False
+                    and _ss_approval == _ss_expected
+                )
                 st.caption("CONTINUE TO NEXT STAGE: use the enabled development button below.")
             if not _ss_can_continue:
                 st.caption("Save the current stage before proceeding.")
