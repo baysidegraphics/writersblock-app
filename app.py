@@ -270,6 +270,10 @@ def save_project_draft_to_supabase(project_id, draft_title, draft_type, draft_co
 
 
 def get_project_session_snapshot():
+    # SHORT STORY ONLY: flush the live Development Setup widgets into the
+    # authoritative format state BEFORE building the V-n snapshot.
+    _short_story_development_values = capture_live_short_story_development_values()
+
     snapshot_keys = [
         "project_stage",
         "story_seed",
@@ -349,6 +353,12 @@ def get_project_session_snapshot():
             snapshot[key] = {str(k): v for k, v in value.items()}
         else:
             snapshot[key] = value
+
+    if _short_story_development_values:
+        # Keep an explicit copy beside the normal format_template_values map.
+        # This makes Short Story development restoration resilient even if an
+        # older widget-state path later changes.
+        snapshot["short_story_development_values"] = dict(_short_story_development_values)
 
     snapshot["saved_at"] = datetime.now(timezone.utc).isoformat()
     return snapshot
@@ -875,6 +885,25 @@ def load_saved_project_session_to_state(saved_session_row):
         )
         if _short_story_project_title:
             st.session_state.project_title = _short_story_project_title
+
+        # Restore the exact Development Setup stored with THIS saved version.
+        # Prefer the explicit Short Story copy added to new snapshots; fall back
+        # to the normal namespaced format_template_values for older snapshots.
+        _saved_short_story_values = snapshot.get("short_story_development_values")
+        if not isinstance(_saved_short_story_values, dict) or not _saved_short_story_values:
+            _saved_format_values = snapshot.get("format_template_values") or {}
+            if isinstance(_saved_format_values, dict):
+                _saved_short_story_values = _saved_format_values.get("short_story") or {}
+
+        if isinstance(_saved_short_story_values, dict) and _saved_short_story_values:
+            _all_format_values = dict(st.session_state.get("format_template_values") or {})
+            _all_format_values["short_story"] = dict(_saved_short_story_values)
+            st.session_state.format_template_values = _all_format_values
+            # Keep a copy available for debugging/regression checks without
+            # exposing anything new in the writer-facing interface.
+            st.session_state["_wbs_loaded_short_story_development_values"] = dict(
+                _saved_short_story_values
+            )
 
     # Restore the Writing Format widget from the saved authoritative template.
     # A keyed Streamlit selectbox ignores its index= argument when an old widget
@@ -1861,6 +1890,42 @@ def set_active_format_template_value(field_key, value):
     values[str(field_key)] = value
     all_values[format_id] = values
     st.session_state.format_template_values = all_values
+
+
+def capture_live_short_story_development_values():
+    """Persist the CURRENT on-screen Short Story Development Setup before any save.
+
+    Short Story only. Streamlit widget keys can contain newer values than the
+    nested format_template_values cache during the same interaction. Pull those
+    live widget values into the authoritative short_story namespace so a saved
+    V-n snapshot cannot silently drop the writer's development instructions.
+    """
+    if str(st.session_state.get("active_format_id") or "") != "short_story":
+        return {}
+
+    template = st.session_state.get("active_format_template") or {}
+    all_values = dict(st.session_state.get("format_template_values") or {})
+    values = dict(all_values.get("short_story") or {})
+
+    for field in (template.get("concept_fields") or []):
+        if not isinstance(field, dict):
+            continue
+        field_key = str(field.get("key") or "").strip()
+        if not field_key:
+            continue
+        widget_key = f"format_field_short_story_{field_key}"
+        if widget_key in st.session_state:
+            values[field_key] = st.session_state.get(widget_key)
+
+        # Production Influence can use a separate custom-value widget.
+        if field_key == "production_influence":
+            custom_widget_key = "format_field_short_story_production_influence_custom"
+            if custom_widget_key in st.session_state:
+                values["production_influence_custom"] = st.session_state.get(custom_widget_key)
+
+    all_values["short_story"] = values
+    st.session_state.format_template_values = all_values
+    return dict(values)
 
 
 def get_development_writing_tense():
@@ -7310,9 +7375,55 @@ if st.session_state.project_stage == "Plot Architect":
         st.session_state["_wbs_stage3_edit_signature"] = _edit_signature
 
     with _source_col:
-        st.subheader(f"Beat {_selected_number} — Scene {_selected_number}" if _selected_number else "Full Storyline")
+        # SHORT STORY REGRESSION GUARD:
+        # Writer-facing Plot Architecture must show ONLY the scene title and
+        # actual story text. Internal generation metadata stays in plot_outline
+        # for downstream drafting/rewrite, but is never rendered here.
+        _short_story_writer_view = (
+            str(st.session_state.get("active_format_id") or "") == "short_story"
+        )
+
+        if not _short_story_writer_view:
+            st.subheader(f"Beat {_selected_number} — Scene {_selected_number}" if _selected_number else "Full Storyline")
+
         if not _selected_outline:
             st.info("No scene content is available yet.")
+        elif _short_story_writer_view:
+            def _short_story_scene_parts(_section):
+                _section = str(_section or "")
+                _title_match = re.search(
+                    r"(?ims)\[SCENE TITLE\]\s*:\s*(.*?)(?=\n\s*\[(?:CORE OBJECTIVE|SCENE DETAILS(?:\s*&\s*CONFLICT)?|STYLE\s*&\s*SYNTAX DIRECTIVE)\]\s*:|\Z)",
+                    _section,
+                )
+                _scene_match = re.search(
+                    r"(?ims)\[SCENE DETAILS(?:\s*&\s*CONFLICT)?\]\s*:\s*(.*?)(?=\n\s*\[(?:STYLE\s*&\s*SYNTAX DIRECTIVE|CORE OBJECTIVE|SCENE TITLE)\]\s*:|\n\s*\[BEAT\s+\d+\]|\Z)",
+                    _section,
+                )
+                _title = _title_match.group(1).strip().strip("=").strip() if _title_match else ""
+                _scene = _scene_match.group(1).strip().strip("=").strip() if _scene_match else ""
+                return _title, _scene
+
+            if _selected_number:
+                _title, _scene = _short_story_scene_parts(_selected_outline)
+                if _title:
+                    st.markdown(f"**{_title}**")
+                if _scene:
+                    st.write(_scene)
+                if not (_title or _scene):
+                    st.info("No writer-facing scene text is available yet.")
+            else:
+                _rendered_any = False
+                for _num in _beat_numbers:
+                    _title, _scene = _short_story_scene_parts(_beat_sections.get(_num, ""))
+                    if _title:
+                        st.markdown(f"**{_title}**")
+                    if _scene:
+                        st.write(_scene)
+                    if _title or _scene:
+                        _rendered_any = True
+                        st.write("")
+                if not _rendered_any:
+                    st.info("No writer-facing scene text is available yet.")
         else:
             _field_patterns = (
                 ("Scene Title", r"\[SCENE TITLE\]\s*:\s*"),
