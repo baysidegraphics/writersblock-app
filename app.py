@@ -7791,6 +7791,27 @@ if st.session_state.project_stage == "Intake":
             if _title_anchor and st.session_state.get("project_title") != _title_anchor:
                 st.session_state.project_title = _title_anchor
             _display_master_title = _title_anchor or get_project_title()
+            # Show the exact active saved revision alongside the master title.
+            # Never change the master project title stored in Supabase.
+            if st.session_state.get("active_format_id") == "short_story":
+                _active_saved_row_id = str(st.session_state.get("_wbs_loaded_saved_session_id") or "")
+                _active_manuscript_row_id = str(st.session_state.get("_wbs_loaded_manuscript_version_id") or "")
+                _active_project_key = str(get_active_project_id() or "")
+                for _saved_entry in get_saved_projects_versions_dropdown_items():
+                    _saved_row = _saved_entry.get("row") or {}
+                    if str(_saved_row.get("project_id") or "") != _active_project_key:
+                        continue
+                    _is_active = (
+                        (_saved_entry.get("type") == "project_session"
+                         and _active_saved_row_id and str(_saved_row.get("id") or "") == _active_saved_row_id)
+                        or (_saved_entry.get("type") == "manuscript_version"
+                            and _active_manuscript_row_id and str(_saved_row.get("id") or "") == _active_manuscript_row_id)
+                    )
+                    if _is_active:
+                        _version_match = re.search(r" — (V-\d+[A-Z]*) — ", str(_saved_entry.get("label") or ""))
+                        if _version_match:
+                            _display_master_title += " — " + _version_match.group(1)
+                        break
             st.markdown(f"**{_project_title_label}**")
             st.markdown(
                 '<div style="background:#262730;color:#ffffff;padding:0.65rem 0.8rem;'
