@@ -7512,7 +7512,7 @@ else:
 # Five-stage navigation: drafting runs internally; editing tools share Stage 4.
 # Legacy internal stages remain loadable for earlier saved projects.
 if st.session_state.project_stage == "Drafting Engine":
-    st.sidebar.info("🔵 4. Editorial & Publisher Review — Generating the approved manuscript…")
+    st.sidebar.info("🔵 Scene Development — Manual Review (Active)")
 
 _is_draft_review = (st.session_state.project_stage in {"Isolation Guardrail", "Revision Engine", "Rewrite Engine"}
                     and not (st.session_state.project_stage == "Isolation Guardrail" and st.session_state.get("export_view", False)))
@@ -9951,9 +9951,9 @@ STORY OUTLINE:
 
             btn_label = f"Execute Scene Block {current_scene_number} of {total_beats} ⚡"
 
-            # Automatic internal drafting — no redundant scene execution screen.
-            # The original generation/save pathway below remains unchanged.
-            if True:
+            # Explicit writer action only. Never generate scene blocks on navigation or rerun.
+            # Preserve existing scene text and all saved revision records.
+            if st.button(f"Develop Scene Block {current_scene_number} — Writer Approval Required", key=f"wbs_manual_scene_{current_scene_number}", use_container_width=True):
                 require_product_access("drafting")
                 require_demo_action_available("draft_scene", current_scene_number)
                 current_beat_data = filtered_beats[current_scene_number - 1]
