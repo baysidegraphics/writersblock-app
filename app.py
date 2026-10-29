@@ -9658,7 +9658,7 @@ if st.session_state.project_stage == "Plot Architect":
                                     st.rerun()
         else:
             # Scene 4 exists; allow explicit save before reviewing all four.
-            if st.button("Save Scene 4 & Continue to Editorial Review", type="primary",
+            if st.button("Save & Continue to Editorial Review", type="primary",
                          key="wbs_ss_stage4_continue", use_container_width=True,
                          disabled=bool(st.session_state.get("demo_mode")) or _ss_selected != 4):
                 if _ss_selected == 4:
