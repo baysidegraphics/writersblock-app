@@ -5209,6 +5209,12 @@ def render_project_title_banner(stage_key):
     st.markdown("<style>[class*='st-key-wbs_stage_title_'] input:disabled {color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; opacity: 1 !important;}</style>", unsafe_allow_html=True)
     st.markdown(f"**{format_name} / Project Title/Revision**")
     st.text_input("Project Title/Revision", value=(current_title + (" — " + revision_display if revision_display and revision_display not in current_title else "")), disabled=True, label_visibility="collapsed", key=f"wbs_stage_title_{stage_key}")
+    if stage_key == "step_2_scripting":
+        _saved_path = bool(str(st.session_state.get("chosen_option") or "").strip() and str(st.session_state.get("chosen_option_text") or "").strip())
+        if _saved_path:
+            st.caption("Revision Status: Stage 2 COMPLETE — selected scripting path saved or ready to save. Next: Plot Architecture." if st.session_state.get("_wbs_active_saved_session_row_id") else "Revision Status: Stage 2 selection ready; save to preserve it.")
+        else:
+            st.caption("Revision Status: Stage 2 INCOMPLETE — no scripting path recorded. Last completed: Concept Development. Next: Select a path and save.")
     if st.session_state.get("project_stage") != "Intake" and (st.session_state.get("licensed_mode") or st.session_state.get("demo_mode")):
         render_quill_for_current_stage(st_module=st, show_prelude=True)
     if not st.session_state.get("demo_mode"):
@@ -8666,12 +8672,6 @@ if st.session_state.project_stage == "Intake":
 elif st.session_state.project_stage == "Sandbox":
     st.header("🗺️ Step 2: Scripting")
     render_project_title_banner("step_2_scripting")
-    _wbs_stage2_has_choice = bool(str(st.session_state.get("chosen_option") or "").strip() and str(st.session_state.get("chosen_option_text") or "").strip())
-    _wbs_stage2_has_outline = bool(st.session_state.get("plot_outline"))
-    if _wbs_stage2_has_choice:
-        st.caption("Revision Status: Stage 2 COMPLETE — selected scripting path saved or ready to save. Next: Plot Architecture." if st.session_state.get("_wbs_active_saved_session_row_id") else "Revision Status: Stage 2 selection ready; save to preserve it.")
-    else:
-        st.caption("Revision Status: Stage 2 INCOMPLETE — no scripting path recorded. Last completed: Concept Development. Next: Select a path and save.")
     st.markdown("##### Shape the first working script paths from your concept.")
     st.caption(f"Dialogue Style: {get_dialogue_style_display()} — inherited from Concept Development. Project type controls dialogue formatting.")
     st.markdown("---")
@@ -8743,13 +8743,15 @@ elif st.session_state.project_stage == "Sandbox":
                 except Exception:
                     _wbs_current_revision = ""
             _wbs_next_rev = get_next_project_session_internal_version(get_active_project_id()) if get_active_project_id() else 1
+            if _wbs_pending:
+                st.markdown('<div style="text-align:center;color:#ffffff;font-weight:700;margin:10px 0 12px 0">Save To Revision</div>', unsafe_allow_html=True)
             _wbs_left, _wbs_right = st.columns(2, gap="small")
             with _wbs_left:
                 _wbs_save_current = st.button(f"Save to Current Revision (V-{_wbs_current_revision})" if _wbs_current_revision else "Save to Current Revision",
-                    key="wbs_stage2_save_current", type="primary", disabled=not bool(_wbs_pending and _wbs_row_id and _wbs_current_revision), use_container_width=True)
+                    key="wbs_stage2_save_current", type="primary" if _wbs_pending else "secondary", disabled=not bool(_wbs_pending and _wbs_row_id and _wbs_current_revision), use_container_width=True)
             with _wbs_right:
                 _wbs_save_new = st.button(f"Save as New Revision (V-{_wbs_next_rev})", key="wbs_stage2_save_new",
-                    disabled=not bool(_wbs_pending), use_container_width=True)
+                    type="primary" if _wbs_pending else "secondary", disabled=not bool(_wbs_pending), use_container_width=True)
             if _wbs_save_current or _wbs_save_new:
                 _wbs_selected_text = str(sandbox_slates.get(_wbs_pending) or "")
                 if not _wbs_selected_text.strip():
