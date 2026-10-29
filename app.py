@@ -5206,6 +5206,7 @@ def render_project_title_banner(stage_key):
     revision = str(globals().get("_active_version_number") or st.session_state.get("current_version_number") or "").strip()
     # Match the active saved revision displayed in Project Status.
     revision_display = revision if revision.upper().startswith("V-") else ("V-" + revision if revision.isdigit() else "")
+    st.markdown("<style>[class*='st-key-wbs_stage_title_'] input:disabled {color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; opacity: 1 !important;}</style>", unsafe_allow_html=True)
     st.markdown(f"**{format_name} / Project Title/Revision**")
     st.text_input("Project Title/Revision", value=(current_title + (" — " + revision_display if revision_display and revision_display not in current_title else "")), disabled=True, label_visibility="collapsed", key=f"wbs_stage_title_{stage_key}")
     if st.session_state.get("project_stage") != "Intake" and (st.session_state.get("licensed_mode") or st.session_state.get("demo_mode")):
@@ -8665,6 +8666,12 @@ if st.session_state.project_stage == "Intake":
 elif st.session_state.project_stage == "Sandbox":
     st.header("🗺️ Step 2: Scripting")
     render_project_title_banner("step_2_scripting")
+    _wbs_stage2_has_choice = bool(str(st.session_state.get("chosen_option") or "").strip() and str(st.session_state.get("chosen_option_text") or "").strip())
+    _wbs_stage2_has_outline = bool(st.session_state.get("plot_outline"))
+    if _wbs_stage2_has_choice:
+        st.caption("Revision Status: Stage 2 COMPLETE — selected scripting path saved or ready to save. Next: Plot Architecture." if st.session_state.get("_wbs_active_saved_session_row_id") else "Revision Status: Stage 2 selection ready; save to preserve it.")
+    else:
+        st.caption("Revision Status: Stage 2 INCOMPLETE — no scripting path recorded. Last completed: Concept Development. Next: Select a path and save.")
     st.markdown("##### Shape the first working script paths from your concept.")
     st.caption(f"Dialogue Style: {get_dialogue_style_display()} — inherited from Concept Development. Project type controls dialogue formatting.")
     st.markdown("---")
@@ -8722,31 +8729,77 @@ elif st.session_state.project_stage == "Sandbox":
                         st.session_state["_wbs_stage2_pending_path"] = _wbs_opt
                         st.rerun()
             _wbs_pending = st.session_state.get("_wbs_stage2_pending_path")
-            if _wbs_pending:
-                st.caption(f"Selected: {_wbs_pending}. Save to create a new revision.")
-            else:
-                st.caption("Select A, B, or C before saving. No saved work changes during review.")
             st.markdown("---")
-            if st.button("Save Selected Path", key="wbs_stage2_save_selected", type="primary",
-                         disabled=not bool(_wbs_pending), use_container_width=True):
+            _wbs_row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
+            _wbs_current_revision = str(globals().get("_active_version_number") or st.session_state.get("current_version_number") or "").replace("V-", "")
+            if not _wbs_current_revision.isdigit() and _wbs_row_id:
+                try:
+                    _wbs_rev_rows = (supabase.table("writersblock_project_drafts")
+                        .select("version_number").eq("id", _wbs_row_id)
+                        .eq("project_id", get_active_project_id())
+                        .eq("user_id", get_current_user_id()).eq("draft_type", "project_session")
+                        .limit(1).execute()).data or []
+                    _wbs_current_revision = str(_wbs_rev_rows[0]["version_number"]) if len(_wbs_rev_rows) == 1 else ""
+                except Exception:
+                    _wbs_current_revision = ""
+            _wbs_next_rev = get_next_project_session_internal_version(get_active_project_id()) if get_active_project_id() else 1
+            _wbs_left, _wbs_right = st.columns(2, gap="small")
+            with _wbs_left:
+                _wbs_save_current = st.button(f"Save to Current Revision (V-{_wbs_current_revision})" if _wbs_current_revision else "Save to Current Revision",
+                    key="wbs_stage2_save_current", type="primary", disabled=not bool(_wbs_pending and _wbs_row_id and _wbs_current_revision), use_container_width=True)
+            with _wbs_right:
+                _wbs_save_new = st.button(f"Save as New Revision (V-{_wbs_next_rev})", key="wbs_stage2_save_new",
+                    disabled=not bool(_wbs_pending), use_container_width=True)
+            if _wbs_save_current or _wbs_save_new:
                 _wbs_selected_text = str(sandbox_slates.get(_wbs_pending) or "")
                 if not _wbs_selected_text.strip():
                     st.error("Selected path has no text; nothing was saved.")
                     st.stop()
                 _wbs_title = next(f"{key}: {name}" for key, name, _ in _wbs_stage2_options if key == _wbs_pending)
-                st.session_state.chosen_option = _wbs_title
-                st.session_state.chosen_option_text = _wbs_selected_text
-                # Changing the selected direction invalidates downstream work
-                # in the NEW revision only; older revisions remain untouched.
-                st.session_state.plot_outline = None
-                st.session_state.current_draft_output = None
-                st.session_state.rewritten_manuscript = None
-                st.session_state.final_output_text = None
-                _wbs_result = save_current_project_session_to_supabase()
-                if not _wbs_result or getattr(_wbs_result, "unchanged", False):
-                    st.error("New path revision was not confirmed. Reload before continuing.")
-                    st.stop()
-                _wbs_row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
+                # Never write a selection over an unrelated project/revision.
+                if _wbs_save_current:
+                    try:
+                        _wbs_saved_rows = (supabase.table("writersblock_project_drafts")
+                            .select("id, version_number, draft_content")
+                            .eq("id", _wbs_row_id).eq("project_id", get_active_project_id())
+                            .eq("user_id", get_current_user_id()).eq("draft_type", "project_session")
+                            .limit(1).execute()).data or []
+                        if len(_wbs_saved_rows) != 1:
+                            raise ValueError("The exact revision was not found")
+                        _wbs_original = json.loads(_wbs_saved_rows[0]["draft_content"] or "{}")
+                        if not isinstance(_wbs_original, dict):
+                            raise ValueError("Invalid saved revision")
+                        if str(_wbs_original.get("chosen_option") or "").strip():
+                            st.error("This revision already contains a selected path. Use Save as New Revision to preserve it.")
+                            st.stop()
+                        if any(_wbs_original.get(k) for k in ("plot_outline", "current_draft_output", "rewritten_manuscript", "final_output_text")):
+                            st.error("This revision contains downstream work. Save as New Revision to protect it.")
+                            st.stop()
+                        _wbs_original["chosen_option"] = _wbs_title
+                        _wbs_original["chosen_option_text"] = _wbs_selected_text
+                        _wbs_write = (supabase.table("writersblock_project_drafts")
+                            .update({"draft_content": json.dumps(_wbs_original)})
+                            .eq("id", _wbs_row_id).eq("project_id", get_active_project_id())
+                            .eq("user_id", get_current_user_id()).eq("draft_type", "project_session")
+                            .execute())
+                        if not getattr(_wbs_write, "data", None):
+                            raise ValueError("Database did not confirm the update")
+                    except Exception as _wbs_exc:
+                        st.error(f"Current revision was not confirmed: {_wbs_exc}")
+                        st.stop()
+                else:
+                    st.session_state.chosen_option = _wbs_title
+                    st.session_state.chosen_option_text = _wbs_selected_text
+                    # New branch only; existing saved revisions remain unchanged.
+                    st.session_state.plot_outline = None
+                    st.session_state.current_draft_output = None
+                    st.session_state.rewritten_manuscript = None
+                    st.session_state.final_output_text = None
+                    _wbs_result = save_current_project_session_to_supabase(save_as_new_version=True)
+                    if not _wbs_result or getattr(_wbs_result, "unchanged", False):
+                        st.error("New revision was not confirmed; no further navigation permitted.")
+                        st.stop()
+                    _wbs_row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
                 try:
                     _wbs_rows = (supabase.table("writersblock_project_drafts")
                                  .select("id, project_id, draft_content")
@@ -8756,12 +8809,18 @@ elif st.session_state.project_stage == "Sandbox":
                                  .eq("draft_type", "project_session").limit(1).execute()).data or []
                     _wbs_verified = json.loads(_wbs_rows[0]["draft_content"]) if len(_wbs_rows) == 1 else {}
                 except Exception as _wbs_exc:
-                    st.error(f"Path was inserted but could not be verified: {_wbs_exc}. Do not advance.")
+                    st.error(f"Path write could not be verified: {_wbs_exc}. Do not advance.")
                     st.stop()
                 if (_wbs_verified.get("chosen_option") != _wbs_title
                         or _wbs_verified.get("chosen_option_text") != _wbs_selected_text):
                     st.error("Saved revision does not contain the exact selected path. Do not advance.")
                     st.stop()
+                st.session_state.chosen_option = _wbs_title
+                st.session_state.chosen_option_text = _wbs_selected_text
+                if _wbs_save_current:
+                    set_loaded_concept_version_baseline(_wbs_verified)
+                    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(_wbs_verified)
+                    st.session_state["_wbs_last_saved_project_id"] = str(get_active_project_id())
                 st.session_state.pop("_wbs_stage2_pending_path", None)
                 st.session_state.pop("_wbs_stage2_choose_new", None)
                 st.session_state["_wbs_unlocked_saved_stage"] = max(
