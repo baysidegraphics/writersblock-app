@@ -8902,6 +8902,18 @@ if st.session_state.project_stage == "Plot Architect":
             _wbs_plot_bridge = create_bridge_adapter(
                 backend=st.session_state.backend
             )
+            # Short Story only: give the initial architecture substantive narrative.
+            # Keep the original format-specific generator intact for all other formats.
+            _wbs_short_story_plot = str(get_effective_format_type() or "").strip().lower().replace("_", " ") == "short story"
+            _wbs_plot_length_guidance = (
+                "SHORT STORY INITIAL PLOT ARCHITECTURE: Write FOUR scenes, with at least "
+                "250 words of actual story narrative in each scene (approximately 1,000 words "
+                "total), staying below the 1,500-word short-story cap. Exclude titles, "
+                "planning commentary, scene objectives and style directives from narrative "
+                "word counts. Put planning directives in their dedicated metadata fields, "
+                "never in scene prose. The author may shorten or lengthen scenes later."
+                if _wbs_short_story_plot else ""
+            )
             _wbs_plot_result = _wbs_plot_bridge.execute(
                 "Generate plot outline",
                 st.session_state,
@@ -8911,8 +8923,10 @@ if st.session_state.project_stage == "Plot Architect":
                     "format_development_context": get_full_project_continuity_context(),
                     "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
                     "quill_template_context": refresh_quill_template_context(),
+                    "initial_scene_length_guidance": _wbs_plot_length_guidance,
                 },
                 action_payload={
+                    "initial_scene_length_guidance": _wbs_plot_length_guidance,
                     "chosen_option": st.session_state.chosen_option,
                     "chosen_option_text": get_plot_dialogue_context(),
                     "tone_style": st.session_state.tone_style,
@@ -9052,7 +9066,18 @@ if st.session_state.project_stage == "Plot Architect":
                 if _scene_match:
                     _tail = _selected_outline[_scene_match.end():]
                     _next = _next_header.search(_tail)
-                    _scene_text = _wbs_reader_scene_text(_tail[:_next.start() if _next else len(_tail)].strip().strip("=").strip())
+                    _raw_scene_text = _tail[:_next.start() if _next else len(_tail)].strip().strip("=").strip()
+                    _scene_text = _wbs_reader_scene_text(_raw_scene_text)
+                    if str(get_effective_format_type() or "").strip().lower().replace("_", " ") == "short story":
+                        _direction = re.search(
+                            r"(?is)(?:Her|His|Their|The character's|The protagonist's)\s+conflict\s+is\s+"
+                            r"(?:purely|primarily|largely)\s+(?:internal|external).*?(?:[.!?](?=\s|$)|$)",
+                            _raw_scene_text,
+                        )
+                        if _direction:
+                            _direction_text = _direction.group(0).strip().strip('“”"')
+                            st.markdown('**Directional Intent (not manuscript text)**')
+                            st.markdown('*“' + _direction_text.replace('*', r'\*') + '”*')
                     if _scene_text:
                         st.markdown("**Scene**")
                         for _paragraph in re.split(r"\n\s*\n", _scene_text):
