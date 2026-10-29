@@ -9079,13 +9079,27 @@ def wbs_ss_save_scene_to_current_revision(scene_number, scene_text):
     return stored
 
 
+def wbs_ss_safe_scene_draft(draft, recorded_scene):
+    """Never let an empty transient editor buffer conceal existing scene prose.
+
+    Streamlit can retain an empty widget value while a generated or saved scene
+    already exists. A blank is not a valid scene save, so restore the intact
+    generated/saved text; do not change either the database or V-number here.
+    Nonempty edits, including accepted rewrite previews, are kept exactly.
+    """
+    if not str(draft or "").strip() and str(recorded_scene or "").strip():
+        return recorded_scene
+    return draft if draft is not None else recorded_scene
+
+
 def wbs_ss_capture_draft_on_selection_change():
-    """Keep unaccepted editor text in session scratch without editing story/version."""
+    """Keep scene edits in session while navigating, without saving a revision."""
     old_n = st.session_state.get("_wbs_ss_previous_selection")
     old_widget = st.session_state.get("_wbs_ss_editor_widget_key")
     if old_n in (1, 2, 3, 4) and old_widget and old_widget in st.session_state:
         buffers = dict(st.session_state.get("_wbs_ss_edit_buffers") or {})
-        buffers[old_n] = st.session_state[old_widget]
+        existing = wbs_ss_blocks(st.session_state.get("scene_blocks") or {}).get(old_n, "")
+        buffers[old_n] = wbs_ss_safe_scene_draft(st.session_state[old_widget], existing)
         st.session_state["_wbs_ss_edit_buffers"] = buffers
 
 
@@ -9412,10 +9426,15 @@ if st.session_state.project_stage == "Plot Architect":
             _ss_buffer[_ss_selected] = _ss_pending_accept[1]
             st.session_state[_ss_widget_key] = _ss_pending_accept[1]
             st.session_state["_wbs_ss_edit_buffers"] = _ss_buffer
-        if _ss_selected not in _ss_buffer:
-            _ss_buffer[_ss_selected] = _ss_original
-        if _ss_widget_key not in st.session_state:
-            st.session_state[_ss_widget_key] = _ss_buffer[_ss_selected]
+        # Recover the existing scene from its canonical scene block when an
+        # empty scratch buffer or Streamlit widget would otherwise hide it.
+        # This is an in-memory UI repair, NOT a generation or automatic save.
+        _ss_buffer[_ss_selected] = wbs_ss_safe_scene_draft(
+            _ss_buffer.get(_ss_selected), _ss_original)
+        st.session_state[_ss_widget_key] = wbs_ss_safe_scene_draft(
+            st.session_state.get(_ss_widget_key, _ss_buffer[_ss_selected]),
+            _ss_buffer[_ss_selected])
+        st.session_state["_wbs_ss_edit_buffers"] = _ss_buffer
         st.session_state["_wbs_ss_previous_selection"] = _ss_selected
         st.session_state["_wbs_ss_editor_widget_key"] = _ss_widget_key
         # Keep the original writer-facing layout: scene story on the LEFT;
@@ -9650,6 +9669,12 @@ if st.session_state.project_stage == "Plot Architect":
                                 else:
                                     _ss_blocks[_ss_button_n] = _ss_text
                                     st.session_state.scene_blocks = _ss_blocks
+                                    # Prime the next scene's editor from actual
+                                    # generated prose. A prior blank scratch entry
+                                    # must never mask the newly created scene.
+                                    _ss_next_buffers = dict(st.session_state.get("_wbs_ss_edit_buffers") or {})
+                                    _ss_next_buffers[_ss_button_n] = _ss_text
+                                    st.session_state["_wbs_ss_edit_buffers"] = _ss_next_buffers
                                     if set(_ss_blocks) == {1, 2, 3, 4}:
                                         st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
                                     st.session_state["_wbs_ss_jump_to"] = _ss_button_n
@@ -9657,31 +9682,31 @@ if st.session_state.project_stage == "Plot Architect":
                                     st.success(f"Scene {_ss_button_n} generated as working text. Review and save it explicitly.")
                                     st.rerun()
         else:
-            # Scene 4 exists; allow explicit save before reviewing all four.
+            # Scene 4 already exists: one click automatically commits the live
+            # scene and opens the full-story editorial review. No separate
+            # "Save Scene 4" click or version increment is required.
             if st.button("Save & Continue to Editorial Review", type="primary",
                          key="wbs_ss_stage4_continue", use_container_width=True,
                          disabled=bool(st.session_state.get("demo_mode")) or _ss_selected != 4):
-                if _ss_selected == 4:
+                # The generated/saved scene is authoritative when a stale
+                # Streamlit text widget is accidentally blank. Preserve any
+                # nonempty accepted rewrite instead of reverting it.
+                _ss_final = wbs_ss_safe_scene_draft(
+                    st.session_state.get(_ss_widget_key), _ss_blocks.get(4, ""))
+                if not str(_ss_final or "").strip():
+                    st.error("Scene 4 contains no story text. Return to the scene to generate it.")
+                else:
                     try:
-                        wbs_ss_save_scene_to_current_revision(4, str(st.session_state.get(_ss_widget_key) or ""))
+                        wbs_ss_save_scene_to_current_revision(4, _ss_final)
                     except Exception as exc:
-                        st.error(f"Scene 4 could not be saved: {exc}")
-                        st.stop()
-                    _ss_blocks[4] = str(st.session_state[_ss_widget_key])
-                    st.session_state.scene_blocks = _ss_blocks
-                    if set(_ss_blocks) == {1, 2, 3, 4}:
+                        st.error(f"Scene 4 could not be saved automatically: {exc}")
+                    else:
+                        _ss_blocks[4] = _ss_final
+                        st.session_state.scene_blocks = _ss_blocks
                         st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
-                else:
-                    # Do not silently discard edits to another selected scene.
-                    if _ss_changed:
-                        st.error(f"Save the edited Scene {_ss_selected} first.")
-                        st.stop()
-                if set(_ss_blocks) == {1,2,3,4}:
-                    st.session_state["_wbs_unlocked_saved_stage"] = max(
-                        int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 4)
-                    wbs_request_stage_change("Isolation Guardrail", export_view=False)
-                else:
-                    st.error("All four actual scenes are required; no content was invented.")
+                        st.session_state["_wbs_unlocked_saved_stage"] = max(
+                            int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 4)
+                        wbs_request_stage_change("Isolation Guardrail", export_view=False)
         # When the next scene already exists, the same bottom position serves
         # as simple navigation. The editor/Quill layout remains identical.
         _ss_following = _ss_selected + 1
