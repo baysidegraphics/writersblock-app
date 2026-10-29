@@ -7309,8 +7309,8 @@ st.sidebar.markdown(
 
 # WBS GLOBAL SAVE-BEFORE-STAGE-CHANGE 2026-10-24
 _WBS_STAGE_TITLES = {
-    "Intake": "1. Concept Development", "Sandbox": "2. Scripting",
-    "Plot Architect": "3. Plot Architecture", "Drafting Engine": "4. Creative Draft",
+    "Intake": "1. Concept Development", "Sandbox": "2. Plot Architecture",
+    "Plot Architect": "3. Scene Scripting", "Drafting Engine": "4. Creative Draft",
     "Revision Engine": "6. Script Polish", "Rewrite Engine": "7. Script Rewrite",
 }
 
@@ -7494,20 +7494,20 @@ else:
         wbs_request_stage_change("Intake")
 
 if st.session_state.project_stage == "Sandbox":
-    st.sidebar.button("🔵 2. Scripting (Active)", key="nav_sandbox_active", use_container_width=True)
+    st.sidebar.button("🔵 2. Plot Architecture (Active)", key="nav_sandbox_active", use_container_width=True)
 elif can_navigate_to_sandbox:
-    if st.sidebar.button("⚪ 2. Scripting", key="nav_sandbox", use_container_width=True):
+    if st.sidebar.button("⚪ 2. Plot Architecture", key="nav_sandbox", use_container_width=True):
         wbs_request_stage_change("Sandbox")
 else:
-    st.sidebar.button("🔒 2. Scripting (Locked)", key="nav_sandbox_locked", disabled=True, use_container_width=True)
+    st.sidebar.button("🔒 2. Plot Architecture (Locked)", key="nav_sandbox_locked", disabled=True, use_container_width=True)
 
 if st.session_state.project_stage == "Plot Architect":
-    st.sidebar.button("🔵 3. Plot Architecture (Active)", key="nav_plot_active", use_container_width=True)
+    st.sidebar.button("🔵 3. Scene Scripting (Active)", key="nav_plot_active", use_container_width=True)
 elif can_navigate_to_plot:
-    if st.sidebar.button("⚪ 3. Plot Architecture", key="nav_plot", use_container_width=True):
+    if st.sidebar.button("⚪ 3. Scene Scripting", key="nav_plot", use_container_width=True):
         wbs_request_stage_change("Plot Architect")
 else:
-    st.sidebar.button("🔒 3. Plot Architecture (Locked)", key="nav_plot_locked", disabled=True, use_container_width=True)
+    st.sidebar.button("🔒 3. Scene Scripting (Locked)", key="nav_plot_locked", disabled=True, use_container_width=True)
 
 # Five-stage navigation: drafting runs internally; editing tools share Stage 4.
 # Legacy internal stages remain loadable for earlier saved projects.
@@ -8705,7 +8705,7 @@ if st.session_state.project_stage == "Intake":
             render_quill_for_current_stage(st_module=st, show_prelude=True)
 
 elif st.session_state.project_stage == "Sandbox":
-    st.header("🗺️ Step 2: Scripting")
+    st.header("🗺️ Step 2: Plot Architecture")
     render_project_title_banner("step_2_scripting")
     st.markdown("##### Shape the first working script paths from your concept.")
     st.caption(f"Dialogue Style: {get_dialogue_style_display()} — inherited from Concept Development. Project type controls dialogue formatting.")
@@ -8898,7 +8898,7 @@ elif st.session_state.project_stage == "Sandbox":
 # PHASE 3: PLOT ARCHITECT ENGINE
 # ==========================================
 if st.session_state.project_stage == "Plot Architect":
-    st.header("🏗️ Step 3: Plot Architecture")
+    st.header("🏗️ Step 3: Scene Scripting")
     render_project_title_banner("step_3_plot_architecture")
     st.caption(
         f"Dialogue Style: {get_dialogue_style_display()} — carried forward from Concept Development. "
