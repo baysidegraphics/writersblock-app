@@ -9246,7 +9246,7 @@ if st.session_state.project_stage == "Plot Architect":
         _ss_identity = wbs_ss_revision_identity()
         if st.session_state.get("_wbs_ss_editor_identity") != _ss_identity:
             for _key in ("_wbs_ss_edit_buffers", "_wbs_ss_selected", "_wbs_ss_previous_selection",
-                         "_wbs_ss_editor_widget_key", "_wbs_ss_db_scene_baseline", "_wbs_ss_rewrite_preview"):
+                         "_wbs_ss_editor_widget_key", "_wbs_ss_db_scene_baseline", "_wbs_ss_rewrite_preview", "_wbs_ss_last_configs"):
                 st.session_state.pop(_key, None)
             st.session_state["_wbs_ss_editor_identity"] = _ss_identity
             st.session_state["_wbs_ss_initial_loaded_blocks"] = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
@@ -9288,84 +9288,179 @@ if st.session_state.project_stage == "Plot Architect":
             st.session_state[_ss_widget_key] = _ss_buffer[_ss_selected]
         st.session_state["_wbs_ss_previous_selection"] = _ss_selected
         st.session_state["_wbs_ss_editor_widget_key"] = _ss_widget_key
+        # Keep the original writer-facing layout: scene story on the LEFT;
+        # the original script rewrite controls, not a duplicate story, on RIGHT.
+        # Unsaved changes live only in per-scene scratch buffers until Save or Next.
+        _ss_working = str(st.session_state.get(_ss_widget_key, _ss_original) or "")
+        _ss_changed = _ss_working != _ss_original
         _ss_left, _ss_right = st.columns([1.15, 1], gap="large")
         with _ss_left:
             st.subheader(f"Scene {_ss_selected} — {_ss_title}")
-            st.caption(f"Saved working text · {count_words(_ss_original):,} words" if _ss_selected in _ss_blocks
-                       else "Original scene prose from the selected storyline — not yet saved as a scene")
-            for _p in _wbs_display_paragraphs(_ss_original if _ss_selected in _ss_blocks
-                                               else _wbs_reader_scene_text(_ss_original)):
-                st.write(_p)
+            if _ss_changed:
+                st.caption(f"Edited working scene · {count_words(_ss_working):,} words · Not yet saved")
+            elif _ss_selected in _ss_blocks:
+                st.caption(f"Saved working scene · {count_words(_ss_working):,} words")
+            else:
+                st.caption("Original story from the selected plot — save before advancing")
+            for _p in _wbs_display_paragraphs(_ss_working):
+                if _p.strip():
+                    st.write(_p)
         with _ss_right:
-            st.subheader("Scene Editor / Rewrite")
-            _ss_edited = st.text_area("Scene story text", height=320, key=_ss_widget_key)
-            st.caption(f"Working words: {count_words(_ss_edited):,}")
-            _ss_current = _ss_blocks.get(_ss_selected, "")
-            _ss_changed = _ss_edited != _ss_current
-            if st.button(f"Save Scene {_ss_selected} to Current Revision", key=f"wbs_ss_save_{_ss_selected}",
-                         use_container_width=True, disabled=bool(st.session_state.get("demo_mode"))):
-                try:
-                    wbs_ss_save_scene_to_current_revision(_ss_selected, _ss_edited)
-                except Exception as exc:
-                    st.error(f"Scene was not saved: {exc}")
-                else:
-                    _ss_blocks[_ss_selected] = _ss_edited
-                    st.session_state.scene_blocks = _ss_blocks
-                    if set(_ss_blocks) == {1, 2, 3, 4}:
-                        st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
-                    _ss_buffer.pop(_ss_selected, None)
-                    st.session_state["_wbs_ss_edit_buffers"] = _ss_buffer
-                    st.success(f"Scene {_ss_selected} saved to this revision. No new V-number created.")
-                    st.rerun()
+            # Keep the original scene-script editor controls in the right column.
+            # Only the LEFT column displays the accepted/current story. The right
+            # column displays proposed prose only after a rewrite request.
+            st.markdown("#### Script Rewrite Controls")
+            _ss_mode = st.selectbox("Rewrite Mode", [
+                "Creative Script Rewrite / Improve Scene",
+                "Polish Only / Do Not Change Story",
+            ], key=f"wbs_ss_rewrite_mode_{_ss_selected}")
+            _ss_length = st.selectbox("Target Length", [
+                "Keep Current Length", "Condense for Tighter Pacing", "Custom Word Count",
+            ], key=f"wbs_ss_rewrite_length_{_ss_selected}")
+            _ss_custom_words = None
+            if _ss_length == "Custom Word Count":
+                _ss_custom_words = st.number_input(
+                    "Target words", min_value=50, max_value=2500,
+                    value=max(50, min(2500, count_words(_ss_working) or 250)),
+                    step=25, key=f"wbs_ss_rewrite_custom_words_{_ss_selected}")
+            _ss_dialogue = st.selectbox("Dialogue Style for Rewrite", [
+                "Use Current Project Dialogue Style", *DIALOGUE_STYLE_OPTIONS,
+            ], key=f"wbs_ss_rewrite_dialogue_{_ss_selected}")
+            _ss_exact = st.checkbox(
+                "Direct Script Change / Obey My Instructions Exactly",
+                key=f"wbs_ss_direct_{_ss_selected}",
+                help="Apply only the requested changes, without creative additions.")
             _ss_rewrite_direction = st.text_area(
-                "Rewrite instructions (optional)", key=f"wbs_ss_rewrite_direction_{_ss_selected}", height=90)
-            _ss_exact = st.checkbox("Direct Script Change / Obey My Instructions Exactly",
-                                    key=f"wbs_ss_direct_{_ss_selected}")
-            if st.button("Preview Rewritten Scene", key=f"wbs_ss_preview_{_ss_selected}",
-                         use_container_width=True):
-                if _ss_exact:
-                    if not _ss_rewrite_direction.strip():
-                        st.error("Enter replacement story text first.")
-                    else:
-                        st.session_state["_wbs_ss_rewrite_preview"] = (_ss_selected, _ss_edited, _ss_rewrite_direction)
-                else:
-                    _backend = st.session_state.get("backend")
-                    _client = getattr(_backend, "client", None)
-                    _model = getattr(_backend, "model_name", None)
-                    if not _client or not _model:
-                        st.error("The writing service is unavailable. No text changed.")
-                    else:
-                        try:
-                            _ss_prompt = (
-                                "Rewrite only this one finished short-story scene, maintaining characters, plot, "
-                                "story continuity, tense, voice and story length unless otherwise requested. "
-                                "Return narrative prose only, no titles, scene notes or instructions. "
-                                f"Writer's instructions: {_ss_rewrite_direction or 'Polish this scene.'}\n\n"
-                                f"CURRENT SCENE:\n{_ss_edited}")
-                            _res = _client.models.generate_content(model=_model, contents=_ss_prompt)
-                            _proposal = str(getattr(_res, "text", "") or "").strip()
-                            if not _proposal or re.search(r"(?im)^\s*\[(BEAT|CORE OBJECTIVE|STYLE)", _proposal):
-                                raise ValueError("Rewrite did not return clean narrative prose")
-                            st.session_state["_wbs_ss_rewrite_preview"] = (_ss_selected, _ss_edited, _proposal)
-                        except Exception as exc:
-                            st.error(f"Rewrite unavailable: {exc}")
-            _ss_proposal = st.session_state.get("_wbs_ss_rewrite_preview")
-            if isinstance(_ss_proposal, (tuple, list)) and len(_ss_proposal) == 3 and _ss_proposal[0] == _ss_selected:
-                st.text_area("Proposed revision — review before accepting", value=_ss_proposal[2],
-                             disabled=True, height=240, key=f"wbs_ss_proposal_read_{_ss_selected}")
-                _ss_a, _ss_d = st.columns(2)
-                with _ss_a:
-                    if st.button("Accept Rewrite", key=f"wbs_ss_accept_{_ss_selected}", use_container_width=True):
-                        if st.session_state[_ss_widget_key] != _ss_proposal[1]:
-                            st.error("The source text changed. Generate another preview first.")
+                "Specific Rewrite Direction (optional)",
+                key=f"wbs_ss_rewrite_direction_{_ss_selected}", height=130,
+                placeholder="Describe the change you want to this scene.")
+
+            # Selecting a *different* dropdown setting previews a new rewrite.
+            # Initial widget render does not make an API call. Changing only the
+            # instructions requires clicking Preview or Rewrite Again; this
+            # avoids API calls on every text-editing rerun.
+            _ss_control_values = (
+                _ss_mode, _ss_length, _ss_custom_words, _ss_dialogue, _ss_exact)
+            _ss_config_key = (str(_ss_identity), _ss_selected)
+            _ss_previous_configs = dict(st.session_state.get("_wbs_ss_last_configs") or {})
+            _ss_previous_config = _ss_previous_configs.get(str(_ss_config_key))
+            _ss_dropdown_changed = (_ss_previous_config is not None
+                                    and tuple(_ss_previous_config) != _ss_control_values)
+            _ss_previous_configs[str(_ss_config_key)] = _ss_control_values
+            st.session_state["_wbs_ss_last_configs"] = _ss_previous_configs
+            _ss_request_signature = get_text_signature(repr((
+                _ss_selected, _ss_working, _ss_control_values,
+                _ss_rewrite_direction)))
+            _ss_preview_clicked = st.button(
+                "Preview Rewritten Storyline", key=f"wbs_ss_preview_{_ss_selected}",
+                use_container_width=True)
+            _ss_previous_proposal = st.session_state.get("_wbs_ss_rewrite_preview")
+            _ss_rewrite_again = False
+            if (isinstance(_ss_previous_proposal, (tuple, list))
+                    and len(_ss_previous_proposal) == 4
+                    and _ss_previous_proposal[0] == _ss_selected
+                    and _ss_previous_proposal[3] == _ss_request_signature):
+                # A preview is always shown beneath the controls, never left.
+                st.markdown("##### Preview Rewritten Storyline")
+                st.text_area(
+                    "Proposed scene — review before accepting",
+                    value=_ss_previous_proposal[2], disabled=True, height=230,
+                    key=f"wbs_ss_proposal_read_{_ss_selected}_{get_text_signature(_ss_previous_proposal[2])[:14]}")
+                _ss_accept_col, _ss_again_col = st.columns(2)
+                with _ss_accept_col:
+                    if st.button("✓ Accept Rewrite", key=f"wbs_ss_accept_{_ss_selected}",
+                                 type="primary", use_container_width=True):
+                        if _ss_working != _ss_previous_proposal[1]:
+                            st.error("The original scene changed; generate another preview before accepting.")
                         else:
-                            st.session_state["_wbs_ss_pending_accept"] = (_ss_selected, _ss_proposal[2])
+                            # Accept updates the LEFT story on rerun, but does NOT
+                            # silently save or increment a revision number.
+                            st.session_state["_wbs_ss_pending_accept"] = (
+                                _ss_selected, _ss_previous_proposal[2])
                             st.session_state.pop("_wbs_ss_rewrite_preview", None)
                             st.rerun()
-                with _ss_d:
-                    if st.button("Discard Rewrite", key=f"wbs_ss_discard_{_ss_selected}", use_container_width=True):
+                with _ss_again_col:
+                    _ss_rewrite_again = st.button(
+                        "↻ Rewrite Again", key=f"wbs_ss_again_{_ss_selected}",
+                        use_container_width=True)
+            elif _ss_previous_proposal and _ss_previous_proposal[0] == _ss_selected:
+                # An edited source or changed setting invalidates the old
+                # proposal. Never offer to accept an outdated rewrite.
+                st.session_state.pop("_wbs_ss_rewrite_preview", None)
+
+            if _ss_dropdown_changed or _ss_preview_clicked or _ss_rewrite_again:
+                _backend = st.session_state.get("backend")
+                _client = getattr(_backend, "client", None)
+                _model = getattr(_backend, "model_name", None)
+                if not _ss_working.strip():
+                    st.error("This scene has no story text to revise.")
+                elif _ss_exact and not _ss_rewrite_direction.strip():
+                    st.error("Describe the exact change before requesting a rewrite.")
+                elif not _client or not _model:
+                    st.error("The writing service is unavailable. Your existing scene was not changed.")
+                else:
+                    try:
+                        _ss_dialogue_rule = (
+                            get_dialogue_style_instruction()
+                            if _ss_dialogue == "Use Current Project Dialogue Style"
+                            else DIALOGUE_STYLE_INSTRUCTIONS.get(_ss_dialogue, _ss_dialogue))
+                        _ss_target = (f"Target approximately {_ss_custom_words} words."
+                                      if _ss_custom_words else _ss_length + ".")
+                        _ss_directive = (
+                            "Follow the writer's change instructions EXACTLY. Do not add "
+                            "creative changes or alter unrelated passages. " if _ss_exact else
+                            "Revise this scene according to the selected rewrite mode. ")
+                        _ss_prompt = (
+                            "You are rewriting ONLY ONE scene of an existing FOUR-scene short story. "
+                            + _ss_directive +
+                            "Return ONLY finished narrative prose. No titles, scene numbers, "
+                            "meta-commentary, objectives, formatting tags, or writing directions. "
+                            "Preserve voice, characters, tense, plot continuity, and key events "
+                            "unless the writer explicitly requests otherwise. "
+                            f"Mode: {_ss_mode}. Length: {_ss_target} "
+                            f"Dialogue: {_ss_dialogue_rule}. "
+                            f"Writer direction: {_ss_rewrite_direction or 'Improve the prose while preserving the story.'}\n\n"
+                            f"SCENE {_ss_selected} ORIGINAL:\n{_ss_working}")
+                        with st.spinner("Preparing rewrite preview..."):
+                            _ss_res = _client.models.generate_content(
+                                model=_model, contents=_ss_prompt)
+                        _ss_proposed = str(getattr(_ss_res, "text", "") or "").strip()
+                        if not _ss_proposed or re.search(
+                                r"(?im)^\s*\[(BEAT|CORE OBJECTIVE|STYLE)", _ss_proposed):
+                            raise ValueError("The writer did not return clean story prose")
+                        st.session_state["_wbs_ss_rewrite_preview"] = (
+                            _ss_selected, _ss_working, _ss_proposed, _ss_request_signature)
+                        # Preview is displayed directly below the controls on
+                        # the next rerun; nothing on the left changes yet.
+                        st.rerun()
+                    except Exception as exc:
+                        st.session_state.pop("_wbs_ss_rewrite_preview", None)
+                        st.error(f"Rewrite unavailable: {exc}")
+
+            # Optional manual editing remains available but never duplicates
+            # an unsolicited scene review in this column.
+            with st.expander("Edit Scene Text Manually", expanded=False):
+                _ss_manual_edit = st.text_area(
+                    "Editable scene text", height=220, key=_ss_widget_key)
+                st.caption(f"Working words: {count_words(_ss_manual_edit):,}")
+                if st.button(f"Save Scene {_ss_selected} to Current Revision",
+                             key=f"wbs_ss_save_{_ss_selected}", use_container_width=True,
+                             disabled=bool(st.session_state.get("demo_mode"))):
+                    try:
+                        wbs_ss_save_scene_to_current_revision(_ss_selected, _ss_manual_edit)
+                    except Exception as exc:
+                        st.error(f"Scene was not saved: {exc}")
+                    else:
+                        _ss_blocks[_ss_selected] = _ss_manual_edit
+                        st.session_state.scene_blocks = _ss_blocks
+                        if set(_ss_blocks) == {1, 2, 3, 4}:
+                            st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
+                        _ss_buffer.pop(_ss_selected, None)
+                        st.session_state["_wbs_ss_edit_buffers"] = _ss_buffer
                         st.session_state.pop("_wbs_ss_rewrite_preview", None)
                         st.rerun()
+            if _ss_changed:
+                st.caption("Accepted edits appear on the left. Save Scene or use the bottom button to save them to this revision.")
         # Scene 1 already exists as narrative prose in the saved plot.
         # The first bottom button must create Scene 2, NOT look for a missing
         # scene_blocks[1] and misreport the original Scene 1 as ungenerated.
