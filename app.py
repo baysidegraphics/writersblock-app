@@ -450,6 +450,7 @@ def get_project_session_snapshot():
         "project_integrity_report",
         "project_integrity_source_signature",
         "project_integrity_status",
+        "wbs_stage4_scene_approvals",
         "export_view",
         "final_output_format",
         "final_output_text",
@@ -1346,6 +1347,9 @@ def load_saved_project_session_to_state(saved_session_row):
             st.session_state[key] = value
     st.session_state.last_saved_project_at = snapshot.get("saved_at")
     st.session_state["_wbs_active_saved_session_row_id"] = str(saved_session_row.get("id") or "")
+    st.session_state["wbs_stage4_scene_approvals"] = snapshot.get("wbs_stage4_scene_approvals") or {}
+    st.session_state.pop("_wbs_stage4_review_identity", None)
+    st.session_state.pop("_wbs_stage4_approved_scenes", None)
     st.session_state["_wbs_stage3_saved_outline_baseline"] = str(snapshot.get("plot_outline") or "").strip()
     st.session_state["_wbs_stage3_unsaved_changes"] = False
     st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(verified)
@@ -5241,8 +5245,8 @@ def render_project_title_banner(stage_key):
             st.caption("Revision Status: Plot Architecture INCOMPLETE — no plot selected. Last completed: Concept Development. Next: Select a plot and save.")
     if st.session_state.get("project_stage") != "Intake" and (st.session_state.get("licensed_mode") or st.session_state.get("demo_mode")):
         render_quill_for_current_stage(st_module=st, show_prelude=True)
-    if stage_key != "step_2_scripting" and not st.session_state.get("demo_mode"):
-        render_save_open_project_to_series()
+    # Series assignment is handled in Stage 1 (Concept Development) only.
+    # Do not present the Series control during review, scripting or final output.
 
 
 def make_version_display_label(version):
@@ -7401,6 +7405,40 @@ def wbs_verify_navigation_project_identity():
     return True
 
 
+def wbs_stage4_final_access_ready():
+    """Stage 5 gate available even before Stage 3 helper definitions are reached.
+
+    Protect every format that uses four exact saved scenes. Legacy non-scene
+    formats keep their existing Final Manuscript path.
+    """
+    raw = st.session_state.get("scene_blocks") or {}
+    blocks = {}
+    if isinstance(raw, dict):
+        for key, text in raw.items():
+            try:
+                number = int(key)
+            except (ValueError, TypeError):
+                continue
+            if number in (1, 2, 3, 4) and isinstance(text, str) and text.strip():
+                blocks[number] = text
+    manuscript = str(st.session_state.get("current_draft_output") or "")
+    exact_four = (set(blocks) == {1, 2, 3, 4}
+                  and manuscript == "\n\n".join(blocks[n] for n in range(1, 5)))
+    requires_review = (st.session_state.get("active_format_id") == "short_story"
+                       or exact_four)
+    if not requires_review:
+        return True
+    if not exact_four:
+        return False
+    approval = st.session_state.get("wbs_stage4_scene_approvals") or {}
+    if not isinstance(approval, dict):
+        return False
+    return (approval.get("source_signature") == get_text_signature(manuscript)
+            and approval.get("scene_signatures") == {
+                str(n): get_text_signature(blocks[n]) for n in range(1, 5)}
+            and set(approval.get("approved") or []) == {1, 2, 3, 4})
+
+
 def wbs_request_stage_change(destination, export_view=None):
     """Go directly to the requested writing stage; never display a second save gate.
 
@@ -7439,9 +7477,8 @@ def wbs_request_stage_change(destination, export_view=None):
                      "Revision Engine": 4, "Rewrite Engine": 4}
     target_level = 5 if destination == "Isolation Guardrail" and target_export else review_levels.get(destination, 99)
     if (destination == "Isolation Guardrail" and target_export
-            and st.session_state.get("active_format_id") == "short_story"
-            and not wbs_ss_approved_for_final()):
-        st.warning("Approve all four original scenes in Editorial Review before Final Manuscript.")
+            and not wbs_stage4_final_access_ready()):
+        st.warning("Review and accept the complete four-scene story in Stage 4 before Final Manuscript.")
         return
     if target_level > wbs_reached_review_level(st.session_state):
         st.warning("This stage has not been developed yet.")
@@ -9061,8 +9098,99 @@ def wbs_ss_approved_for_final():
     signature = get_text_signature(wbs_ss_storyline(blocks))
     identity = (str(st.session_state.get("_wbs_active_saved_session_row_id") or ""), signature,
                 tuple((i, get_text_signature(blocks[i])) for i in range(1, 5)))
-    return (st.session_state.get("_wbs_stage4_review_identity") == identity
-            and set(st.session_state.get("_wbs_stage4_approved_scenes") or []) == {1, 2, 3, 4})
+    persisted = wbs_stage4_valid_approvals(
+        st.session_state.get("wbs_stage4_scene_approvals"), blocks,
+        st.session_state.get("current_draft_output"))
+    return (persisted == {1, 2, 3, 4}
+            or (st.session_state.get("_wbs_stage4_review_identity") == identity
+                and set(st.session_state.get("_wbs_stage4_approved_scenes") or []) == {1, 2, 3, 4}))
+
+# STAGE 4 — Editorial approvals share one scene-based workflow across formats.
+# The selected scene's content is NEVER changed by approving it. A review
+# confirmation is stored on the existing project_session row, without V-number
+# increments or a new version. Saved content hashes prevent stale approvals.
+def wbs_stage4_approval_record(blocks, manuscript):
+    """Expected proof of exactly which four scene texts are being accepted."""
+    actual = wbs_ss_blocks(blocks)
+    if set(actual) != {1, 2, 3, 4} or wbs_ss_storyline(actual) != str(manuscript or ""):
+        raise ValueError("All four original scenes must match the current manuscript before approval.")
+    return {
+        "source_signature": get_text_signature(manuscript),
+        "scene_signatures": {str(n): get_text_signature(actual[n]) for n in range(1, 5)},
+    }
+
+
+def wbs_stage4_valid_approvals(approvals, blocks, manuscript):
+    """Only trust approvals for these EXACT scene boundaries and story contents."""
+    if not isinstance(approvals, dict):
+        return set()
+    try:
+        proof = wbs_stage4_approval_record(blocks, manuscript)
+    except ValueError:
+        return set()
+    if (approvals.get("source_signature") != proof["source_signature"]
+            or approvals.get("scene_signatures") != proof["scene_signatures"]):
+        return set()
+    approved = approvals.get("approved") or []
+    if not isinstance(approved, list):
+        return set()
+    return {int(n) for n in approved if str(n) in {"1", "2", "3", "4"}}
+
+
+def wbs_stage4_accept_and_save(scene_number=None):
+    """Accept the complete four-scene story with a SINGLE exact-revision update.
+
+    A numbered scene is supported for backward compatibility, but Stage 4's
+    user-facing approval now signs off the entire manuscript at once. The
+    original scene text, format, and V-number are never changed here.
+    """
+    number = int(scene_number) if scene_number is not None else None
+    if number is not None and number not in (1, 2, 3, 4):
+        raise ValueError("Choose a scene from 1 to 4.")
+    row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
+    project_id = str(get_active_project_id() or "")
+    user_id = str(get_current_user_id() or "")
+    active_format = str(st.session_state.get("active_format_id") or "")
+    if not (row_id and project_id and user_id and active_format):
+        raise ValueError("Load the exact saved revision before accepting a scene.")
+    manuscript = str(st.session_state.get("current_draft_output") or "")
+    blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
+    proof = wbs_stage4_approval_record(blocks, manuscript)
+    query = (supabase.table("writersblock_project_drafts")
+             .select("id, draft_content, version_number")
+             .eq("id", row_id).eq("project_id", project_id)
+             .eq("user_id", user_id).eq("draft_type", "project_session")
+             .limit(1).execute())
+    rows = getattr(query, "data", None) or []
+    if len(rows) != 1:
+        raise ValueError("The selected saved revision was not found. Nothing was saved.")
+    snapshot = json.loads(rows[0].get("draft_content") or "{}")
+    if (not isinstance(snapshot, dict)
+            or str(snapshot.get("current_project_id") or project_id) != project_id
+            or snapshot.get("active_format_id") != active_format):
+        raise ValueError("Project or format mismatch; approval was not saved.")
+    if (wbs_ss_blocks(snapshot.get("scene_blocks")) != blocks
+            or str(snapshot.get("current_draft_output") or "") != manuscript):
+        raise ValueError("The saved scenes have changed. Reload the revision before accepting.")
+    stored = wbs_stage4_valid_approvals(snapshot.get("wbs_stage4_scene_approvals"), blocks, manuscript)
+    if number is None:
+        stored.update((1, 2, 3, 4))
+    else:
+        stored.add(number)
+    approval = {**proof, "approved": sorted(stored)}
+    snapshot["wbs_stage4_scene_approvals"] = approval
+    updated = (supabase.table("writersblock_project_drafts")
+               .update({"draft_content": json.dumps(snapshot, ensure_ascii=False)})
+               .eq("id", row_id).eq("project_id", project_id)
+               .eq("user_id", user_id).eq("draft_type", "project_session")
+               .execute())
+    if not getattr(updated, "data", None):
+        raise ValueError("The saved revision did not confirm this approval.")
+    st.session_state["wbs_stage4_scene_approvals"] = approval
+    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
+    st.session_state["_wbs_last_saved_project_id"] = project_id
+    return stored
+
 
 # ==========================================
 # PHASE 3: PLOT ARCHITECT ENGINE
@@ -10748,47 +10876,82 @@ elif st.session_state.project_stage == "Isolation Guardrail":
         st.caption("Review your complete working manuscript before final approval. Checks are read-only and never rewrite your work.")
         current_source = str(st.session_state.get("current_draft_output") or "").strip()
         source_signature = get_text_signature(current_source)
-        # Short Story only: review each saved scene before Final Manuscript.
-        # Approvals are scoped to the exact loaded revision and manuscript content;
-        # loading a different revision or changing prose cannot reuse approvals.
-        _wbs_scene_review_required = str(st.session_state.get("format_type") or "").strip().lower() == "short story"
+        # The complete working manuscript is displayed IMMEDIATELY in Stage 4
+        # for EVERY writing format. No AI calls, automatic content mutation or
+        # per-scene review selections are involved in this display.
+        st.markdown("### Complete Story — Editorial Inspection")
+        if current_source:
+            st.text_area("Entire manuscript (read-only)", value=current_source,
+                         height=640, disabled=True,
+                         key=f"wbs_stage4_entire_manuscript_{source_signature[:12]}")
+            st.caption(f"{count_words(current_source):,} words · Complete working manuscript · No AI regeneration")
+        else:
+            st.warning("There is no completed manuscript available. Return to Scene Scripting.")
+        # Stage 4: display the ENTIRE saved manuscript at once, in scene order.
+        # Common to every format with four actual scene blocks, and read-only.
+        # No scene-by-scene approval gate, auto-rewrite, or invented scene splits.
+        _wbs_review_blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
+        _wbs_exact_four = (set(_wbs_review_blocks) == {1, 2, 3, 4}
+                           and current_source == wbs_ss_storyline(_wbs_review_blocks))
+        _wbs_scene_review_required = (
+            str(st.session_state.get("active_format_id") or "") == "short_story"
+            or _wbs_exact_four
+        )
         _wbs_scene_review_complete = True
         if _wbs_scene_review_required:
-            _raw_blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
-            _review_numbers = sorted(_raw_blocks)
             _wbs_scene_review_complete = False
-            st.markdown("### Four-Scene Editorial Approval")
-            if _review_numbers != [1, 2, 3, 4] or current_source != wbs_ss_storyline(_raw_blocks):
-                st.warning("Four actual saved scene boundaries are required. Return to Scene Scripting; no artificial scene divisions or AI regeneration will be used.")
+            if not _wbs_exact_four:
+                st.warning(
+                    "All four saved scenes must match the working manuscript. "
+                    "Return to Scene Scripting to save the missing or edited scene. "
+                    "No replacement text will be generated here."
+                )
+                if st.button("Return to Scene Scripting", key="wbs_stage4_return_incomplete",
+                             use_container_width=True):
+                    wbs_request_stage_change("Plot Architect")
             else:
-                _review_identity = (str(st.session_state.get("_wbs_active_saved_session_row_id") or ""),
-                                    source_signature,
-                                    tuple((n, get_text_signature(_raw_blocks[n])) for n in _review_numbers))
-                if st.session_state.get("_wbs_stage4_review_identity") != _review_identity:
-                    st.session_state["_wbs_stage4_review_identity"] = _review_identity
-                    st.session_state["_wbs_stage4_approved_scenes"] = []
-                _approved = set(st.session_state.get("_wbs_stage4_approved_scenes") or [])
-                _parts = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
-                _choose = st.selectbox("Choose scene to review", _review_numbers,
-                                       key="wbs_ss_stage4_review_selection",
-                                       format_func=lambda n: f"Scene {n} — {_parts.get(n, (f'Scene {n}', '', ''))[0]}")
-                st.markdown(f"**Scene {_choose} — {_parts.get(_choose, (f'Scene {_choose}', '', ''))[0]}**")
-                st.text_area("Approved storyline (read-only)", value=_raw_blocks[_choose],
-                             height=340, disabled=True,
-                             key=f"wbs_ss_stage4_read_{_choose}_{source_signature[:12]}")
-                st.caption(f"{count_words(_raw_blocks[_choose])} words · {len(_approved)} of 4 scenes approved")
-                if _choose in _approved:
-                    st.success(f"Scene {_choose} approved.")
-                elif st.button(f"Approve Scene {_choose}", key=f"wbs_ss_stage4_approve_{_choose}",
-                               type="primary", use_container_width=True):
-                    _approved.add(_choose)
-                    st.session_state["_wbs_stage4_approved_scenes"] = sorted(_approved)
-                    st.rerun()
-                _wbs_scene_review_complete = all(n in _approved for n in _review_numbers)
+                _approved = wbs_stage4_valid_approvals(
+                    st.session_state.get("wbs_stage4_scene_approvals"),
+                    _wbs_review_blocks, current_source
+                )
+                _wbs_scene_review_complete = _approved == {1, 2, 3, 4}
+                st.caption(f"{count_words(current_source):,} words · Four scenes assembled in order · "
+                           "No AI regeneration or change to the saved story")
+                # Modification is directed to the exact scene selected here,
+                # but the review itself always displays the FULL story above.
+                _titles = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
+                _modify_number = st.selectbox(
+                    "Scene to modify (only if changes are needed)",
+                    [1, 2, 3, 4],
+                    key="wbs_stage4_full_story_modify_selection",
+                    format_func=lambda n: f"Scene {n} — {_titles.get(n, (f'Scene {n}', '', ''))[0]}"
+                )
+                _accept_col, _modify_col = st.columns(2, gap="small")
+                with _accept_col:
+                    if st.button("Accept And Save Complete Story",
+                                 key="wbs_stage4_accept_full_story", type="primary",
+                                 use_container_width=True,
+                                 disabled=_wbs_scene_review_complete or bool(st.session_state.get("demo_mode"))):
+                        try:
+                            _approved = wbs_stage4_accept_and_save()
+                        except Exception as _approval_error:
+                            st.error(f"Complete story could not be accepted: {_approval_error}")
+                        else:
+                            st.session_state["_wbs_stage4_approved_scenes"] = sorted(_approved)
+                            st.rerun()
+                with _modify_col:
+                    if st.button("Modify Script", key="wbs_stage4_modify_full_story",
+                                 use_container_width=True):
+                        st.session_state["_wbs_ss_jump_to"] = _modify_number
+                        if st.session_state.get("active_format_id") != "short_story":
+                            st.session_state["_wbs_stage3_rewrite_location"] = f"Scene Beat {_modify_number}"
+                        wbs_request_stage_change("Plot Architect")
                 if _wbs_scene_review_complete:
-                    st.success("All four original scenes approved. Final Manuscript is available.")
+                    st.success("Entire story accepted and saved in the current V-number. "
+                               "Proceed to Final Manuscript when ready.")
                 else:
-                    st.info("Review and approve all four original scenes. To change text, return to Scene Scripting.")
+                    st.info("Review the complete story, then choose Accept And Save Complete Story. "
+                            "Modify Script returns to the selected scene without changing this preview.")
         # ------------------------------------------------------------------
         # PROJECT INTEGRITY / FINAL REVIEW — read-only whole-manuscript QC.
         # This never changes current_draft_output and never applies fixes automatically.
