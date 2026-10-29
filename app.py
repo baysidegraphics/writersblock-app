@@ -7056,12 +7056,28 @@ with st.sidebar.container(border=True):
     _working_text = ""
     _stage_name = str(st.session_state.get("project_stage") or "").lower()
     if _stage_name in ("plot architect", "plot architecture"):
-        _working_text = str(st.session_state.get("_wbs_stage3_clean_editor") or "").strip()
-        if not _working_text:
-            _raw_outline = str(st.session_state.get("plot_outline") or "")
-            _working_text = " ".join(re.findall(
-                r"(?ims)^\s*\[SCENE DETAILS[^\]]*\]\s*:\s*(.*?)(?=^\s*\[[A-Z][^\n]*\]|^\s*===|\Z)",
-                _raw_outline))
+        if st.session_state.get("active_format_id") == "short_story":
+            # Stage 3 words reflect the ACTUAL scenes in the editor, not the
+            # four-scene planning outline or an unrelated legacy manuscript.
+            _status_blocks = st.session_state.get("scene_blocks") or {}
+            _working_text = "\n\n".join(
+                str(_status_blocks.get(n) or _status_blocks.get(str(n)) or "").strip()
+                for n in range(1, 5)
+            ).strip()
+            if not _working_text:
+                _raw_outline = str(st.session_state.get("plot_outline") or "")
+                _first_beat = re.search(
+                    r"(?ims)^\s*\[BEAT\s+1\].*?^\s*\[SCENE DETAILS[^\]]*\]\s*:\s*(.*?)(?=^\s*\[[A-Z][^\n]*\]|^\s*===|\Z)",
+                    _raw_outline)
+                if _first_beat:
+                    _working_text = _first_beat.group(1).strip()
+        else:
+            _working_text = str(st.session_state.get("_wbs_stage3_clean_editor") or "").strip()
+            if not _working_text:
+                _raw_outline = str(st.session_state.get("plot_outline") or "")
+                _working_text = " ".join(re.findall(
+                    r"(?ims)^\s*\[SCENE DETAILS[^\]]*\]\s*:\s*(.*?)(?=^\s*\[[A-Z][^\n]*\]|^\s*===|\Z)",
+                    _raw_outline))
     if not _working_text and st.session_state.get("current_draft_output"):
         _working_text = str(st.session_state.get("current_draft_output") or "")
     if not _working_text and st.session_state.get("chosen_option_text"):
@@ -8976,11 +8992,16 @@ def wbs_ss_save_scene_to_current_revision(scene_number, scene_text):
     if saved_outline and saved_outline != working_outline:
         raise ValueError("Saved plot architecture differs from the working copy. Reload before saving.")
     stored = wbs_ss_blocks(snapshot.get("scene_blocks") or {})
+    previously_assembled = wbs_ss_storyline(stored)
     saved_manuscript = str(snapshot.get("current_draft_output") or "")
-    # A legacy saved manuscript without verified original scene boundaries must
-    # NEVER be replaced by a partial scene list, even after an explicit scene save.
-    if saved_manuscript.strip() and saved_manuscript.strip() != wbs_ss_storyline(stored).strip():
-        raise ValueError("This revision contains a complete manuscript without matching saved scene boundaries. It was preserved. Load a revision with its original scenes before editing.")
+    # Older V-n revisions can contain a full manuscript but no scene_blocks.
+    # Keep that original manuscript verbatim while scenes 1-4 are being scripted.
+    # Never erase it when saving the first, second or third scene.
+    # Preserve a reversible copy before assembling all four saved scenes.
+    if (saved_manuscript.strip()
+            and saved_manuscript.strip() != previously_assembled.strip()
+            and not str(snapshot.get("wbs_ss_original_manuscript_backup") or "").strip()):
+        snapshot["wbs_ss_original_manuscript_backup"] = saved_manuscript
     expected = st.session_state.get("_wbs_ss_db_scene_baseline")
     if expected is None:
         # On first entry require an explicit matching baseline from the exact row.
@@ -8995,7 +9016,15 @@ def wbs_ss_save_scene_to_current_revision(scene_number, scene_text):
     if not saved_outline and working_outline:
         snapshot["plot_outline"] = working_outline
     snapshot["scene_blocks"] = {str(k): v for k, v in sorted(stored.items())}
-    snapshot["current_draft_output"] = wbs_ss_storyline(stored)
+    if set(stored) == {1, 2, 3, 4}:
+        # The completed four-scene manuscript is committed only after all
+        # four explicit scene saves. Original legacy text remains recoverable.
+        snapshot["current_draft_output"] = wbs_ss_storyline(stored)
+    elif (not saved_manuscript.strip()
+          or saved_manuscript.strip() == previously_assembled.strip()):
+        # If this revision was already scene-based, keep its partial manuscript
+        # synchronized. Never overwrite a legacy full-manuscript source.
+        snapshot["current_draft_output"] = wbs_ss_storyline(stored)
     # Only clear obsolete QC; do not overwrite sibling snapshots or Quill.
     for field in ("project_integrity_report", "project_integrity_source_signature", "project_integrity_status"):
         snapshot.pop(field, None)
@@ -9282,7 +9311,8 @@ if st.session_state.project_stage == "Plot Architect":
                 else:
                     _ss_blocks[_ss_selected] = _ss_edited
                     st.session_state.scene_blocks = _ss_blocks
-                    st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
+                    if set(_ss_blocks) == {1, 2, 3, 4}:
+                        st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
                     _ss_buffer.pop(_ss_selected, None)
                     st.session_state["_wbs_ss_edit_buffers"] = _ss_buffer
                     st.success(f"Scene {_ss_selected} saved to this revision. No new V-number created.")
@@ -9336,21 +9366,18 @@ if st.session_state.project_stage == "Plot Architect":
                     if st.button("Discard Rewrite", key=f"wbs_ss_discard_{_ss_selected}", use_container_width=True):
                         st.session_state.pop("_wbs_ss_rewrite_preview", None)
                         st.rerun()
-        # Only a conscious action creates the next missing scene.
-        _ss_next = next((n for n in range(1, 5) if n not in _ss_blocks), None)
+        # Scene 1 already exists as narrative prose in the saved plot.
+        # The first bottom button must create Scene 2, NOT look for a missing
+        # scene_blocks[1] and misreport the original Scene 1 as ungenerated.
+        _ss_next = next((n for n in range(2, 5) if n not in _ss_blocks), None)
         if _ss_next is not None:
-            if _ss_next > 1 and (_ss_next - 1) not in _ss_blocks:
-                st.warning("Save the preceding scene before generating the next one.")
-            _ss_generate_label = (f"Save Scene {_ss_next-1} & Generate Scene {_ss_next}"
-                                  if _ss_next > 1 else "Save Scene 1 & Generate Scene 2")
-            # Scene 1 can be seeded from the existing storyline; no button must
-            # ever silently regenerate a scene already in scene_blocks.
-            _ss_can_generate = (_ss_next == 1 or _ss_next - 1 == _ss_selected)
-            _ss_button_n = 2 if _ss_next == 1 else _ss_next
-            if _ss_button_n <= 4 and st.button(
+            # Show only the next manual scene-generation control below the
+            # existing two-column editor; nothing is generated on navigation.
+            _ss_button_n = _ss_next
+            if (_ss_button_n <= 4 and _ss_selected == _ss_button_n - 1 and st.button(
                 f"Save Scene {_ss_button_n-1} & Generate Scene {_ss_button_n}",
                 key=f"wbs_ss_generate_{_ss_button_n}", type="primary", use_container_width=True,
-                disabled=not (_ss_selected == _ss_button_n - 1 and not st.session_state.get("demo_mode"))):
+                disabled=bool(st.session_state.get("demo_mode")))):
                 _ss_prior_number = _ss_button_n - 1
                 _ss_prior_text = str(st.session_state.get(_ss_widget_key) or "")
                 if not _ss_prior_text.strip():
@@ -9365,7 +9392,8 @@ if st.session_state.project_stage == "Plot Architect":
                     else:
                         _ss_blocks[_ss_prior_number] = _ss_prior_text
                         st.session_state.scene_blocks = _ss_blocks
-                        st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
+                        if set(_ss_blocks) == {1, 2, 3, 4}:
+                            st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
                         _ss_beat = _ss_parts.get(_ss_button_n, ("", "", ""))[2]
                         if not _ss_beat:
                             st.error(f"Scene {_ss_button_n} has no saved plot beat; no scene was generated.")
@@ -9397,7 +9425,8 @@ if st.session_state.project_stage == "Plot Architect":
                                 else:
                                     _ss_blocks[_ss_button_n] = _ss_text
                                     st.session_state.scene_blocks = _ss_blocks
-                                    st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
+                                    if set(_ss_blocks) == {1, 2, 3, 4}:
+                                        st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
                                     st.session_state["_wbs_ss_jump_to"] = _ss_button_n
                                     st.session_state.pop("_wbs_ss_rewrite_preview", None)
                                     st.success(f"Scene {_ss_button_n} generated as working text. Review and save it explicitly.")
@@ -9415,7 +9444,8 @@ if st.session_state.project_stage == "Plot Architect":
                         st.stop()
                     _ss_blocks[4] = str(st.session_state[_ss_widget_key])
                     st.session_state.scene_blocks = _ss_blocks
-                    st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
+                    if set(_ss_blocks) == {1, 2, 3, 4}:
+                        st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
                 else:
                     # Do not silently discard edits to another selected scene.
                     if _ss_changed:
@@ -9427,12 +9457,18 @@ if st.session_state.project_stage == "Plot Architect":
                     wbs_request_stage_change("Isolation Guardrail", export_view=False)
                 else:
                     st.error("All four actual scenes are required; no content was invented.")
-        st.markdown("---")
-        st.subheader("Current Scene Status")
-        for _ss_n in range(1, 5):
-            st.caption(f"{'✓ Written' if _ss_n in _ss_blocks else '○ Not generated'} — Scene {_ss_n}: {_ss_parts.get(_ss_n, ('Untitled', '', ''))[0]}")
-        _ss_work_words = count_words(wbs_ss_storyline(_ss_blocks))
-        st.caption(f"Working manuscript: {_ss_work_words:,} words · Active saved revision unchanged")
+        # When the next scene already exists, the same bottom position serves
+        # as simple navigation. The editor/Quill layout remains identical.
+        _ss_following = _ss_selected + 1
+        if _ss_following in _ss_blocks:
+            if st.button(f"Go to Scene {_ss_following}",
+                         key=f"wbs_ss_go_to_{_ss_following}",
+                         type="primary", use_container_width=True):
+                _ss_buffer = dict(st.session_state.get("_wbs_ss_edit_buffers") or {})
+                _ss_buffer[_ss_selected] = str(st.session_state.get(_ss_widget_key) or "")
+                st.session_state["_wbs_ss_edit_buffers"] = _ss_buffer
+                st.session_state["_wbs_ss_jump_to"] = _ss_following
+                st.rerun()
         st.stop()
 
     # Single Stage 3 workspace: source on the left, editing / rewrite on the right.
