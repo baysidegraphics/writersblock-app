@@ -8069,7 +8069,10 @@ if st.session_state.project_stage == "Intake":
             or "Custom Plot Line"
         )
 
-        if current_source_mode == "Saved Manuscript":
+        if (str(st.session_state.get("saved_quill_concept") or "").strip()
+                and str(st.session_state.get("version_source_mode") or "") == "Quill Assisted"):
+            default_seed_index = seed_options.index(quill_start_option)
+        elif current_source_mode == "Saved Manuscript":
             default_seed_index = seed_options.index(current_saved_option)
         elif current_source_mode in {"Replacement Draft / Manuscript", "Existing Draft / Manuscript"}:
             default_seed_index = seed_options.index(replacement_draft_option)
@@ -8210,9 +8213,17 @@ if st.session_state.project_stage == "Intake":
                 st.session_state[quill_key] = str(pending_concept)
                 st.session_state.story_seed = str(pending_concept)
             if quill_key not in st.session_state:
-                # New Quill starting points must be blank until a generation button is used.
-                # Saved Quill versions are explicitly seeded by the restore routine above.
-                st.session_state[quill_key] = ""
+                # On return to Concept, recover the saved/working Quill concept.
+                # Do not replace it with a blank widget merely because the page
+                # was reconstructed after navigating from another stage.
+                st.session_state[quill_key] = str(
+                    st.session_state.get("saved_quill_concept")
+                    or st.session_state.get("story_seed")
+                    or ""
+                )
+            elif (not str(st.session_state.get(quill_key) or "").strip()
+                  and str(st.session_state.get("saved_quill_concept") or "").strip()):
+                st.session_state[quill_key] = str(st.session_state["saved_quill_concept"])
             guided_col, original_col = st.columns(2, gap="small")
             with guided_col:
                 guided_generation = st.button(
@@ -8943,6 +8954,14 @@ if st.session_state.project_stage == "Plot Architect":
     # field (without a tag). Never display it as part of the reader's story.
     def _wbs_reader_scene_text(raw):
         raw = str(raw or "").strip()
+        # Remove planning language accidentally embedded in a prose field.
+        # Preserve the authoritative raw outline; clean only the reader-facing view.
+        raw = re.sub(
+            r'(?is)(?:^|(?<=[.!?])\s+)["“]?\s*(?:Her|His|Their|The character\'s|The protagonist\'s)\s+'
+            r'conflict\s+is\s+(?:purely|primarily|largely)\s+(?:internal|external)'
+            r'.*?(?:[.!?](?=\s|$)|$)["”]?',
+            ' ', raw,
+        )
         # Strip editorial/generation commentary only when a clause explicitly
         # discusses the scene, narration, directive or writer, not the action.
         raw = re.sub(
