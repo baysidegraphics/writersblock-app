@@ -10292,21 +10292,57 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                                               index=_review_numbers.index(_next_scene),
                                               format_func=lambda n: f"Review Section {n}" if _wbs_derived_sections else f"Scene Beat {n}",
                                               key="wbs_stage4_scene_review_selector")
-                st.text_area(f"{'Review Section' if _wbs_derived_sections else 'Scene Beat'} {_chosen_scene} — existing manuscript text", value=_review_blocks[_chosen_scene],
-                             height=330, disabled=True,
-                             key=f"wbs_stage4_scene_text_{source_signature[:12]}_{_chosen_scene}")
-                st.caption(f"{count_words(_review_blocks[_chosen_scene])} words · Approved: {len(_approved)} of 4")
-                if _chosen_scene not in _approved:
-                    if st.button(f"Approve Scene Beat {_chosen_scene} and review next", key="wbs_stage4_approve_scene",
+                _scene_label = f"{'Review Section' if _wbs_derived_sections else 'Scene Beat'} {_chosen_scene}"
+                _original_scene = _review_blocks[_chosen_scene]
+                st.markdown(f"**{_scene_label} — Develop and review**")
+                st.caption("Review the existing prose, edit or expand this scene, then explicitly accept it before approval. Nothing is generated or saved automatically.")
+                _edit_key = f"wbs_stage4_develop_{source_signature[:12]}_{_chosen_scene}"
+                _edited_scene = st.text_area("Scene storyline — editable", value=_original_scene,
+                                              height=340, key=_edit_key)
+                st.caption(f"{count_words(_edited_scene)} words · Approved: {len(_approved)} of 4")
+                _changed_scene = _edited_scene.strip() != _original_scene
+                _accept_col, _reset_col = st.columns(2)
+                with _accept_col:
+                    if st.button(f"Accept changes to {_scene_label}",
+                                 key=f"wbs_stage4_accept_edit_{_chosen_scene}",
+                                 disabled=not (_changed_scene and _edited_scene.strip()),
+                                 use_container_width=True):
+                        # Only replace the exact section visible to the writer.
+                        # Never silently generate text or assume lost original scene boundaries.
+                        _draft_before = str(st.session_state.get("current_draft_output") or "")
+                        if _original_scene not in _draft_before:
+                            st.error("This review section no longer matches the working manuscript. Reload the current revision; nothing was changed.")
+                        else:
+                            st.session_state.current_draft_output = _draft_before.replace(
+                                _original_scene, _edited_scene.strip(), 1)
+                            if not _wbs_derived_sections:
+                                _blocks = dict(st.session_state.get("scene_blocks") or {})
+                                _blocks[_chosen_scene] = _edited_scene.strip()
+                                st.session_state.scene_blocks = _blocks
+                            st.session_state["_wbs_stage4_approved_scenes"] = []
+                            st.session_state.pop("project_integrity_report", None)
+                            st.success("Scene change accepted into the working manuscript. Save the project explicitly to persist it.")
+                            st.rerun()
+                with _reset_col:
+                    if st.button("Discard unaccepted edits", key=f"wbs_stage4_discard_{_chosen_scene}",
+                                 disabled=not _changed_scene, use_container_width=True):
+                        st.session_state[_edit_key] = _original_scene
+                        st.rerun()
+                if _changed_scene:
+                    st.warning("Accept or discard the current edits before approving this scene.")
+                elif _chosen_scene not in _approved:
+                    if st.button(f"Approve {_scene_label} and review next", key="wbs_stage4_approve_scene",
                                  use_container_width=True, type="primary"):
                         _approved.add(_chosen_scene)
                         st.session_state["_wbs_stage4_approved_scenes"] = sorted(_approved)
                         st.rerun()
                 else:
-                    st.success(f"Scene Beat {_chosen_scene} approved.")
+                    st.success(f"{_scene_label} approved.")
+                if _wbs_derived_sections:
+                    st.caption("These are provisional manuscript sections, not verified original scene boundaries. Original titles cannot be recovered from this text alone.")
                 _wbs_scene_review_complete = all(n in _approved for n in range(1, 5))
                 if not _wbs_scene_review_complete:
-                    st.info("Review and approve all four scene beats before proceeding to Stage 5. To revise a scene, use Open Script Rewrite; approval will reset if the manuscript changes.")
+                    st.info("Develop, accept any changes, and approve each of the four scenes before Stage 5. Accepted changes reset approvals.")
                 else:
                     st.success("All four scene beats reviewed and approved. Stage 5 is available.")
         # ------------------------------------------------------------------
