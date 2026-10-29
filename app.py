@@ -8743,12 +8743,35 @@ elif st.session_state.project_stage == "Sandbox":
                 except Exception:
                     _wbs_current_revision = ""
             _wbs_next_rev = get_next_project_session_internal_version(get_active_project_id()) if get_active_project_id() else 1
+            # Read the exact saved revision before deciding whether its path may be changed.
+            # Fail closed on database errors: never enable an overwrite by guessing.
+            _wbs_saved_path = ""
+            _wbs_saved_path_check_ok = not bool(_wbs_row_id)
+            if _wbs_row_id:
+                try:
+                    _wbs_guard_rows = (supabase.table("writersblock_project_drafts")
+                        .select("draft_content").eq("id", _wbs_row_id)
+                        .eq("project_id", get_active_project_id())
+                        .eq("user_id", get_current_user_id())
+                        .eq("draft_type", "project_session").limit(1).execute()).data or []
+                    if len(_wbs_guard_rows) == 1:
+                        _wbs_guard_snapshot = json.loads(_wbs_guard_rows[0].get("draft_content") or "{}")
+                        if isinstance(_wbs_guard_snapshot, dict):
+                            _wbs_saved_path = str(_wbs_guard_snapshot.get("chosen_option") or "").split(":", 1)[0].strip()
+                            _wbs_saved_path_check_ok = True
+                except Exception:
+                    pass
+            _wbs_is_plot_change = bool(_wbs_saved_path in ("Option A", "Option B", "Option C"))
+            if _wbs_pending and _wbs_is_plot_change and _wbs_pending != _wbs_saved_path:
+                st.warning(f"This revision already saved {_wbs_saved_path}. Changing to {_wbs_pending} requires a new revision to preserve the original.")
+            elif _wbs_pending and not _wbs_saved_path_check_ok:
+                st.warning("Saved revision could not be verified. Saving to the current revision is disabled.")
             if _wbs_pending:
                 st.markdown('<div style="text-align:center;color:#ffffff;font-weight:700;margin:10px 0 12px 0">Save To Revision</div>', unsafe_allow_html=True)
             _wbs_left, _wbs_right = st.columns(2, gap="small")
             with _wbs_left:
                 _wbs_save_current = st.button(f"Save to Current Revision (V-{_wbs_current_revision})" if _wbs_current_revision else "Save to Current Revision",
-                    key="wbs_stage2_save_current", type="primary" if _wbs_pending else "secondary", disabled=not bool(_wbs_pending and _wbs_row_id and _wbs_current_revision), use_container_width=True)
+                    key="wbs_stage2_save_current", type="primary" if _wbs_pending else "secondary", disabled=not bool(_wbs_pending and _wbs_row_id and _wbs_current_revision and _wbs_saved_path_check_ok and not _wbs_is_plot_change), use_container_width=True)
             with _wbs_right:
                 _wbs_save_new = st.button(f"Save as New Revision (V-{_wbs_next_rev})", key="wbs_stage2_save_new",
                     type="primary" if _wbs_pending else "secondary", disabled=not bool(_wbs_pending), use_container_width=True)
@@ -8790,6 +8813,9 @@ elif st.session_state.project_stage == "Sandbox":
                         st.error(f"Current revision was not confirmed: {_wbs_exc}")
                         st.stop()
                 else:
+                    if not _wbs_saved_path_check_ok:
+                        st.error("Cannot verify the saved revision; no new revision was written.")
+                        st.stop()
                     st.session_state.chosen_option = _wbs_title
                     st.session_state.chosen_option_text = _wbs_selected_text
                     # New branch only; existing saved revisions remain unchanged.
@@ -8797,7 +8823,11 @@ elif st.session_state.project_stage == "Sandbox":
                     st.session_state.current_draft_output = None
                     st.session_state.rewritten_manuscript = None
                     st.session_state.final_output_text = None
-                    _wbs_result = save_current_project_session_to_supabase(save_as_new_version=True)
+                    _wbs_reason = (f"Plot Change ({_wbs_saved_path} → {_wbs_pending})"
+                                   if _wbs_is_plot_change and _wbs_saved_path != _wbs_pending
+                                   else "Path Selection")
+                    _wbs_result = save_current_project_session_to_supabase(
+                        version_name=_wbs_reason, save_as_new_version=True)
                     if not _wbs_result or getattr(_wbs_result, "unchanged", False):
                         st.error("New revision was not confirmed; no further navigation permitted.")
                         st.stop()
