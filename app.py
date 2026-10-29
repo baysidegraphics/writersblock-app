@@ -9398,7 +9398,15 @@ if st.session_state.project_stage == "Plot Architect":
                     st.stop()
                 st.session_state["_wbs_stage3_saved_outline_baseline"] = _current_outline
             # With no edits, advance without ANY Supabase insert/version bump.
+            # Explicit Stage 3 Save & Continue authorizes the next room only when
+            # a real plot outline is present. Sidebar review alone never does.
+            if not ai_output_is_usable(st.session_state.get("plot_outline")):
+                st.error("No usable Plot Architecture is available to continue. No work was changed.")
+                st.stop()
             st.session_state["_wbs_stage3_unsaved_changes"] = False
+            st.session_state["_wbs_unlocked_saved_stage"] = max(
+                int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 4
+            )
             # A saved complete manuscript must not be regenerated simply because
             # the writer returns to Plot Architecture and advances again.
             if str(st.session_state.get("current_draft_output") or "").strip():
