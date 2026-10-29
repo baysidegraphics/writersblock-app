@@ -9393,10 +9393,60 @@ if st.session_state.project_stage == "Plot Architect":
                 # exact selected saved snapshot, not the newest sibling version.
                 _baseline = _current_outline if not _explicit_edits else ""
             _changed = (_baseline is not None and _current_outline != _baseline)
-            if _requires_first_save or _changed or _explicit_edits:
+            if not ai_output_is_usable(st.session_state.get("plot_outline")):
+                st.error("No usable Plot Architecture is available to save. No work was changed.")
+                st.stop()
+            if _requires_first_save:
                 if not save_current_project_session_to_supabase():
                     st.stop()
                 st.session_state["_wbs_stage3_saved_outline_baseline"] = _current_outline
+            elif _changed or _explicit_edits:
+                # First completion of an empty Stage 3 is an update to the
+                # exact loaded revision, never an automatic new V-number.
+                _row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "").strip()
+                _user_id = get_current_user_id()
+                if not (_row_id and _project_id and _user_id):
+                    st.error("The exact active revision cannot be verified. Nothing was saved.")
+                    st.stop()
+                try:
+                    _rows = (supabase.table("writersblock_project_drafts")
+                             .select("id, draft_content")
+                             .eq("id", _row_id).eq("project_id", _project_id)
+                             .eq("user_id", _user_id).eq("draft_type", "project_session")
+                             .limit(1).execute()).data or []
+                    if len(_rows) != 1:
+                        raise ValueError("Saved revision not found")
+                    _saved_snapshot = json.loads(_rows[0].get("draft_content") or "{}")
+                    if not isinstance(_saved_snapshot, dict):
+                        raise ValueError("Invalid saved revision")
+                    _previous_outline = str(_saved_snapshot.get("plot_outline") or "").strip()
+                    if _previous_outline and _previous_outline != _current_outline:
+                        st.error("This revision already contains a different saved Plot Architecture. Save as a new revision to preserve it. No automatic version was created.")
+                        st.stop()
+                    if not _previous_outline:
+                        _saved_snapshot["plot_outline"] = _current_outline
+                        _write = (supabase.table("writersblock_project_drafts")
+                                  .update({"draft_content": json.dumps(_saved_snapshot)})
+                                  .eq("id", _row_id).eq("project_id", _project_id)
+                                  .eq("user_id", _user_id).eq("draft_type", "project_session")
+                                  .execute())
+                        if not getattr(_write, "data", None):
+                            raise ValueError("Database did not confirm save")
+                        _check = (supabase.table("writersblock_project_drafts")
+                                  .select("draft_content")
+                                  .eq("id", _row_id).eq("project_id", _project_id)
+                                  .eq("user_id", _user_id).eq("draft_type", "project_session")
+                                  .limit(1).execute()).data or []
+                        _verified = json.loads(_check[0].get("draft_content") or "{}") if len(_check) == 1 else {}
+                        if str(_verified.get("plot_outline") or "").strip() != _current_outline:
+                            raise ValueError("Saved outline did not match the current storyline")
+                        set_loaded_concept_version_baseline(_verified)
+                        st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(_verified)
+                        st.session_state["_wbs_last_saved_project_id"] = str(_project_id)
+                    st.session_state["_wbs_stage3_saved_outline_baseline"] = _current_outline
+                except Exception as _exc:
+                    st.error(f"Stage 3 save failed: {_exc}. No new revision was created.")
+                    st.stop()
             # With no edits, advance without ANY Supabase insert/version bump.
             # Explicit Stage 3 Save & Continue authorizes the next room only when
             # a real plot outline is present. Sidebar review alone never does.
