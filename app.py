@@ -10256,6 +10256,20 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             _raw_blocks = st.session_state.get("scene_blocks") or {}
             _review_blocks = {int(k): str(v or "").strip() for k, v in _raw_blocks.items()
                               if str(k).isdigit() and str(v or "").strip()}
+            # Saved JSON uses string keys; normalise them above. Older revisions may
+            # have a complete manuscript but no scene_blocks snapshot. In that case,
+            # offer non-destructive review sections derived from existing paragraphs.
+            # Never write inferred boundaries back to the project or call the generator.
+            _wbs_derived_sections = False
+            if len(_review_blocks) != 4 and current_source:
+                _paragraphs = [p.strip() for p in re.split(r"\n\s*\n", current_source) if p.strip()]
+                if len(_paragraphs) >= 4:
+                    _review_blocks = {}
+                    for _i in range(4):
+                        _start = (_i * len(_paragraphs)) // 4
+                        _end = ((_i + 1) * len(_paragraphs)) // 4
+                        _review_blocks[_i + 1] = "\n\n".join(_paragraphs[_start:_end])
+                    _wbs_derived_sections = True
             _review_numbers = sorted(_review_blocks)
             _review_identity = (str(st.session_state.get("_wbs_active_saved_session_row_id") or ""),
                                 source_signature,
@@ -10269,12 +10283,16 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                 _wbs_scene_review_complete = False
                 st.warning("Four separately saved scene beats are required before final approval. Return to Plot Architecture to complete missing scenes; no manuscript will be regenerated automatically here.")
             else:
+                if _wbs_derived_sections:
+                    st.info("This revision contains a manuscript but no four separately stored scene beats. "
+                            "The four review sections below are divided from its existing paragraphs, "
+                            "not verified original scene boundaries. No manuscript text or saved record is changed.")
                 _next_scene = next((n for n in _review_numbers if n not in _approved), _review_numbers[-1])
                 _chosen_scene = st.selectbox("Scene beat to review", _review_numbers,
                                               index=_review_numbers.index(_next_scene),
-                                              format_func=lambda n: f"Scene Beat {n}",
+                                              format_func=lambda n: f"Review Section {n}" if _wbs_derived_sections else f"Scene Beat {n}",
                                               key="wbs_stage4_scene_review_selector")
-                st.text_area(f"Scene Beat {_chosen_scene} — saved story text", value=_review_blocks[_chosen_scene],
+                st.text_area(f"{'Review Section' if _wbs_derived_sections else 'Scene Beat'} {_chosen_scene} — existing manuscript text", value=_review_blocks[_chosen_scene],
                              height=330, disabled=True,
                              key=f"wbs_stage4_scene_text_{source_signature[:12]}_{_chosen_scene}")
                 st.caption(f"{count_words(_review_blocks[_chosen_scene])} words · Approved: {len(_approved)} of 4")
