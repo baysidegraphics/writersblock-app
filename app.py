@@ -5236,12 +5236,12 @@ def render_project_title_banner(stage_key):
     if stage_key == "step_2_scripting":
         _saved_path = bool(str(st.session_state.get("chosen_option") or "").strip() and str(st.session_state.get("chosen_option_text") or "").strip())
         if _saved_path:
-            st.caption("Revision Status: Stage 2 COMPLETE — selected scripting path saved or ready to save. Next: Plot Architecture." if st.session_state.get("_wbs_active_saved_session_row_id") else "Revision Status: Stage 2 selection ready; save to preserve it.")
+            st.caption("Revision Status: Plot Architecture COMPLETE — selected plot saved. Next: Scene Scripting." if st.session_state.get("_wbs_active_saved_session_row_id") else "Revision Status: Plot selection ready; save to preserve it.")
         else:
-            st.caption("Revision Status: Stage 2 INCOMPLETE — no scripting path recorded. Last completed: Concept Development. Next: Select a path and save.")
+            st.caption("Revision Status: Plot Architecture INCOMPLETE — no plot selected. Last completed: Concept Development. Next: Select a plot and save.")
     if st.session_state.get("project_stage") != "Intake" and (st.session_state.get("licensed_mode") or st.session_state.get("demo_mode")):
         render_quill_for_current_stage(st_module=st, show_prelude=True)
-    if not st.session_state.get("demo_mode"):
+    if stage_key != "step_2_scripting" and not st.session_state.get("demo_mode"):
         render_save_open_project_to_series()
 
 
