@@ -5208,7 +5208,7 @@ def render_project_title_banner(stage_key):
     revision_display = revision if revision.upper().startswith("V-") else ("V-" + revision if revision.isdigit() else "")
     st.markdown("<style>[class*='st-key-wbs_stage_title_'] input:disabled {color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; opacity: 1 !important;}</style>", unsafe_allow_html=True)
     st.markdown(f"**{format_name} / Project Title/Revision**")
-    st.text_input("Project Title/Revision", value=(current_title + (" — " + revision_display if revision_display and revision_display not in current_title else "")), disabled=True, label_visibility="collapsed", key=f"wbs_stage_title_{stage_key}")
+    st.text_input("Project Title/Revision", value=(current_title + (" — " + revision_display if revision_display and revision_display not in current_title else "")), disabled=True, label_visibility="collapsed", key=f"wbs_stage_title_{stage_key}_{revision_display}_{str(get_active_project_id() or 'unsaved')}")
     if stage_key == "step_2_scripting":
         _saved_path = bool(str(st.session_state.get("chosen_option") or "").strip() and str(st.session_state.get("chosen_option_text") or "").strip())
         if _saved_path:
