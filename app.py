@@ -9098,7 +9098,7 @@ if st.session_state.project_stage == "Plot Architect":
         ], key="_wbs_stage3_rewrite_mode")
         _length = st.selectbox("Target Length", [
             "Keep Current Length", "Condense for Tighter Pacing",
-            "Expand to 400 Words", "Custom Word Count",
+            "Custom Word Count",
         ], key="_wbs_stage3_rewrite_length")
         _custom_words = None
         if _length == "Custom Word Count":
