@@ -2196,6 +2196,30 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# WBS_UNIVERSAL_SELECT_VISUAL_20261029 — presentation only; no selectbox logic changed.
+st.markdown("""<style>
+/* All Streamlit single-select dropdowns: arrow points up while closed, down while open. */
+[data-testid="stSelectbox"] [role="combobox"] svg:last-child,
+[data-testid="stSelectbox"] [data-baseweb="select"] svg:last-child {
+    transition: transform 140ms ease !important;
+}
+[data-testid="stSelectbox"] [role="combobox"][aria-expanded="false"] svg:last-child {
+    transform: rotate(180deg) !important;
+}
+[data-testid="stSelectbox"] [role="combobox"][aria-expanded="true"] svg:last-child {
+    transform: rotate(0deg) !important;
+}
+/* The dropdown list is visibly separated from its field. */
+[data-baseweb="popover"]:has([role="listbox"]) {
+    margin-top: 8px !important;
+    filter: drop-shadow(0 6px 12px rgba(0,0,0,.35));
+}
+[data-baseweb="popover"] [role="listbox"] {
+    border: 1px solid rgba(180,194,215,.55) !important;
+    border-radius: 7px !important;
+}
+</style>""", unsafe_allow_html=True)
+
 # WBS_20261023_MANUSCRIPT_TEXT_CONTRAST
 st.markdown("""<style>
 [data-testid="stTextArea"] textarea { color:#f7f9ff !important; -webkit-text-fill-color:#f7f9ff !important; background-color:#222632 !important; opacity:1 !important; }
