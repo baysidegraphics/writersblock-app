@@ -7422,6 +7422,11 @@ def wbs_request_stage_change(destination, export_view=None):
                      "Drafting Engine": 4, "Isolation Guardrail": 4,
                      "Revision Engine": 4, "Rewrite Engine": 4}
     target_level = 5 if destination == "Isolation Guardrail" and target_export else review_levels.get(destination, 99)
+    if (destination == "Isolation Guardrail" and target_export
+            and st.session_state.get("active_format_id") == "short_story"
+            and not wbs_ss_approved_for_final()):
+        st.warning("Approve all four original scenes in Editorial Review before Final Manuscript.")
+        return
     if target_level > wbs_reached_review_level(st.session_state):
         st.warning("This stage has not been developed yet.")
         return
@@ -8894,6 +8899,142 @@ elif st.session_state.project_stage == "Sandbox":
                     int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 3)
                 st.rerun()
 
+# SHORT STORY SCENE SCRIPTING — independent of other format pipelines.
+# Existing stage identifiers and Supabase revision IDs are not changed.
+def wbs_ss_blocks(source):
+    """Return the exact saved scene prose with numeric scene keys, without inventing boundaries."""
+    if not isinstance(source, dict):
+        return {}
+    result = {}
+    for key, value in source.items():
+        try:
+            index = int(key)
+        except (ValueError, TypeError):
+            continue
+        if 1 <= index <= 4 and isinstance(value, str) and value.strip():
+            result[index] = value
+    return result
+
+
+def wbs_ss_storyline(source):
+    """Produce manuscript from only explicitly created scenes in scene order."""
+    blocks = wbs_ss_blocks(source)
+    return "\n\n".join(blocks[n] for n in sorted(blocks))
+
+
+def wbs_ss_outline_parts(outline):
+    """Parse actual beat headings/titles and ONLY scene prose, not generator metadata."""
+    source = str(outline or "")
+    hits = list(re.finditer(r"(?im)^\s*\[BEAT\s+(\d+)\]\s*", source))
+    result = {}
+    for i, hit in enumerate(hits):
+        n = int(hit.group(1))
+        if n not in range(1, 5):
+            continue
+        block = source[hit.end():hits[i+1].start() if i+1 < len(hits) else len(source)]
+        title = re.search(r"(?is)\[SCENE TITLE\]\s*:\s*(.*?)(?=\n\s*\[[A-Z][A-Z\s&0-9]*\]\s*:|\Z)", block)
+        prose = re.search(r"(?is)\[(?:SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*)\]\s*:\s*(.*?)(?=\n\s*\[[A-Z][A-Z\s&0-9]*\]\s*:|\Z)", block)
+        title_text = title.group(1).strip().strip("=") if title else f"Scene {n}"
+        prose_text = prose.group(1).strip().strip("=") if prose else ""
+        # Never display planning directives hidden in a prose field.
+        prose_text = re.split(r"(?im)^\s*(?:CORE OBJECTIVE|STYLE\s*&\s*SYNTAX DIRECTIVE|THE CONFLICT)\s*:", prose_text)[0].strip()
+        result[n] = (title_text, prose_text, block)
+    return result
+
+
+def wbs_ss_revision_identity():
+    return (str(st.session_state.get("_wbs_active_saved_session_row_id") or ""),
+            str(get_active_project_id() or ""), str(get_current_user_id() or ""))
+
+
+def wbs_ss_save_scene_to_current_revision(scene_number, scene_text):
+    """Explicit user save only; UPDATE exact revision, never create or renumber a revision.
+
+    Reject concurrent/stale changes and mismatched project/format identifiers.
+    Only the selected scene and working manuscript are written; siblings are preserved.
+    """
+    row_id, project_id, user_id = wbs_ss_revision_identity()
+    if not all((row_id, project_id, user_id)):
+        raise ValueError("Load the exact saved project revision before saving a scene.")
+    if st.session_state.get("active_format_id") != "short_story":
+        raise ValueError("Short Story scene saving cannot be used for another writing format.")
+    if scene_number not in range(1, 5) or not str(scene_text).strip():
+        raise ValueError("Select a numbered scene containing story text.")
+    rows = (supabase.table("writersblock_project_drafts")
+            .select("id, draft_content, version_number")
+            .eq("id", row_id).eq("project_id", project_id).eq("user_id", user_id)
+            .eq("draft_type", "project_session").limit(1).execute()).data or []
+    if len(rows) != 1:
+        raise ValueError("The exact saved revision was not found; nothing was changed.")
+    snapshot = json.loads(rows[0].get("draft_content") or "{}")
+    if not isinstance(snapshot, dict) or str(snapshot.get("current_project_id") or project_id) != project_id:
+        raise ValueError("Saved project identity mismatch; no record was changed.")
+    if snapshot.get("active_format_id") != "short_story":
+        raise ValueError("Saved format is not Short Story; no record was changed.")
+    saved_outline = str(snapshot.get("plot_outline") or "")
+    working_outline = str(st.session_state.get("plot_outline") or "")
+    if saved_outline and saved_outline != working_outline:
+        raise ValueError("Saved plot architecture differs from the working copy. Reload before saving.")
+    stored = wbs_ss_blocks(snapshot.get("scene_blocks") or {})
+    saved_manuscript = str(snapshot.get("current_draft_output") or "")
+    # A legacy saved manuscript without verified original scene boundaries must
+    # NEVER be replaced by a partial scene list, even after an explicit scene save.
+    if saved_manuscript.strip() and saved_manuscript.strip() != wbs_ss_storyline(stored).strip():
+        raise ValueError("This revision contains a complete manuscript without matching saved scene boundaries. It was preserved. Load a revision with its original scenes before editing.")
+    expected = st.session_state.get("_wbs_ss_db_scene_baseline")
+    if expected is None:
+        # On first entry require an explicit matching baseline from the exact row.
+        # Previous scene blocks may exist; compare using loaded project state.
+        loaded = wbs_ss_blocks(st.session_state.get("_wbs_ss_initial_loaded_blocks") or {})
+        if any(loaded.get(i, "") != stored.get(i, "") for i in range(1, 5)):
+            raise ValueError("Saved scenes differ from the loaded revision. Reload before saving.")
+    elif any(str(expected.get(i, "")) != str(stored.get(i, "")) for i in range(1, 5)):
+        raise ValueError("The saved scene data changed elsewhere. Reload to avoid overwriting it.")
+    stored[scene_number] = str(scene_text)
+    # Store the initial scene structure only when the saved revision has none.
+    if not saved_outline and working_outline:
+        snapshot["plot_outline"] = working_outline
+    snapshot["scene_blocks"] = {str(k): v for k, v in sorted(stored.items())}
+    snapshot["current_draft_output"] = wbs_ss_storyline(stored)
+    # Only clear obsolete QC; do not overwrite sibling snapshots or Quill.
+    for field in ("project_integrity_report", "project_integrity_source_signature", "project_integrity_status"):
+        snapshot.pop(field, None)
+    updated = (supabase.table("writersblock_project_drafts")
+               .update({"draft_content": json.dumps(snapshot, ensure_ascii=False)})
+               .eq("id", row_id).eq("project_id", project_id).eq("user_id", user_id)
+               .eq("draft_type", "project_session").execute())
+    if not getattr(updated, "data", None):
+        raise ValueError("The database did not confirm the scene save.")
+    # Preserve the existing V-number and row ID. Update the in-memory baseline.
+    st.session_state["_wbs_ss_db_scene_baseline"] = dict(stored)
+    st.session_state["_wbs_ss_initial_loaded_blocks"] = dict(stored)
+    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
+    st.session_state["_wbs_last_saved_project_id"] = str(project_id)
+    return stored
+
+
+def wbs_ss_capture_draft_on_selection_change():
+    """Keep unaccepted editor text in session scratch without editing story/version."""
+    old_n = st.session_state.get("_wbs_ss_previous_selection")
+    old_widget = st.session_state.get("_wbs_ss_editor_widget_key")
+    if old_n in (1, 2, 3, 4) and old_widget and old_widget in st.session_state:
+        buffers = dict(st.session_state.get("_wbs_ss_edit_buffers") or {})
+        buffers[old_n] = st.session_state[old_widget]
+        st.session_state["_wbs_ss_edit_buffers"] = buffers
+
+
+def wbs_ss_approved_for_final():
+    blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
+    if set(blocks) != {1, 2, 3, 4}:
+        return False
+    if str(st.session_state.get("current_draft_output") or "") != wbs_ss_storyline(blocks):
+        return False
+    signature = get_text_signature(wbs_ss_storyline(blocks))
+    identity = (str(st.session_state.get("_wbs_active_saved_session_row_id") or ""), signature,
+                tuple((i, get_text_signature(blocks[i])) for i in range(1, 5)))
+    return (st.session_state.get("_wbs_stage4_review_identity") == identity
+            and set(st.session_state.get("_wbs_stage4_approved_scenes") or []) == {1, 2, 3, 4})
+
 # ==========================================
 # PHASE 3: PLOT ARCHITECT ENGINE
 # ==========================================
@@ -8910,6 +9051,10 @@ if st.session_state.project_stage == "Plot Architect":
     # A selected Sandbox path starts plot generation immediately, without an extra click.
     # A loaded outline is displayed unchanged; never regenerate it automatically.
     if st.session_state.plot_outline is None:
+        if st.session_state.get("active_format_id") == "short_story":
+            st.info("The selected Plot Architecture is ready. Generate its scene structure when you choose; scenes will not be scripted automatically.")
+            if not st.button("Prepare Scene Structure", key="wbs_ss_explicit_outline", type="primary"):
+                st.stop()
         require_product_access("plot")
         require_demo_action_available("plot")
 
@@ -9064,6 +9209,231 @@ if st.session_state.project_stage == "Plot Architect":
                 if prose:
                     displayed.append(((title.group(1).strip() + "\n\n") if title else "") + prose)
         return "\n\n".join(displayed)
+
+    # SHORT STORY: four writer-controlled scenes at Stage 3. Other formats use
+    # the existing pipeline below, completely untouched.
+    if st.session_state.get("active_format_id") == "short_story":
+        _ss_parts = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
+        _ss_identity = wbs_ss_revision_identity()
+        if st.session_state.get("_wbs_ss_editor_identity") != _ss_identity:
+            for _key in ("_wbs_ss_edit_buffers", "_wbs_ss_selected", "_wbs_ss_previous_selection",
+                         "_wbs_ss_editor_widget_key", "_wbs_ss_db_scene_baseline", "_wbs_ss_rewrite_preview"):
+                st.session_state.pop(_key, None)
+            st.session_state["_wbs_ss_editor_identity"] = _ss_identity
+            st.session_state["_wbs_ss_initial_loaded_blocks"] = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
+        _ss_blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
+        # The existing outline's Scene 1 is the initial writer-facing prose,
+        # without registering any additional scenes or making a database save.
+        _ss_seed_one = _wbs_reader_scene_text(_ss_parts.get(1, ("", "", ""))[1])
+        if 1 not in _ss_blocks and not _ss_seed_one:
+            st.warning("Scene 1 has no story text in this revision. Restore its original storyline before continuing.")
+            st.stop()
+        _ss_available = sorted(set(_ss_blocks) | {1})
+        _ss_pending_jump = st.session_state.pop("_wbs_ss_jump_to", None)
+        if _ss_pending_jump in _ss_available:
+            st.session_state["_wbs_ss_selected"] = _ss_pending_jump
+        _ss_selected_default = st.session_state.get("_wbs_ss_selected")
+        if _ss_selected_default not in _ss_available:
+            st.session_state["_wbs_ss_selected"] = _ss_available[0]
+        st.markdown("### Scene Scripting — Four Scenes")
+        st.caption("Open written scenes in any order. Navigation does not save, generate, or create another V-number.")
+        _ss_selected = st.selectbox(
+            "Choose an existing scene", _ss_available,
+            key="_wbs_ss_selected", format_func=lambda n: f"Scene {n} — {_ss_parts.get(n, (f'Scene {n}', '', ''))[0]}",
+            on_change=wbs_ss_capture_draft_on_selection_change,
+        )
+        _ss_title = _ss_parts.get(_ss_selected, (f"Scene {_ss_selected}", "", ""))[0]
+        _ss_original = _ss_blocks.get(_ss_selected, _ss_seed_one if _ss_selected == 1 else "")
+        _ss_buffer = dict(st.session_state.get("_wbs_ss_edit_buffers") or {})
+        _ss_widget_key = (f"wbs_ss_text_{_ss_identity[0]}_{_ss_identity[1]}_{_ss_selected}_"
+                          f"{get_text_signature(_ss_original)[:12]}")
+        _ss_pending_accept = st.session_state.pop("_wbs_ss_pending_accept", None)
+        if (isinstance(_ss_pending_accept, (tuple, list)) and len(_ss_pending_accept) == 2
+                and _ss_pending_accept[0] == _ss_selected):
+            _ss_buffer[_ss_selected] = _ss_pending_accept[1]
+            st.session_state[_ss_widget_key] = _ss_pending_accept[1]
+            st.session_state["_wbs_ss_edit_buffers"] = _ss_buffer
+        if _ss_selected not in _ss_buffer:
+            _ss_buffer[_ss_selected] = _ss_original
+        if _ss_widget_key not in st.session_state:
+            st.session_state[_ss_widget_key] = _ss_buffer[_ss_selected]
+        st.session_state["_wbs_ss_previous_selection"] = _ss_selected
+        st.session_state["_wbs_ss_editor_widget_key"] = _ss_widget_key
+        _ss_left, _ss_right = st.columns([1.15, 1], gap="large")
+        with _ss_left:
+            st.subheader(f"Scene {_ss_selected} — {_ss_title}")
+            st.caption(f"Saved working text · {count_words(_ss_original):,} words" if _ss_selected in _ss_blocks
+                       else "Original scene prose from the selected storyline — not yet saved as a scene")
+            for _p in _wbs_display_paragraphs(_ss_original if _ss_selected in _ss_blocks
+                                               else _wbs_reader_scene_text(_ss_original)):
+                st.write(_p)
+        with _ss_right:
+            st.subheader("Scene Editor / Rewrite")
+            _ss_edited = st.text_area("Scene story text", height=320, key=_ss_widget_key)
+            st.caption(f"Working words: {count_words(_ss_edited):,}")
+            _ss_current = _ss_blocks.get(_ss_selected, "")
+            _ss_changed = _ss_edited != _ss_current
+            if st.button(f"Save Scene {_ss_selected} to Current Revision", key=f"wbs_ss_save_{_ss_selected}",
+                         use_container_width=True, disabled=bool(st.session_state.get("demo_mode"))):
+                try:
+                    wbs_ss_save_scene_to_current_revision(_ss_selected, _ss_edited)
+                except Exception as exc:
+                    st.error(f"Scene was not saved: {exc}")
+                else:
+                    _ss_blocks[_ss_selected] = _ss_edited
+                    st.session_state.scene_blocks = _ss_blocks
+                    st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
+                    _ss_buffer.pop(_ss_selected, None)
+                    st.session_state["_wbs_ss_edit_buffers"] = _ss_buffer
+                    st.success(f"Scene {_ss_selected} saved to this revision. No new V-number created.")
+                    st.rerun()
+            _ss_rewrite_direction = st.text_area(
+                "Rewrite instructions (optional)", key=f"wbs_ss_rewrite_direction_{_ss_selected}", height=90)
+            _ss_exact = st.checkbox("Direct Script Change / Obey My Instructions Exactly",
+                                    key=f"wbs_ss_direct_{_ss_selected}")
+            if st.button("Preview Rewritten Scene", key=f"wbs_ss_preview_{_ss_selected}",
+                         use_container_width=True):
+                if _ss_exact:
+                    if not _ss_rewrite_direction.strip():
+                        st.error("Enter replacement story text first.")
+                    else:
+                        st.session_state["_wbs_ss_rewrite_preview"] = (_ss_selected, _ss_edited, _ss_rewrite_direction)
+                else:
+                    _backend = st.session_state.get("backend")
+                    _client = getattr(_backend, "client", None)
+                    _model = getattr(_backend, "model_name", None)
+                    if not _client or not _model:
+                        st.error("The writing service is unavailable. No text changed.")
+                    else:
+                        try:
+                            _ss_prompt = (
+                                "Rewrite only this one finished short-story scene, maintaining characters, plot, "
+                                "story continuity, tense, voice and story length unless otherwise requested. "
+                                "Return narrative prose only, no titles, scene notes or instructions. "
+                                f"Writer's instructions: {_ss_rewrite_direction or 'Polish this scene.'}\n\n"
+                                f"CURRENT SCENE:\n{_ss_edited}")
+                            _res = _client.models.generate_content(model=_model, contents=_ss_prompt)
+                            _proposal = str(getattr(_res, "text", "") or "").strip()
+                            if not _proposal or re.search(r"(?im)^\s*\[(BEAT|CORE OBJECTIVE|STYLE)", _proposal):
+                                raise ValueError("Rewrite did not return clean narrative prose")
+                            st.session_state["_wbs_ss_rewrite_preview"] = (_ss_selected, _ss_edited, _proposal)
+                        except Exception as exc:
+                            st.error(f"Rewrite unavailable: {exc}")
+            _ss_proposal = st.session_state.get("_wbs_ss_rewrite_preview")
+            if isinstance(_ss_proposal, (tuple, list)) and len(_ss_proposal) == 3 and _ss_proposal[0] == _ss_selected:
+                st.text_area("Proposed revision — review before accepting", value=_ss_proposal[2],
+                             disabled=True, height=240, key=f"wbs_ss_proposal_read_{_ss_selected}")
+                _ss_a, _ss_d = st.columns(2)
+                with _ss_a:
+                    if st.button("Accept Rewrite", key=f"wbs_ss_accept_{_ss_selected}", use_container_width=True):
+                        if st.session_state[_ss_widget_key] != _ss_proposal[1]:
+                            st.error("The source text changed. Generate another preview first.")
+                        else:
+                            st.session_state["_wbs_ss_pending_accept"] = (_ss_selected, _ss_proposal[2])
+                            st.session_state.pop("_wbs_ss_rewrite_preview", None)
+                            st.rerun()
+                with _ss_d:
+                    if st.button("Discard Rewrite", key=f"wbs_ss_discard_{_ss_selected}", use_container_width=True):
+                        st.session_state.pop("_wbs_ss_rewrite_preview", None)
+                        st.rerun()
+        # Only a conscious action creates the next missing scene.
+        _ss_next = next((n for n in range(1, 5) if n not in _ss_blocks), None)
+        if _ss_next is not None:
+            if _ss_next > 1 and (_ss_next - 1) not in _ss_blocks:
+                st.warning("Save the preceding scene before generating the next one.")
+            _ss_generate_label = (f"Save Scene {_ss_next-1} & Generate Scene {_ss_next}"
+                                  if _ss_next > 1 else "Save Scene 1 & Generate Scene 2")
+            # Scene 1 can be seeded from the existing storyline; no button must
+            # ever silently regenerate a scene already in scene_blocks.
+            _ss_can_generate = (_ss_next == 1 or _ss_next - 1 == _ss_selected)
+            _ss_button_n = 2 if _ss_next == 1 else _ss_next
+            if _ss_button_n <= 4 and st.button(
+                f"Save Scene {_ss_button_n-1} & Generate Scene {_ss_button_n}",
+                key=f"wbs_ss_generate_{_ss_button_n}", type="primary", use_container_width=True,
+                disabled=not (_ss_selected == _ss_button_n - 1 and not st.session_state.get("demo_mode"))):
+                _ss_prior_number = _ss_button_n - 1
+                _ss_prior_text = str(st.session_state.get(_ss_widget_key) or "")
+                if not _ss_prior_text.strip():
+                    st.error("Save a non-empty scene before generating the next scene.")
+                elif _ss_button_n in wbs_ss_blocks(st.session_state.get("scene_blocks") or {}):
+                    st.error("That scene already exists. It was not regenerated.")
+                else:
+                    try:
+                        _ss_saved = wbs_ss_save_scene_to_current_revision(_ss_prior_number, _ss_prior_text)
+                    except Exception as exc:
+                        st.error(f"Unable to save the preceding scene: {exc}")
+                    else:
+                        _ss_blocks[_ss_prior_number] = _ss_prior_text
+                        st.session_state.scene_blocks = _ss_blocks
+                        st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
+                        _ss_beat = _ss_parts.get(_ss_button_n, ("", "", ""))[2]
+                        if not _ss_beat:
+                            st.error(f"Scene {_ss_button_n} has no saved plot beat; no scene was generated.")
+                        else:
+                            _ss_backend = st.session_state.get("backend")
+                            _ss_client = getattr(_ss_backend, "client", None)
+                            _ss_model = getattr(_ss_backend, "model_name", None)
+                            if not _ss_client or not _ss_model:
+                                st.error("Writing service is unavailable; previous scene was saved, but no new scene generated.")
+                            else:
+                                try:
+                                    require_product_access("drafting")
+                                    _ss_prompt = (
+                                        f"Write ONLY Scene {_ss_button_n} of a FOUR-SCENE short story. "
+                                        "Return ONLY complete, finished narrative prose in natural paragraphs. "
+                                        "No tags, titles, writing directives, recap or explanations. "
+                                        "Preserve characters, continuity, voice, dialogue style and tense. "
+                                        "Do not repeat earlier scenes. Aim for 200–350 words unless the scene requires otherwise.\n\n"
+                                        f"DIALOGUE: {get_dialogue_development_packet()}\n"
+                                        f"DEVELOPMENT: {get_active_format_development_context()}\n"
+                                        f"SCENE PLAN (internal only):\n{_ss_beat}\n\n"
+                                        f"PRECEDING MANUSCRIPT:\n{wbs_ss_storyline(_ss_blocks)}")
+                                    _ss_response = _ss_client.models.generate_content(model=_ss_model, contents=_ss_prompt)
+                                    _ss_text = str(getattr(_ss_response, "text", "") or "").strip()
+                                    if not _ss_text or re.search(r"(?im)^\s*\[(BEAT|CORE OBJECTIVE|STYLE)", _ss_text):
+                                        raise ValueError("The generator did not return clean scene prose")
+                                except Exception as exc:
+                                    st.error(f"Scene {_ss_button_n} was not created: {exc}")
+                                else:
+                                    _ss_blocks[_ss_button_n] = _ss_text
+                                    st.session_state.scene_blocks = _ss_blocks
+                                    st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
+                                    st.session_state["_wbs_ss_jump_to"] = _ss_button_n
+                                    st.session_state.pop("_wbs_ss_rewrite_preview", None)
+                                    st.success(f"Scene {_ss_button_n} generated as working text. Review and save it explicitly.")
+                                    st.rerun()
+        else:
+            # Scene 4 exists; allow explicit save before reviewing all four.
+            if st.button("Save Scene 4 & Continue to Editorial Review", type="primary",
+                         key="wbs_ss_stage4_continue", use_container_width=True,
+                         disabled=bool(st.session_state.get("demo_mode")) or _ss_selected != 4):
+                if _ss_selected == 4:
+                    try:
+                        wbs_ss_save_scene_to_current_revision(4, str(st.session_state.get(_ss_widget_key) or ""))
+                    except Exception as exc:
+                        st.error(f"Scene 4 could not be saved: {exc}")
+                        st.stop()
+                    _ss_blocks[4] = str(st.session_state[_ss_widget_key])
+                    st.session_state.scene_blocks = _ss_blocks
+                    st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
+                else:
+                    # Do not silently discard edits to another selected scene.
+                    if _ss_changed:
+                        st.error(f"Save the edited Scene {_ss_selected} first.")
+                        st.stop()
+                if set(_ss_blocks) == {1,2,3,4}:
+                    st.session_state["_wbs_unlocked_saved_stage"] = max(
+                        int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 4)
+                    wbs_request_stage_change("Isolation Guardrail", export_view=False)
+                else:
+                    st.error("All four actual scenes are required; no content was invented.")
+        st.markdown("---")
+        st.subheader("Current Scene Status")
+        for _ss_n in range(1, 5):
+            st.caption(f"{'✓ Written' if _ss_n in _ss_blocks else '○ Not generated'} — Scene {_ss_n}: {_ss_parts.get(_ss_n, ('Untitled', '', ''))[0]}")
+        _ss_work_words = count_words(wbs_ss_storyline(_ss_blocks))
+        st.caption(f"Working manuscript: {_ss_work_words:,} words · Active saved revision unchanged")
+        st.stop()
 
     # Single Stage 3 workspace: source on the left, editing / rewrite on the right.
     # The tagged outline remains authoritative for every writing format.
@@ -10253,98 +10623,41 @@ elif st.session_state.project_stage == "Isolation Guardrail":
         _wbs_scene_review_required = str(st.session_state.get("format_type") or "").strip().lower() == "short story"
         _wbs_scene_review_complete = True
         if _wbs_scene_review_required:
-            _raw_blocks = st.session_state.get("scene_blocks") or {}
-            _review_blocks = {int(k): str(v or "").strip() for k, v in _raw_blocks.items()
-                              if str(k).isdigit() and str(v or "").strip()}
-            # Saved JSON uses string keys; normalise them above. Older revisions may
-            # have a complete manuscript but no scene_blocks snapshot. In that case,
-            # offer non-destructive review sections derived from existing paragraphs.
-            # Never write inferred boundaries back to the project or call the generator.
-            _wbs_derived_sections = False
-            if len(_review_blocks) != 4 and current_source:
-                _paragraphs = [p.strip() for p in re.split(r"\n\s*\n", current_source) if p.strip()]
-                if len(_paragraphs) >= 4:
-                    _review_blocks = {}
-                    for _i in range(4):
-                        _start = (_i * len(_paragraphs)) // 4
-                        _end = ((_i + 1) * len(_paragraphs)) // 4
-                        _review_blocks[_i + 1] = "\n\n".join(_paragraphs[_start:_end])
-                    _wbs_derived_sections = True
-            _review_numbers = sorted(_review_blocks)
-            _review_identity = (str(st.session_state.get("_wbs_active_saved_session_row_id") or ""),
-                                source_signature,
-                                tuple((n, get_text_signature(_review_blocks[n])) for n in _review_numbers))
-            if st.session_state.get("_wbs_stage4_review_identity") != _review_identity:
-                st.session_state["_wbs_stage4_review_identity"] = _review_identity
-                st.session_state["_wbs_stage4_approved_scenes"] = []
-            _approved = set(st.session_state.get("_wbs_stage4_approved_scenes") or [])
-            st.markdown("### Scene-by-scene approval")
-            if len(_review_numbers) != 4:
-                _wbs_scene_review_complete = False
-                st.warning("Four separately saved scene beats are required before final approval. Return to Plot Architecture to complete missing scenes; no manuscript will be regenerated automatically here.")
+            _raw_blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
+            _review_numbers = sorted(_raw_blocks)
+            _wbs_scene_review_complete = False
+            st.markdown("### Four-Scene Editorial Approval")
+            if _review_numbers != [1, 2, 3, 4] or current_source != wbs_ss_storyline(_raw_blocks):
+                st.warning("Four actual saved scene boundaries are required. Return to Scene Scripting; no artificial scene divisions or AI regeneration will be used.")
             else:
-                if _wbs_derived_sections:
-                    st.info("This revision contains a manuscript but no four separately stored scene beats. "
-                            "The four review sections below are divided from its existing paragraphs, "
-                            "not verified original scene boundaries. No manuscript text or saved record is changed.")
-                _next_scene = next((n for n in _review_numbers if n not in _approved), _review_numbers[-1])
-                _chosen_scene = st.selectbox("Scene beat to review", _review_numbers,
-                                              index=_review_numbers.index(_next_scene),
-                                              format_func=lambda n: f"Review Section {n}" if _wbs_derived_sections else f"Scene Beat {n}",
-                                              key="wbs_stage4_scene_review_selector")
-                _scene_label = f"{'Review Section' if _wbs_derived_sections else 'Scene Beat'} {_chosen_scene}"
-                _original_scene = _review_blocks[_chosen_scene]
-                st.markdown(f"**{_scene_label} — Develop and review**")
-                st.caption("Review the existing prose, edit or expand this scene, then explicitly accept it before approval. Nothing is generated or saved automatically.")
-                _edit_key = f"wbs_stage4_develop_{source_signature[:12]}_{_chosen_scene}"
-                _edited_scene = st.text_area("Scene storyline — editable", value=_original_scene,
-                                              height=340, key=_edit_key)
-                st.caption(f"{count_words(_edited_scene)} words · Approved: {len(_approved)} of 4")
-                _changed_scene = _edited_scene.strip() != _original_scene
-                _accept_col, _reset_col = st.columns(2)
-                with _accept_col:
-                    if st.button(f"Accept changes to {_scene_label}",
-                                 key=f"wbs_stage4_accept_edit_{_chosen_scene}",
-                                 disabled=not (_changed_scene and _edited_scene.strip()),
-                                 use_container_width=True):
-                        # Only replace the exact section visible to the writer.
-                        # Never silently generate text or assume lost original scene boundaries.
-                        _draft_before = str(st.session_state.get("current_draft_output") or "")
-                        if _original_scene not in _draft_before:
-                            st.error("This review section no longer matches the working manuscript. Reload the current revision; nothing was changed.")
-                        else:
-                            st.session_state.current_draft_output = _draft_before.replace(
-                                _original_scene, _edited_scene.strip(), 1)
-                            if not _wbs_derived_sections:
-                                _blocks = dict(st.session_state.get("scene_blocks") or {})
-                                _blocks[_chosen_scene] = _edited_scene.strip()
-                                st.session_state.scene_blocks = _blocks
-                            st.session_state["_wbs_stage4_approved_scenes"] = []
-                            st.session_state.pop("project_integrity_report", None)
-                            st.success("Scene change accepted into the working manuscript. Save the project explicitly to persist it.")
-                            st.rerun()
-                with _reset_col:
-                    if st.button("Discard unaccepted edits", key=f"wbs_stage4_discard_{_chosen_scene}",
-                                 disabled=not _changed_scene, use_container_width=True):
-                        st.session_state[_edit_key] = _original_scene
-                        st.rerun()
-                if _changed_scene:
-                    st.warning("Accept or discard the current edits before approving this scene.")
-                elif _chosen_scene not in _approved:
-                    if st.button(f"Approve {_scene_label} and review next", key="wbs_stage4_approve_scene",
-                                 use_container_width=True, type="primary"):
-                        _approved.add(_chosen_scene)
-                        st.session_state["_wbs_stage4_approved_scenes"] = sorted(_approved)
-                        st.rerun()
+                _review_identity = (str(st.session_state.get("_wbs_active_saved_session_row_id") or ""),
+                                    source_signature,
+                                    tuple((n, get_text_signature(_raw_blocks[n])) for n in _review_numbers))
+                if st.session_state.get("_wbs_stage4_review_identity") != _review_identity:
+                    st.session_state["_wbs_stage4_review_identity"] = _review_identity
+                    st.session_state["_wbs_stage4_approved_scenes"] = []
+                _approved = set(st.session_state.get("_wbs_stage4_approved_scenes") or [])
+                _parts = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
+                _choose = st.selectbox("Choose scene to review", _review_numbers,
+                                       key="wbs_ss_stage4_review_selection",
+                                       format_func=lambda n: f"Scene {n} — {_parts.get(n, (f'Scene {n}', '', ''))[0]}")
+                st.markdown(f"**Scene {_choose} — {_parts.get(_choose, (f'Scene {_choose}', '', ''))[0]}**")
+                st.text_area("Approved storyline (read-only)", value=_raw_blocks[_choose],
+                             height=340, disabled=True,
+                             key=f"wbs_ss_stage4_read_{_choose}_{source_signature[:12]}")
+                st.caption(f"{count_words(_raw_blocks[_choose])} words · {len(_approved)} of 4 scenes approved")
+                if _choose in _approved:
+                    st.success(f"Scene {_choose} approved.")
+                elif st.button(f"Approve Scene {_choose}", key=f"wbs_ss_stage4_approve_{_choose}",
+                               type="primary", use_container_width=True):
+                    _approved.add(_choose)
+                    st.session_state["_wbs_stage4_approved_scenes"] = sorted(_approved)
+                    st.rerun()
+                _wbs_scene_review_complete = all(n in _approved for n in _review_numbers)
+                if _wbs_scene_review_complete:
+                    st.success("All four original scenes approved. Final Manuscript is available.")
                 else:
-                    st.success(f"{_scene_label} approved.")
-                if _wbs_derived_sections:
-                    st.caption("These are provisional manuscript sections, not verified original scene boundaries. Original titles cannot be recovered from this text alone.")
-                _wbs_scene_review_complete = all(n in _approved for n in range(1, 5))
-                if not _wbs_scene_review_complete:
-                    st.info("Develop, accept any changes, and approve each of the four scenes before Stage 5. Accepted changes reset approvals.")
-                else:
-                    st.success("All four scene beats reviewed and approved. Stage 5 is available.")
+                    st.info("Review and approve all four original scenes. To change text, return to Scene Scripting.")
         # ------------------------------------------------------------------
         # PROJECT INTEGRITY / FINAL REVIEW — read-only whole-manuscript QC.
         # This never changes current_draft_output and never applies fixes automatically.
