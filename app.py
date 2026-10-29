@@ -10886,7 +10886,6 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             st.text_area("Entire manuscript (read-only)", value=current_source,
                          height=640, disabled=True,
                          key=f"wbs_stage4_entire_manuscript_{source_signature[:12]}")
-            st.caption(f"{count_words(current_source):,} words · Complete working manuscript · No AI regeneration")
         else:
             st.warning("There is no completed manuscript available. Return to Scene Scripting.")
         # Stage 4: display the ENTIRE saved manuscript at once, in scene order.
@@ -10919,15 +10918,24 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                 _wbs_scene_review_complete = _approved == {1, 2, 3, 4}
                 st.caption(f"{count_words(current_source):,} words · Four scenes assembled in order · "
                            "No AI regeneration or change to the saved story")
-                # Modification is directed to the exact scene selected here,
-                # but the review itself always displays the FULL story above.
+                # Stage 4 review remains the FULL story. The scene picker is
+                # beside Accept (in the former Modify Script button position).
+                # Selection navigates directly to that exact scene in Stage 3;
+                # it never saves, generates, or increments the V-number.
                 _titles = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
-                _modify_number = st.selectbox(
-                    "Scene to modify (only if changes are needed)",
-                    [1, 2, 3, 4],
-                    key="wbs_stage4_full_story_modify_selection",
-                    format_func=lambda n: f"Scene {n} — {_titles.get(n, (f'Scene {n}', '', ''))[0]}"
-                )
+
+                def _wbs_stage4_modify_scene_selection():
+                    scene_number = st.session_state.get("wbs_stage4_modify_scene_dropdown")
+                    if scene_number not in (1, 2, 3, 4):
+                        return
+                    # Reset so the same scene may be selected again on a later
+                    # visit to Stage 4; widget state is modified in its callback.
+                    st.session_state["wbs_stage4_modify_scene_dropdown"] = None
+                    st.session_state["_wbs_ss_jump_to"] = scene_number
+                    if st.session_state.get("active_format_id") != "short_story":
+                        st.session_state["_wbs_stage3_rewrite_location"] = f"Scene Beat {scene_number}"
+                    wbs_request_stage_change("Plot Architect")
+
                 _accept_col, _modify_col = st.columns(2, gap="small")
                 with _accept_col:
                     if st.button("Accept And Save Complete Story",
@@ -10942,18 +10950,23 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                             st.session_state["_wbs_stage4_approved_scenes"] = sorted(_approved)
                             st.rerun()
                 with _modify_col:
-                    if st.button("Modify Script", key="wbs_stage4_modify_full_story",
-                                 use_container_width=True):
-                        st.session_state["_wbs_ss_jump_to"] = _modify_number
-                        if st.session_state.get("active_format_id") != "short_story":
-                            st.session_state["_wbs_stage3_rewrite_location"] = f"Scene Beat {_modify_number}"
-                        wbs_request_stage_change("Plot Architect")
+                    st.selectbox(
+                        "Modify Script — select scene",
+                        [None, 1, 2, 3, 4],
+                        key="wbs_stage4_modify_scene_dropdown",
+                        format_func=lambda n: (
+                            "Modify Script — Select Scene" if n is None
+                            else f"Scene {n} — {_titles.get(n, (f'Scene {n}', '', ''))[0]}"
+                        ),
+                        label_visibility="collapsed",
+                        on_change=_wbs_stage4_modify_scene_selection,
+                    )
                 if _wbs_scene_review_complete:
                     st.success("Entire story accepted and saved in the current V-number. "
                                "Proceed to Final Manuscript when ready.")
                 else:
                     st.info("Review the complete story, then choose Accept And Save Complete Story. "
-                            "Modify Script returns to the selected scene without changing this preview.")
+                            "To make changes, select a scene from Modify Script to open it directly in Scene Scripting.")
         # ------------------------------------------------------------------
         # PROJECT INTEGRITY / FINAL REVIEW — read-only whole-manuscript QC.
         # This never changes current_draft_output and never applies fixes automatically.
