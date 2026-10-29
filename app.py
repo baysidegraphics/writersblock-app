@@ -9226,9 +9226,42 @@ if st.session_state.project_stage == "Plot Architect":
                         f"Writer's direction: {rewrite_direction or 'Improve this scene.'}\n\n"
                         f"EXISTING MANUSCRIPT SCENE:\n{_draft_scene}"
                     )
+                # Short-story scene length applies to the reader-facing SCENE,
+                # not the metadata-heavy outline. Preserve all backend tags.
+                _scene_word_rewrite = bool(
+                    _selected_number and _custom_words and not _rewrite_existing_draft
+                    and str(get_effective_format_type() or "").strip().lower().replace("_", " ") == "short story"
+                )
+                if _scene_word_rewrite:
+                    _scene_field = re.search(
+                        r"(?is)(\[SCENE DETAILS(?:\s*&\s*CONFLICT)?\]\s*:\s*)(.*?)(?=\n\s*\[[A-Z][A-Z\s&0-9]*\]\s*:|\Z)",
+                        _selected_outline,
+                    )
+                    if not _scene_field:
+                        st.error("Scene details could not be isolated. Original retained.")
+                        st.stop()
+                    _story_source = _wbs_reader_scene_text(_scene_field.group(2))
+                    _instruction = (
+                        "Rewrite and expand ONLY the following short-story scene into finished narrative prose. "
+                        f"Write approximately {_custom_words} words of actual STORY prose (not outline metadata). "
+                        "Use natural paragraph breaks. Return ONLY the prose, without scene titles, "
+                        "tags, directions, explanations, or writing analysis. Keep the plot, characters, "
+                        "point of view and continuity intact. "
+                        f"Mode: {_mode}. Dialogue: {_dialogue_rule}. "
+                        f"Writer direction: {rewrite_direction or 'Expand the scene naturally.'}\n\n"
+                        f"STORY SCENE:\n{_story_source}"
+                    )
                 try:
                     _response = client.models.generate_content(model=model, contents=_instruction)
                     _preview = str(getattr(_response, "text", "") or "").strip()
+                    if _scene_word_rewrite:
+                        _valid_prose = bool(_preview) and not re.search(
+                            r"(?im)^\s*\[(?:BEAT|SCENE TITLE|CORE OBJECTIVE|STYLE|SCENE DETAILS)", _preview)
+                        _prose_words = len(_preview.split())
+                        _valid_prose = _valid_prose and _prose_words >= max(40, int(_custom_words * 0.65))
+                        if _valid_prose:
+                            _preview = (_selected_outline[:_scene_field.start(2)] + _preview +
+                                        _selected_outline[_scene_field.end(2):])
                     if _rewrite_existing_draft:
                         _valid = bool(_preview) and not re.search(
                             r"(?im)^\s*\[(?:BEAT|CORE OBJECTIVE|STYLE\s*&\s*SYNTAX DIRECTIVE)", _preview)
@@ -9238,6 +9271,8 @@ if st.session_state.project_stage == "Plot Architect":
                         _tags = ("[SCENE TITLE]", "[CORE OBJECTIVE]", "[SCENE DETAILS & CONFLICT]", "[STYLE & SYNTAX DIRECTIVE]")
                         _valid = bool(_preview) and _old_ids == _new_ids and not any(
                             _preview.upper().count(tag) != len(_old_ids) for tag in _tags)
+                        if _scene_word_rewrite:
+                            _valid = _valid and _valid_prose
                     if not _valid:
                         st.error("The rewrite did not preserve the required scene format. Original retained.")
                     else:
