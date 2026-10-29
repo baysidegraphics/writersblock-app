@@ -9012,6 +9012,45 @@ if st.session_state.project_stage == "Plot Architect":
         )
         return re.sub(r"[ \t]{2,}", " ", raw).strip()
 
+    def _wbs_display_paragraphs(raw):
+        """Presentation-only paragraph layout; never mutates the saved manuscript.
+
+        Existing author paragraph breaks are authoritative. For a single long
+        prose block, group sentences into readable paragraphs without changing
+        the words or punctuation. This is a visual aid, not semantic editing.
+        """
+        raw = str(raw or "").strip()
+        if not raw:
+            return []
+        original_paragraphs = re.split(r"\n\s*\n", raw)
+        output = []
+        for paragraph in original_paragraphs:
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+            if "\n" in paragraph or len(paragraph.split()) < 105:
+                output.append(paragraph)
+                continue
+            # Split only at unambiguous sentence boundaries; avoid initials,
+            # decimals, abbreviations and quotation marks where possible.
+            sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z“\"])', paragraph)
+            if len(sentences) < 4:
+                output.append(paragraph)
+                continue
+            group, count = [], 0
+            for sentence in sentences:
+                group.append(sentence)
+                count += len(sentence.split())
+                if count >= 65 and len(group) >= 2:
+                    output.append(" ".join(group))
+                    group, count = [], 0
+            if group:
+                if output and count < 22 and len(original_paragraphs) == 1:
+                    output[-1] += " " + " ".join(group)
+                else:
+                    output.append(" ".join(group))
+        return output
+
     def _wbs_reader_outline_preview(raw):
         # Preserve source tags internally, but present only scene titles and
         # prose during review; all format controls still use the raw outline.
@@ -9071,7 +9110,7 @@ if st.session_state.project_stage == "Plot Architect":
             # Approved manuscript rewrites immediately appear in this left panel.
             if _visible_draft:
                 st.caption("Current working manuscript scene")
-                for _paragraph in re.split(r"\n\s*\n", _wbs_reader_scene_text(_visible_draft)):
+                for _paragraph in _wbs_display_paragraphs(_wbs_reader_scene_text(_visible_draft)):
                     if _paragraph.strip():
                         st.write(_paragraph.strip())
             # Otherwise display the outline's story text, never its directives.
@@ -9104,7 +9143,7 @@ if st.session_state.project_stage == "Plot Architect":
                             st.markdown('*“' + _direction_text.replace('*', r'\*') + '”*')
                     if _scene_text:
                         st.markdown("**Scene**")
-                        for _paragraph in re.split(r"\n\s*\n", _scene_text):
+                        for _paragraph in _wbs_display_paragraphs(_scene_text):
                             if _paragraph.strip():
                                 st.write(_paragraph.strip())
                 elif not _title_match:
@@ -9276,7 +9315,7 @@ if st.session_state.project_stage == "Plot Architect":
         _preview_complete_text = "\n\n".join(_text for _, _text in _preview_scenes)
         for _scene_id, _scene_text in _preview_scenes:
             st.markdown(f"**Scene {_scene_id}**")
-            for _paragraph in re.split(r"\n\s*\n", _scene_text):
+            for _paragraph in _wbs_display_paragraphs(_scene_text):
                 if _paragraph.strip():
                     st.write(_paragraph.strip())
         _original_full_draft = str(st.session_state.get("current_draft_output") or "").strip()
