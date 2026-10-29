@@ -10247,6 +10247,50 @@ elif st.session_state.project_stage == "Isolation Guardrail":
         st.caption("Review your complete working manuscript before final approval. Checks are read-only and never rewrite your work.")
         current_source = str(st.session_state.get("current_draft_output") or "").strip()
         source_signature = get_text_signature(current_source)
+        # Short Story only: review each saved scene before Final Manuscript.
+        # Approvals are scoped to the exact loaded revision and manuscript content;
+        # loading a different revision or changing prose cannot reuse approvals.
+        _wbs_scene_review_required = str(st.session_state.get("format_type") or "").strip().lower() == "short story"
+        _wbs_scene_review_complete = True
+        if _wbs_scene_review_required:
+            _raw_blocks = st.session_state.get("scene_blocks") or {}
+            _review_blocks = {int(k): str(v or "").strip() for k, v in _raw_blocks.items()
+                              if str(k).isdigit() and str(v or "").strip()}
+            _review_numbers = sorted(_review_blocks)
+            _review_identity = (str(st.session_state.get("_wbs_active_saved_session_row_id") or ""),
+                                source_signature,
+                                tuple((n, get_text_signature(_review_blocks[n])) for n in _review_numbers))
+            if st.session_state.get("_wbs_stage4_review_identity") != _review_identity:
+                st.session_state["_wbs_stage4_review_identity"] = _review_identity
+                st.session_state["_wbs_stage4_approved_scenes"] = []
+            _approved = set(st.session_state.get("_wbs_stage4_approved_scenes") or [])
+            st.markdown("### Scene-by-scene approval")
+            if len(_review_numbers) != 4:
+                _wbs_scene_review_complete = False
+                st.warning("Four separately saved scene beats are required before final approval. Return to Plot Architecture to complete missing scenes; no manuscript will be regenerated automatically here.")
+            else:
+                _next_scene = next((n for n in _review_numbers if n not in _approved), _review_numbers[-1])
+                _chosen_scene = st.selectbox("Scene beat to review", _review_numbers,
+                                              index=_review_numbers.index(_next_scene),
+                                              format_func=lambda n: f"Scene Beat {n}",
+                                              key="wbs_stage4_scene_review_selector")
+                st.text_area(f"Scene Beat {_chosen_scene} — saved story text", value=_review_blocks[_chosen_scene],
+                             height=330, disabled=True,
+                             key=f"wbs_stage4_scene_text_{source_signature[:12]}_{_chosen_scene}")
+                st.caption(f"{count_words(_review_blocks[_chosen_scene])} words · Approved: {len(_approved)} of 4")
+                if _chosen_scene not in _approved:
+                    if st.button(f"Approve Scene Beat {_chosen_scene} and review next", key="wbs_stage4_approve_scene",
+                                 use_container_width=True, type="primary"):
+                        _approved.add(_chosen_scene)
+                        st.session_state["_wbs_stage4_approved_scenes"] = sorted(_approved)
+                        st.rerun()
+                else:
+                    st.success(f"Scene Beat {_chosen_scene} approved.")
+                _wbs_scene_review_complete = all(n in _approved for n in range(1, 5))
+                if not _wbs_scene_review_complete:
+                    st.info("Review and approve all four scene beats before proceeding to Stage 5. To revise a scene, use Open Script Rewrite; approval will reset if the manuscript changes.")
+                else:
+                    st.success("All four scene beats reviewed and approved. Stage 5 is available.")
         # ------------------------------------------------------------------
         # PROJECT INTEGRITY / FINAL REVIEW — read-only whole-manuscript QC.
         # This never changes current_draft_output and never applies fixes automatically.
@@ -10411,8 +10455,10 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                     key="wbs_picture_book_cue_preview", disabled=True)
 
         st.markdown("---")
-        if st.button("Proceed to Stage 5 — Final Manuscript", key="wbs_editorial_to_final", type="primary", use_container_width=True):
-            wbs_request_stage_change("Isolation Guardrail", export_view=True)
+        if st.button("Proceed to Stage 5 — Final Manuscript", key="wbs_editorial_to_final", type="primary",
+                     disabled=not _wbs_scene_review_complete, use_container_width=True):
+            if _wbs_scene_review_complete:
+                wbs_request_stage_change("Isolation Guardrail", export_view=True)
         # Stage 4 ends here. Draft history, download, and final approval belong to Stage 5.
         st.stop()
     st.markdown("---")
