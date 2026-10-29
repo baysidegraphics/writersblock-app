@@ -9394,10 +9394,12 @@ if st.session_state.project_stage == "Plot Architect":
             st.session_state["_wbs_ss_selected"] = _ss_available[0]
         st.markdown("### Scene Scripting — Four Scenes")
         st.caption("Open written scenes in any order. Navigation does not save, generate, or create another V-number.")
+        st.markdown("#### Choose an existing scene")
         _ss_selected = st.selectbox(
             "Choose an existing scene", _ss_available,
             key="_wbs_ss_selected", format_func=lambda n: f"Scene {n} — {_ss_parts.get(n, (f'Scene {n}', '', ''))[0]}",
             on_change=wbs_ss_capture_draft_on_selection_change,
+            label_visibility="collapsed",
         )
         _ss_title = _ss_parts.get(_ss_selected, (f"Scene {_ss_selected}", "", ""))[0]
         _ss_original = _ss_blocks.get(_ss_selected, _ss_seed_one if _ss_selected == 1 else "")
