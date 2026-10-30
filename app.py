@@ -3664,7 +3664,7 @@ def project_integrity_review_applies(format_type=None):
     return selected in PROJECT_INTEGRITY_REVIEW_FORMATS
 
 
-def render_project_integrity_report_html(report_text):
+def render_project_integrity_report_html(report_text, located_issues=None):
     report_text = str(report_text or "").strip()
     if not report_text:
         return ""
@@ -3681,6 +3681,19 @@ def render_project_integrity_report_html(report_text):
         "RECOMMENDED WRITER CHECKS",
     }
 
+    # Locate warnings in the actual saved scene text, then label the warning
+    # INLINE. The report and manuscript themselves remain entirely unchanged.
+    # Only verified quotes or explicit scene references get location labels.
+    locations_by_issue = {}
+    for item in (located_issues or []):
+        issue = str(item.get("issue") or "").strip()
+        if not issue:
+            continue
+        locs = locations_by_issue.setdefault(issue, [])
+        label = f"Scene {item['scene']} — {item['title']}"
+        if label not in locs:
+            locs.append(label)
+
     chunks = ["<div class='wbs-integrity-report'>"]
     for raw_line in report_text.splitlines():
         line = str(raw_line or "").rstrip()
@@ -3693,10 +3706,18 @@ def render_project_integrity_report_html(report_text):
             chunks.append(f"<div class='wbs-ir-status'>{safe}</div>")
         elif upper in section_titles:
             chunks.append(f"<div class='wbs-ir-section'><div class='wbs-ir-heading'>{safe}</div></div>")
-        elif stripped.startswith("- "):
-            chunks.append(f"<div class='wbs-ir-bullet'>• {html.escape(stripped[2:].strip())}</div>")
+        elif stripped.startswith("- ") or stripped.startswith("-"):
+            warning = stripped[1:].strip()
+            locations = locations_by_issue.get(warning, [])
+            position = ("<strong>Location: " + html.escape("; ".join(locations))
+                        + "</strong> — ") if locations else ""
+            chunks.append(f"<div class='wbs-ir-bullet'>• {position}{html.escape(warning)}</div>")
         elif re.match(r"^\d+\.\s", stripped):
-            chunks.append(f"<div class='wbs-ir-number'>{safe}</div>")
+            warning = re.sub(r"^\d+\.\s", "", stripped).strip()
+            locations = locations_by_issue.get(warning, [])
+            position = ("<strong>Location: " + html.escape("; ".join(locations))
+                        + "</strong> — ") if locations else ""
+            chunks.append(f"<div class='wbs-ir-number'>{position}{safe}</div>")
         else:
             chunks.append(f"<div class='wbs-ir-p'>{safe}</div>")
     chunks.append("</div>")
@@ -3737,6 +3758,33 @@ def run_project_integrity_final_review(manuscript_text):
             f"Judge completeness by narrative quality rather than an invented minimum."
         )
 
+    # Scene markers are context for audit LOCATION only. Never put these markers
+    # into the stored manuscript or change its text. Use actual four-scene blocks.
+    _ir_blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
+    _ir_titles = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
+    if (set(_ir_blocks) == {1, 2, 3, 4}
+            and manuscript_text == wbs_ss_storyline(_ir_blocks).strip()):
+        _ir_annotated = "\n\n".join(
+            f"[SCENE {n} — {_ir_titles.get(n, (f'Scene {n}',))[0]}]\n"
+            + _ir_blocks[n] + f"\n[END SCENE {n}]"
+            for n in (1, 2, 3, 4)
+        )
+        _ir_scene_guidance = (
+            "The manuscript below contains scene boundary labels added for "
+            "location reporting only. They are NOT manuscript content. "
+            "For EACH warning, specify the exact scene number and scene title, "
+            "and one short verbatim quote (under 18 words) identifying the passage. "
+            "If a problem crosses two scenes, identify both scenes. "
+            "Give scene-local paragraph numbers only when certain."
+        )
+    else:
+        _ir_annotated = manuscript_text
+        _ir_scene_guidance = (
+            "Identify the actual chapter/section/scene where each warning occurs "
+            "when the manuscript supplies one; quote a short exact passage. "
+            "Do not invent four scenes or any absent boundaries."
+        )
+
     prompt = f"""
 You are the WritersBlock Studios PROJECT INTEGRITY / FINAL REVIEW quality-control system.
 
@@ -3773,6 +3821,7 @@ IMPORTANT REVIEW RULES:
 - Distinguish an actual contradiction from an intentional mystery, reveal, unreliable narrator, flashback, or deliberate stylistic choice.
 - Do not invent problems merely to fill the report.
 - Cite the chapter/scene/section or a short identifying phrase whenever possible.
+- Each substantive warning MUST include the actual scene/section location and an exact identifying quote when available. Never guess an absent scene.
 - Do not quote long passages.
 - If an item is uncertain, label it "VERIFY" rather than presenting it as a definite error.
 - Recommendations must describe what the writer should inspect or consider. Do not rewrite the text.
@@ -3814,8 +3863,11 @@ RECOMMENDED WRITER CHECKS
 
 Use PASS only when no material warning is found. Use WARNINGS when one or more items should be reviewed by the writer.
 
+LOCATION REFERENCE:
+{_ir_scene_guidance}
+
 --- BEGIN MANUSCRIPT ---
-{manuscript_text}
+{_ir_annotated}
 --- END MANUSCRIPT ---
 """.strip()
 
@@ -3827,6 +3879,120 @@ Use PASS only when no material warning is found. Use WARNINGS when one or more i
     if not report:
         raise RuntimeError("The Project Integrity review returned no report.")
     return report
+
+
+def wbs_ir_located_issues(report_text, blocks, titles, manuscript_text=None):
+    """Annotate AI warnings with verified scene locations, without editing story.
+
+    Scene-level editorial navigation must not depend on the stricter four-scene
+    final-approval comparison. A report can refer to one saved scene even if the
+    working manuscript has gained a small accepted rewrite. Match identifying
+    quoted phrases against BOTH the scene and the reviewed manuscript.
+    """
+    actual = wbs_ss_blocks(blocks)
+    if not actual:
+        return []
+
+    def _tokens(value):
+        return re.findall(r"\w+", str(value or "").casefold())
+
+    source_words = _tokens(manuscript_text) if manuscript_text is not None else []
+
+    def _best_contiguous(words, passage):
+        """Number of consecutive literal words shared by two passages."""
+        if not words or not passage:
+            return 0
+        # Five to eight consecutive original words are more reliable than an
+        # AI-invented section/paragraph number, and tolerate short prefatory
+        # words changed by the reviewer (e.g. 'The richer' vs 'A sudden, richer').
+        longest = 0
+        lookups = {}
+        for i, word in enumerate(passage):
+            lookups.setdefault(word, []).append(i)
+        for i, word in enumerate(words):
+            for j in lookups.get(word, []):
+                k = 0
+                while (i+k < len(words) and j+k < len(passage)
+                       and words[i+k] == passage[j+k]):
+                    k += 1
+                longest = max(longest, k)
+                if longest >= len(words):
+                    return longest
+        return longest
+
+    output = []
+    section = ""
+    neutral = ("NONE FOUND", "NO MATERIAL ISSUES", "NO CHANGES RECOMMENDED",
+               "NO CRITICAL", "NO ISSUES", "NOT APPLICABLE")
+    heading_names = {"CRITICAL WARNINGS", "CONTINUITY / CHARACTER / TIMELINE",
+                     "REPETITION / POV / TENSE", "CHAPTER / SECTION / STRUCTURE INTEGRITY",
+                     "PLACEHOLDERS / MISSING / DUPLICATE CONTENT",
+                     "UNRESOLVED STORY ELEMENTS", "FORMAT COMPLIANCE",
+                     "RECOMMENDED WRITER CHECKS"}
+    for line in str(report_text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.upper() in heading_names:
+            section = stripped.upper()
+            continue
+        if section not in heading_names:
+            continue
+        # AI review responses sometimes use Markdown asterisks rather than the
+        # requested hyphen for a VERIFY finding. Treat both as report bullets.
+        content = re.sub(r"^(?:[-•*]\s*|\d+\.\s*)", "", stripped).strip()
+        if not content or content.upper().startswith(neutral):
+            continue
+        if not (re.match(r"^(?:[-•*]|\d+\.)\s*", stripped)
+                or 'VERIFY' in content.upper() or 'WARNING' in content.upper()):
+            continue
+        quotes = re.findall(r'["“]([^"”]{12,240})["”]', content)
+        located = {}
+        for quote in quotes:
+            words = _tokens(quote)
+            if len(words) < 6:
+                continue
+            # The quoted phrase MUST have a substantial verbatim anchor in
+            # the reviewed manuscript. Do not navigate based on a guess.
+            required = min(8, max(6, int(len(words) * 0.65)))
+            if manuscript_text is not None and _best_contiguous(words, source_words) < required:
+                continue
+            for number, story in actual.items():
+                if _best_contiguous(words, _tokens(story)) >= required:
+                    located[number] = quote
+        # Explicit scene IDs in the AI report are considered only when the
+        # associated scene has content in the reviewed manuscript.
+        if not located:
+            for match in re.findall(r"\bscene\s*(?:number\s*)?(\d+)\b", content, re.I):
+                number = int(match)
+                if number in actual and (manuscript_text is None or
+                    _best_contiguous(_tokens(actual[number]), source_words) >= 8):
+                    located[number] = ""
+        for number in sorted(located):
+            title_entry = titles.get(number, (f"Scene {number}",))
+            title = title_entry[0] if isinstance(title_entry, (tuple, list)) else str(title_entry)
+            output.append({"scene": number, "title": title,
+                           "section": section, "issue": content,
+                           "quote": located[number]})
+    seen = set()
+    unique = []
+    for entry in output:
+        signature = (entry["scene"], entry["quote"].casefold() or entry["issue"].casefold())
+        if signature not in seen:
+            unique.append(entry)
+            seen.add(signature)
+    return unique
+
+
+def wbs_ir_go_to_scene(number):
+    """Open the exact existing scene; never save, generate or renumber work."""
+    number = int(number)
+    if number not in (1, 2, 3, 4):
+        return
+    st.session_state["_wbs_ss_jump_to"] = number
+    if st.session_state.get("active_format_id") != "short_story":
+        st.session_state["_wbs_stage3_rewrite_location"] = f"Scene Beat {number}"
+    wbs_request_stage_change("Plot Architect")
 
 
 FINAL_OUTPUT_FORMAT_OPTIONS = [
@@ -10857,8 +11023,18 @@ elif st.session_state.project_stage == "Isolation Guardrail":
         st.caption(f"{count_words(current_source):,} words · Prepared directly from the approved manuscript · No AI regeneration")
         st.text_area("Final Manuscript", value=current_source, height=520, disabled=True, key=f"wbs_final_manuscript_readonly_{source_signature}")
 
+        _wbs_final_integrity_current = (
+            not project_integrity_review_applies() or (
+                bool(str(st.session_state.get("project_integrity_report") or "").strip())
+                and st.session_state.get("project_integrity_source_signature") == source_signature
+            )
+        )
+        if not _wbs_final_integrity_current:
+            st.warning("Return to Stage 4 and run Project Integrity before final saving.")
         if st.session_state.get("demo_mode"):
-            if st.button("Download Final Manuscript (.docx) 🔒", key="trial_download_final_converted_output", use_container_width=True):
+            if st.button("Save Final Manuscript 🔒", key="trial_final_manuscript_save_step5"):
+                full_version_only_notice("Saved Versions")
+            if st.button("Download / Print Manuscript (.docx) 🔒", key="trial_download_final_converted_output", use_container_width=True):
                 full_version_only_notice("Manuscript Printout")
         else:
             if selected_final_format == PICTURE_BOOK_FORMAT:
@@ -10873,13 +11049,48 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                 )
             project_stem = safe_download_stem(get_project_title_for_display(), "writersblock_project")
             format_stem = safe_download_stem(get_automatic_output_label(selected_final_format), "final_output")
-            st.download_button(
-                label="Download Final Manuscript (.docx)",
-                data=docx_bytes,
-                file_name=f"{project_stem}_{format_stem}_final.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                type="primary", use_container_width=True,
-            )
+            save_column, print_column = st.columns(2, gap="small")
+            with save_column:
+                # Final is a separate manuscript checkpoint; V-6 saved project
+                # session is never silently overwritten or incremented.
+                _wbs_final_saved_proof = st.session_state.get("_wbs_final_saved_proof")
+                _wbs_this_final_proof = (
+                    str(get_active_project_id() or ""),
+                    str(st.session_state.get("_wbs_active_saved_session_row_id") or ""),
+                    source_signature,
+                )
+                if st.button(
+                    "💾 Save Final Manuscript",
+                    key="wbs_stage5_save_final_manuscript",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=(not _wbs_final_integrity_current or
+                              not wbs_stage4_final_access_ready() or
+                              _wbs_final_saved_proof == _wbs_this_final_proof),
+                ):
+                    try:
+                        result = save_manuscript_checkpoint(
+                            status="FINAL", stage_label="Manuscript Output",
+                            source_stage="final_output",
+                        )
+                    except Exception as exc:
+                        st.error(f"Final manuscript save failed: {exc}")
+                    else:
+                        if result.get("status") == "saved":
+                            st.session_state["_wbs_final_saved_proof"] = _wbs_this_final_proof
+                            st.success("Final manuscript saved. The original project V-number was preserved.")
+                        else:
+                            st.error("Final manuscript was not saved. Your manuscript has not been changed.")
+                if _wbs_final_saved_proof == _wbs_this_final_proof:
+                    st.success("Final manuscript saved.")
+            with print_column:
+                st.download_button(
+                    label="🖨️ Download / Print Manuscript (.docx)",
+                    data=docx_bytes,
+                    file_name=f"{project_stem}_{format_stem}_final.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                )
 
         st.stop()
 
@@ -10943,55 +11154,8 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                 _wbs_scene_review_complete = _approved == {1, 2, 3, 4}
                 st.caption(f"{count_words(current_source):,} words · Four scenes assembled in order · "
                            "No AI regeneration or change to the saved story")
-                # Stage 4 review remains the FULL story. The scene picker is
-                # beside Accept (in the former Modify Script button position).
-                # Selection navigates directly to that exact scene in Stage 3;
-                # it never saves, generates, or increments the V-number.
-                _titles = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
-
-                def _wbs_stage4_modify_scene_selection():
-                    scene_number = st.session_state.get("wbs_stage4_modify_scene_dropdown")
-                    if scene_number not in (1, 2, 3, 4):
-                        return
-                    # Reset so the same scene may be selected again on a later
-                    # visit to Stage 4; widget state is modified in its callback.
-                    st.session_state["wbs_stage4_modify_scene_dropdown"] = None
-                    st.session_state["_wbs_ss_jump_to"] = scene_number
-                    if st.session_state.get("active_format_id") != "short_story":
-                        st.session_state["_wbs_stage3_rewrite_location"] = f"Scene Beat {scene_number}"
-                    wbs_request_stage_change("Plot Architect")
-
-                _accept_col, _modify_col = st.columns(2, gap="small")
-                with _accept_col:
-                    if st.button("Accept And Save Complete Story",
-                                 key="wbs_stage4_accept_full_story", type="primary",
-                                 use_container_width=True,
-                                 disabled=_wbs_scene_review_complete or bool(st.session_state.get("demo_mode"))):
-                        try:
-                            _approved = wbs_stage4_accept_and_save()
-                        except Exception as _approval_error:
-                            st.error(f"Complete story could not be accepted: {_approval_error}")
-                        else:
-                            st.session_state["_wbs_stage4_approved_scenes"] = sorted(_approved)
-                            st.rerun()
-                with _modify_col:
-                    st.selectbox(
-                        "Modify Script — select scene",
-                        [None, 1, 2, 3, 4],
-                        key="wbs_stage4_modify_scene_dropdown",
-                        format_func=lambda n: (
-                            "Modify Script — Select Scene" if n is None
-                            else f"Scene {n} — {_titles.get(n, (f'Scene {n}', '', ''))[0]}"
-                        ),
-                        label_visibility="collapsed",
-                        on_change=_wbs_stage4_modify_scene_selection,
-                    )
-                if _wbs_scene_review_complete:
-                    st.success("Entire story accepted and saved in the current V-number. "
-                               "Proceed to Final Manuscript when ready.")
-                else:
-                    st.info("Review the complete story, then choose Accept And Save Complete Story. "
-                            "To make changes, select a scene from Modify Script to open it directly in Scene Scripting.")
+                st.caption("Complete story is ready for Project Integrity review below. "
+                           "Final acceptance is located after the review results.")
         # ------------------------------------------------------------------
         # PROJECT INTEGRITY / FINAL REVIEW — read-only whole-manuscript QC.
         # This never changes current_draft_output and never applies fixes automatically.
@@ -11046,18 +11210,107 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                 else:
                     st.warning("Project Integrity Review: WARNINGS — review the report before Final Output.")
 
+                # Resolve scene references BEFORE displaying the full report,
+                # so a writer sees the exact scene and a Modify link at the top.
+                # This also works for reports already saved in V-6; no new AI
+                # call, save, version change, or manuscript rewrite is needed.
+                _ir_matches = (
+                    wbs_ir_located_issues(
+                        st.session_state.get("project_integrity_report", ""),
+                        _wbs_review_blocks,
+                        wbs_ss_outline_parts(st.session_state.get("plot_outline") or ""),
+                        manuscript_text=current_source,
+                    ) if _wbs_review_blocks else []
+                )
+                if _ir_matches:
+                    st.markdown("### Integrity Warnings — Scene Locations")
+                    for _ir_index, _ir_issue in enumerate(_ir_matches):
+                        st.markdown(f"**Scene {_ir_issue['scene']} — {_ir_issue['title']}**")
+                        if _ir_issue["quote"]:
+                            st.caption("Reported passage: “" + _ir_issue["quote"] + "”")
+                        if st.button(
+                            f"Modify This Scene {_ir_issue['scene']}",
+                            key=f"wbs_integrity_modify_scene_{_ir_index}_{source_signature[:12]}",
+                            use_container_width=False,
+                        ):
+                            wbs_ir_go_to_scene(_ir_issue["scene"])
+                elif _wbs_review_blocks and st.session_state.get("project_integrity_status") != "PASS":
+                    st.info("No scene location could be verified from the report's exact quotes. "
+                            "Use the Modify Script scene selector below; no scene number has been guessed.")
+
                 st.markdown("**Project Integrity Report:**")
                 st.markdown(
                     render_project_integrity_report_html(
-                        st.session_state.get("project_integrity_report", "")
+                        st.session_state.get("project_integrity_report", ""),
+                        located_issues=_ir_matches,
                     ),
                     unsafe_allow_html=True,
                 )
             else:
-                st.info("Project Integrity review has not been run on the current manuscript. Final Output remains writer-controlled and is not blocked.")
+                st.info("Run Project Integrity before final acceptance. The review never changes manuscript text.")
 
             st.markdown("---")
 
+        # Approval is deliberately BELOW the integrity review for every format.
+        # A previously accepted story is never unapproved merely by this UI move.
+        _wbs_ir_ready = (not project_integrity_review_applies() or bool(
+            str(st.session_state.get("project_integrity_report") or "").strip()
+            and st.session_state.get("project_integrity_source_signature") == source_signature
+        ))
+        if _wbs_scene_review_required and _wbs_exact_four:
+            st.subheader("Final Editorial Acceptance")
+            if not _wbs_ir_ready:
+                st.warning("Run Project Integrity / Final Review above before accepting the story.")
+            # Stage 4 review remains the FULL story. The scene picker is
+            # beside Accept (in the former Modify Script button position).
+            # Selection navigates directly to that exact scene in Stage 3;
+            # it never saves, generates, or increments the V-number.
+            _titles = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
+
+            def _wbs_stage4_modify_scene_selection():
+                scene_number = st.session_state.get("wbs_stage4_modify_scene_dropdown")
+                if scene_number not in (1, 2, 3, 4):
+                    return
+                # Reset so the same scene may be selected again on a later
+                # visit to Stage 4; widget state is modified in its callback.
+                st.session_state["wbs_stage4_modify_scene_dropdown"] = None
+                st.session_state["_wbs_ss_jump_to"] = scene_number
+                if st.session_state.get("active_format_id") != "short_story":
+                    st.session_state["_wbs_stage3_rewrite_location"] = f"Scene Beat {scene_number}"
+                wbs_request_stage_change("Plot Architect")
+
+            _accept_col, _modify_col = st.columns(2, gap="small")
+            with _accept_col:
+                if st.button("Accept And Save Complete Story",
+                             key="wbs_stage4_accept_full_story", type="primary",
+                             use_container_width=True,
+                             disabled=(not _wbs_ir_ready or _wbs_scene_review_complete
+                                           or bool(st.session_state.get("demo_mode")))):
+                    try:
+                        _approved = wbs_stage4_accept_and_save()
+                    except Exception as _approval_error:
+                        st.error(f"Complete story could not be accepted: {_approval_error}")
+                    else:
+                        st.session_state["_wbs_stage4_approved_scenes"] = sorted(_approved)
+                        st.rerun()
+            with _modify_col:
+                st.selectbox(
+                    "Modify Script — select scene",
+                    [None, 1, 2, 3, 4],
+                    key="wbs_stage4_modify_scene_dropdown",
+                    format_func=lambda n: (
+                        "Modify Script — Select Scene" if n is None
+                        else f"Scene {n} — {_titles.get(n, (f'Scene {n}', '', ''))[0]}"
+                    ),
+                    label_visibility="collapsed",
+                    on_change=_wbs_stage4_modify_scene_selection,
+                )
+            if _wbs_scene_review_complete:
+                st.success("Entire story accepted and saved in the current V-number. "
+                           "Proceed to Final Manuscript when ready.")
+            else:
+                st.info("Review the complete story, then choose Accept And Save Complete Story. "
+                        "To make changes, select a scene from Modify Script to open it directly in Scene Scripting.")
         # OPTIONAL PUBLISHER READINESS — format-specific, read-only guidance.
         # No automatic rewriting, manuscript mutation, or extra AI generation.
         st.subheader("📋 Optional Publisher Readiness Review")
@@ -11157,8 +11410,8 @@ elif st.session_state.project_stage == "Isolation Guardrail":
 
         st.markdown("---")
         if st.button("Proceed to Stage 5 — Final Manuscript", key="wbs_editorial_to_final", type="primary",
-                     disabled=not _wbs_scene_review_complete, use_container_width=True):
-            if _wbs_scene_review_complete:
+                     disabled=(not _wbs_scene_review_complete or not _wbs_ir_ready), use_container_width=True):
+            if _wbs_scene_review_complete and _wbs_ir_ready:
                 wbs_request_stage_change("Isolation Guardrail", export_view=True)
         # Stage 4 ends here. Draft history, download, and final approval belong to Stage 5.
         st.stop()
