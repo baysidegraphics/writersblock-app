@@ -9372,6 +9372,85 @@ def wbs_stage4_accept_and_save(scene_number=None):
     return stored
 
 
+def wbs_stage4_save_manuscript_corrections(edited_blocks, expected_manuscript, expected_blocks):
+    """Save all four author-edited scenes into the CURRENT revision in one DB update.
+
+    No AI call, new revision, changed format, generated scene, or Quill change.
+    Refuse to overwrite an out-of-date or different project session.
+    Existing integrity reviews and approvals remain historical, but are NOT
+    valid for revised text until a fresh review and editorial acceptance.
+    """
+    row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
+    project_id = str(get_active_project_id() or "")
+    user_id = str(get_current_user_id() or "")
+    active_format = str(st.session_state.get("active_format_id") or "")
+    if not all((row_id, project_id, user_id, active_format)):
+        raise ValueError("Load the exact saved revision before editing the full manuscript.")
+    if (not isinstance(edited_blocks, dict) or len(edited_blocks) != 4
+            or {str(k) for k in edited_blocks} != {"1", "2", "3", "4"}):
+        raise ValueError("Only the original four scenes can be edited here.")
+    original = wbs_ss_blocks(expected_blocks)
+    revised = wbs_ss_blocks(edited_blocks)
+    if set(original) != {1, 2, 3, 4} or set(revised) != {1, 2, 3, 4}:
+        raise ValueError("Each of the four scenes must contain text. No changes saved.")
+    if wbs_ss_storyline(original) != str(expected_manuscript or ""):
+        raise ValueError("Scene boundaries no longer match this manuscript. Reload before editing.")
+    if (wbs_ss_blocks(st.session_state.get("scene_blocks") or {}) != original or
+            str(st.session_state.get("current_draft_output") or "") != expected_manuscript):
+        raise ValueError("The working story changed since this page opened. Reload and review before saving.")
+    if revised == original:
+        return False
+    result = (supabase.table("writersblock_project_drafts")
+              .select("id, draft_content, version_number")
+              .eq("id", row_id).eq("project_id", project_id)
+              .eq("user_id", user_id).eq("draft_type", "project_session")
+              .limit(1).execute())
+    rows = getattr(result, "data", None) or []
+    if len(rows) != 1:
+        raise ValueError("The selected saved revision could not be verified. Nothing was saved.")
+    snapshot = json.loads(rows[0].get("draft_content") or "{}")
+    if (not isinstance(snapshot, dict)
+            or str(snapshot.get("current_project_id") or project_id) != project_id
+            or str(snapshot.get("active_format_id") or "") != active_format):
+        raise ValueError("Saved project identity or format mismatch. Nothing was changed.")
+    if (wbs_ss_blocks(snapshot.get("scene_blocks") or {}) != original or
+            str(snapshot.get("current_draft_output") or "") != expected_manuscript):
+        raise ValueError("The saved manuscript has changed elsewhere. Reload before saving corrections.")
+
+    # The four editor fields are the sole source; headings never enter the prose.
+    # Preserve other saved fields, including the original V-number and Quill.
+    updated_story = wbs_ss_storyline(revised)
+    snapshot["scene_blocks"] = {str(n): revised[n] for n in range(1, 5)}
+    snapshot["current_draft_output"] = updated_story
+    # Delete approval proof so old approval cannot authorize new text.
+    snapshot.pop("wbs_stage4_scene_approvals", None)
+    # Keep the prior integrity report for comparison, but its old source
+    # signature will invalidate it until a NEW integrity run is completed.
+    persisted = (supabase.table("writersblock_project_drafts")
+                 .update({"draft_content": json.dumps(snapshot, ensure_ascii=False)})
+                 .eq("id", row_id).eq("project_id", project_id)
+                 .eq("user_id", user_id).eq("draft_type", "project_session")
+                 .execute())
+    if not getattr(persisted, "data", None):
+        raise ValueError("The database did not confirm the corrections save.")
+
+    st.session_state["scene_blocks"] = dict(revised)
+    st.session_state["current_draft_output"] = updated_story
+    st.session_state["wbs_stage4_scene_approvals"] = {}
+    st.session_state.pop("_wbs_stage4_approved_scenes", None)
+    st.session_state.pop("_wbs_stage4_review_identity", None)
+    st.session_state.pop("_wbs_final_saved_proof", None)
+    # Returning to Stage 3 must show the just-saved prose, not stale buffers.
+    st.session_state.pop("_wbs_ss_edit_buffers", None)
+    st.session_state.pop("_wbs_ss_editor_widget_key", None)
+    st.session_state.pop("_wbs_ss_rewrite_preview", None)
+    st.session_state["_wbs_ss_db_scene_baseline"] = dict(revised)
+    st.session_state["_wbs_ss_initial_loaded_blocks"] = dict(revised)
+    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
+    st.session_state["_wbs_last_saved_project_id"] = project_id
+    return True
+
+
 # ==========================================
 # PHASE 3: PLOT ARCHITECT ENGINE
 # ==========================================
@@ -11111,25 +11190,69 @@ elif st.session_state.project_stage == "Isolation Guardrail":
         render_project_title_banner("step_5_script_lock")
         st.markdown("---")
         st.subheader("Editorial & Publisher Review")
-        st.caption("Review your complete working manuscript before final approval. Checks are read-only and never rewrite your work.")
         current_source = str(st.session_state.get("current_draft_output") or "").strip()
         source_signature = get_text_signature(current_source)
-        # The complete working manuscript is displayed IMMEDIATELY in Stage 4
-        # for EVERY writing format. No AI calls, automatic content mutation or
-        # per-scene review selections are involved in this display.
-        st.markdown("### Complete Story — Editorial Inspection")
-        if current_source:
-            st.text_area("Entire manuscript (read-only)", value=current_source,
-                         height=640, disabled=True,
-                         key=f"wbs_stage4_entire_manuscript_{source_signature[:12]}")
-        else:
-            st.warning("There is no completed manuscript available. Return to Scene Scripting.")
-        # Stage 4: display the ENTIRE saved manuscript at once, in scene order.
-        # Common to every format with four actual scene blocks, and read-only.
-        # No scene-by-scene approval gate, auto-rewrite, or invented scene splits.
         _wbs_review_blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
         _wbs_exact_four = (set(_wbs_review_blocks) == {1, 2, 3, 4}
                            and current_source == wbs_ss_storyline(_wbs_review_blocks))
+        st.markdown("### Complete Manuscript — Review & Correct")
+        st.caption("The full story is shown in order with permanent scene labels. "
+                   "Edit any or all scenes here, then click Save Manuscript Corrections once. "
+                   "No AI is used when saving; run Integrity again after the save.")
+        if _wbs_exact_four:
+            _wbs_scene_titles = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
+            _wbs_editor_tag = (str(get_active_project_id() or "") + "_"
+                               + str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
+                               + "_" + source_signature[:18])
+            with st.form(key="wbs_stage4_entire_story_editor_" + _wbs_editor_tag):
+                _wbs_corrections = {}
+                for _n in range(1, 5):
+                    _title = _wbs_scene_titles.get(_n, (f"Scene {_n}", "", ""))[0]
+                    st.markdown(f"#### Scene {_n} — {html.escape(str(_title))}")
+                    _wbs_corrections[_n] = st.text_area(
+                        f"Scene {_n} story text",
+                        value=_wbs_review_blocks[_n],
+                        height=max(200, min(500, 140 + count_words(_wbs_review_blocks[_n]) // 2)),
+                        key=f"wbs_stage4_edit_scene_{_n}_{_wbs_editor_tag}",
+                        disabled=bool(st.session_state.get("demo_mode")),
+                        help="Edit this scene directly. Scene labels are not saved as story text.",
+                    )
+                _wbs_save_corrections = st.form_submit_button(
+                    "💾 Save Manuscript Corrections",
+                    type="primary", use_container_width=True,
+                    disabled=bool(st.session_state.get("demo_mode")),
+                )
+            if _wbs_save_corrections:
+                try:
+                    _changed = wbs_stage4_save_manuscript_corrections(
+                        _wbs_corrections, current_source, _wbs_review_blocks)
+                except Exception as _save_exc:
+                    st.error(f"Manuscript corrections were not saved: {_save_exc}")
+                else:
+                    if _changed:
+                        st.session_state["_wbs_stage4_corrections_notice"] = (
+                            "All four scenes saved to the current revision. "
+                            "Run Project Integrity again to verify your corrections."
+                        )
+                    else:
+                        st.session_state["_wbs_stage4_corrections_notice"] = (
+                            "No changes detected. No save or AI call was needed."
+                        )
+                    st.rerun()
+        elif current_source:
+            # Never guess scene divisions or overwrite a legacy manuscript.
+            st.text_area("Entire manuscript (read-only)", value=current_source,
+                         height=640, disabled=True,
+                         key=f"wbs_stage4_entire_manuscript_{source_signature[:12]}")
+            st.info("Inline scene corrections are available when the four saved scene "
+                    "blocks match this manuscript. Existing text is protected.")
+        else:
+            st.warning("No complete manuscript is available. Return to Scene Scripting.")
+        _notice = st.session_state.pop("_wbs_stage4_corrections_notice", None)
+        if _notice:
+            st.success(_notice)
+        # Scene labels live in the inspection editor; the persisted manuscript
+        # remains plain story text and preserves each exact scene boundary.
         _wbs_scene_review_required = (
             str(st.session_state.get("active_format_id") or "") == "short_story"
             or _wbs_exact_four
@@ -11247,7 +11370,13 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                     unsafe_allow_html=True,
                 )
             else:
-                st.info("Run Project Integrity before final acceptance. The review never changes manuscript text.")
+                st.info("Run Project Integrity for the current saved manuscript. "
+                        "It reads your saved corrections but does not alter them.")
+                if str(st.session_state.get("project_integrity_report") or "").strip():
+                    with st.expander("Previous Integrity Report — before manuscript corrections", expanded=False):
+                        st.markdown(render_project_integrity_report_html(
+                            st.session_state.get("project_integrity_report", "")),
+                            unsafe_allow_html=True)
 
             st.markdown("---")
 
