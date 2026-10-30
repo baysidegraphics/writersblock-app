@@ -7757,6 +7757,25 @@ elif _wbs_unlocked >= 5:
 else:
     st.sidebar.button(f"🔒 5. {stage_8_label} (Locked)", key="nav_export_locked", disabled=True, use_container_width=True)
 
+# WBS STAGE 6 — separate publisher assessment (no Stage 5 implementation changes).
+# Sidebar access only after a FINAL manuscript exists; Stage 6 independently
+# verifies the exact user-owned saved FINAL record before any AI request.
+if st.session_state.project_stage == "Publisher Assessment":
+    st.sidebar.button("🔵 6. Publisher & Market Readiness (Active)",
+                      key="nav_publisher_assessment_active", use_container_width=True)
+elif (not st.session_state.get("demo_mode")
+      and str(st.session_state.get("current_manuscript_save_status") or "").upper() == "FINAL"
+      and get_active_project_id()):
+    if st.sidebar.button("⚪ 6. Publisher & Market Readiness",
+                         key="nav_publisher_assessment", use_container_width=True):
+        st.session_state.project_stage = "Publisher Assessment"
+        st.session_state.export_view = False
+        st.rerun()
+else:
+    st.sidebar.button("🔒 6. Publisher & Market Readiness (Locked)",
+                      key="nav_publisher_assessment_locked", disabled=True,
+                      use_container_width=True)
+
 st.sidebar.markdown("---")
 
 with st.sidebar.container(border=True):
@@ -7905,6 +7924,24 @@ SPARK_BANK = {
     ],
 }
 
+
+# Stage 6 lives in its own module and reads saved FINAL output only.
+# No Stage 5 rendering, saving, exporting or Quill logic is altered here.
+if st.session_state.project_stage == "Publisher Assessment":
+    from wbs_publisher_assessment import render_stage6
+    _wbs_publisher_format = str(st.session_state.get("active_format_id") or "")
+    if _wbs_publisher_format not in WBS_FORMAT_IDS:
+        st.error("Saved writing format is unavailable. Reload the original project.")
+    else:
+        render_stage6(
+            st, supabase=supabase,
+            backend=st.session_state.get("backend"),
+            project_id=get_active_project_id(), user_id=get_current_user_id(),
+            title=get_project_title_for_display(),
+            format_id=_wbs_publisher_format,
+            format_name=get_wbs_format_display_name(_wbs_publisher_format),
+        )
+    st.stop()
 
 if st.session_state.project_stage == "Intake":
     st.markdown(
