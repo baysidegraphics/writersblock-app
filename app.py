@@ -9977,60 +9977,28 @@ if st.session_state.project_stage == "Plot Architect":
                 return f"Generate Scene {number} — {title}"
             return f"Scene {number} — {title}"
 
-        _ss_footer_epoch = int(st.session_state.get("_wbs_ss_footer_epoch") or 0)
-        _ss_footer_key = f"wbs_ss_save_continue_destination_{_ss_selected}_{_ss_footer_epoch}"
-        # Presentation only: give the SAVE & CONTINUE selector the same red
-        # button appearance as the adjacent primary Integrity button. Scope
-        # the CSS to this keyed container; every other dropdown is unchanged.
-        st.markdown("""<style>
-        /* Limit the red select styling to the Stage 3 footer only. */
-        .st-key-wbs_ss_red_save_continue div[data-testid="stSelectbox"] div[data-baseweb="select"],
-        .st-key-wbs_ss_red_save_continue div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
-        .st-key-wbs_ss_red_save_continue div[data-testid="stSelectbox"] div[data-baseweb="select"] > div:first-child,
-        .st-key-wbs_ss_red_save_continue div[data-testid="stSelectbox"] div[role="combobox"],
-        .st-key-wbs_ss_red_save_continue [data-baseweb="select"] [aria-haspopup="listbox"] {
-            background: #ff4b4b !important;
-            background-color: #ff4b4b !important;
-            border-color: #ff4b4b !important;
-            border-radius: 7px !important;
-            color: white !important;
-            -webkit-text-fill-color: white !important;
-        }
-        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
-            min-height: 35px !important;
-        }
-        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] div[data-baseweb="select"] input,
-        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] div[role="combobox"] *,
-        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] div[data-baseweb="select"] svg {
-            color: white !important;
-            fill: white !important;
-            -webkit-text-fill-color: white !important;
-            font-weight: 600 !important;
-        }
-        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] div[data-baseweb="select"] > div:hover {
-            background: #ed4248 !important;
-            border-color: #ed4248 !important;
-        }
-        </style>""", unsafe_allow_html=True)
+        # Use Streamlit's own PRIMARY-colored popover button for this dropdown.
+        # A CSS-styled selectbox was still rendered gray in the deployed app.
+        # The popover's selected destination uses the SAME save/navigation path
+        # below; no extra AI calls and no changes to any other scene controls.
+        _ss_destination = None
         _ss_continue_col, _ss_integrity_col = st.columns(2, gap="small")
         with _ss_continue_col:
-            # The button text itself occupies the dropdown, instead of a
-            # separate label above a gray input. Selection still performs the
-            # existing Save & Continue handler below; no changes to saving.
-            with st.container(key="wbs_ss_red_save_continue"):
-                _ss_destination = st.selectbox(
-                    f"Save Scene {_ss_selected} And Continue To:",
-                    options=[None, *_ss_destinations],
-                    format_func=lambda value: (
-                        f"Save Scene {_ss_selected} And Continue To:"
-                        if value is None else _ss_destination_label(value)
-                    ),
-                    key=_ss_footer_key,
-                    label_visibility="collapsed",
-                    help="Choose a destination to save this scene to the current revision "
-                         "and open it. Only the next unwritten scene can be generated.",
-                    disabled=bool(st.session_state.get("demo_mode")),
-                )
+            with st.popover(
+                f"Save Scene {_ss_selected} And Continue To:",
+                type="primary",
+                use_container_width=True,
+                disabled=bool(st.session_state.get("demo_mode")),
+                help="Save this scene to the current revision, then open the chosen scene or Editorial Review.",
+            ):
+                for _ss_kind, _ss_number in _ss_destinations:
+                    if st.button(
+                        _ss_destination_label((_ss_kind, _ss_number)),
+                        key=f"wbs_ss_go_{_ss_selected}_{_ss_kind}_{_ss_number}",
+                        use_container_width=True,
+                        disabled=bool(st.session_state.get("demo_mode")),
+                    ):
+                        _ss_destination = (_ss_kind, _ss_number)
         with _ss_integrity_col:
             _ss_integrity_clicked = st.button(
                 f"Save Scene {_ss_selected} And Return To Integrity Report",
@@ -10049,7 +10017,6 @@ if st.session_state.project_stage == "Plot Architect":
             )
             if not str(_ss_final_text or "").strip():
                 st.error("This scene has no story text. Nothing was saved.")
-                st.session_state["_wbs_ss_footer_epoch"] = _ss_footer_epoch + 1
             else:
                 try:
                     # A newly generated scene exists in session before its first
@@ -10064,7 +10031,6 @@ if st.session_state.project_stage == "Plot Architect":
                         wbs_ss_save_scene_to_current_revision(_ss_selected, _ss_final_text)
                 except Exception as _ss_save_exc:
                     st.error(f"Scene {_ss_selected} could not be saved: {_ss_save_exc}")
-                    st.session_state["_wbs_ss_footer_epoch"] = _ss_footer_epoch + 1
                 else:
                     _ss_blocks[_ss_selected] = _ss_final_text
                     st.session_state.scene_blocks = _ss_blocks
@@ -10074,7 +10040,6 @@ if st.session_state.project_stage == "Plot Architect":
                     if set(_ss_blocks) == {1, 2, 3, 4}:
                         st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
                     st.session_state.pop("_wbs_ss_rewrite_preview", None)
-                    st.session_state["_wbs_ss_footer_epoch"] = _ss_footer_epoch + 1
 
                     if _ss_integrity_clicked or _ss_destination[0] == "review":
                         st.session_state.pop("_wbs_ss_integrity_return_context", None)
