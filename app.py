@@ -11438,9 +11438,6 @@ elif st.session_state.project_stage == "Isolation Guardrail":
     else:
         st.header("🛡️ Stage 4: Editorial & Publisher Review")
         st.markdown("##### Examine the draft, run optional editorial and submission checks, then approve it for Final Manuscript. Polish and Rewrite remain available on request.")
-        if access_allows("rewrite") and str(st.session_state.get("current_draft_output") or "").strip():
-            if st.button("Open Script Rewrite", key="wbs_stage4_open_rewrite", use_container_width=True):
-                wbs_request_stage_change("Rewrite Engine")
         render_project_title_banner("step_5_script_lock")
         st.markdown("---")
         st.subheader("Editorial & Publisher Review")
@@ -11578,7 +11575,7 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                 _wbs_view_integrity = st.button(
                     "Review Current Integrity Report",
                     key="review_current_integrity_report",
-                    type="secondary",
+                    type="primary",
                     disabled=not integrity_is_current,
                     use_container_width=True,
                 )
@@ -11718,6 +11715,48 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             )
             _stage4_scope = (str(get_active_project_id() or "new") + "_"
                              + str(st.session_state.get("_wbs_active_saved_session_row_id") or "none"))
+            # WBS Stage 4 acceptance visuals only — no changes to approval logic.
+            # CSS :has is supported by the Chrome client used for Streamlit.
+            st.markdown("""<style>
+            /* Make the three approval checkboxes visible on the charcoal theme. */
+            [class*="st-key-wbs_stage4_confirm_"] label[data-baseweb="checkbox"] > div:first-child,
+            [class*="st-key-wbs_stage4_confirm_"] label[data-baseweb="checkbox"] input[type="checkbox"] + div,
+            [class*="st-key-wbs_stage4_confirm_"] label[data-baseweb="checkbox"] input[type="checkbox"] + span {
+                outline: 2px solid #ffffff !important;
+                outline-offset: 1px !important;
+                border-radius: 3px !important;
+            }
+            /* Once a confirmation is checked, its button becomes visibly red.
+               The existing disabled gates (e.g., missing Integrity report) remain. */
+            [data-testid="stColumn"]:has([class*="st-key-wbs_stage4_confirm_title_"] input:checked)
+              .st-key-wbs_stage4_accept_title button,
+            [data-testid="stColumn"]:has([class*="st-key-wbs_stage4_confirm_manuscript_"] input:checked)
+              .st-key-wbs_stage4_accept_full_story button,
+            [data-testid="stColumn"]:has([class*="st-key-wbs_stage4_confirm_integrity_"] input:checked)
+              .st-key-wbs_stage4_accept_integrity button {
+                background-color: #ff4b4b !important;
+                border-color: #ff4b4b !important;
+                color: #ffffff !important;
+                font-weight: 700 !important;
+            }
+            /* Still clearly unavailable when a required review has not run. */
+            [data-testid="stColumn"]:has([class*="st-key-wbs_stage4_confirm_"] input:checked)
+              .stButton button:disabled {
+                opacity: .65 !important;
+                cursor: not-allowed !important;
+            }
+            /* The saved report is a red action. An unavailable report stays disabled. */
+            .st-key-review_current_integrity_report button {
+                background-color: #ff4b4b !important;
+                border-color: #ff4b4b !important;
+                color: white !important;
+                font-weight: 700 !important;
+            }
+            .st-key-review_current_integrity_report button:disabled {
+                opacity: .55 !important;
+                cursor: not-allowed !important;
+            }
+            </style>""", unsafe_allow_html=True)
             _title_col, _manuscript_col, _integrity_col = st.columns(3, gap="small")
             with _title_col:
                 _confirm_title = st.checkbox("Confirm project title",
