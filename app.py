@@ -3818,6 +3818,10 @@ AUDIT THE COMPLETE MANUSCRIPT FOR:
 13. Any issue likely to embarrass the writer or damage continuity in a final manuscript.
 
 IMPORTANT REVIEW RULES:
+- Determine the manuscript's actual narrative point of view before judging name usage, voice, knowledge, and plot requirements. Compare its narrative prose (not quoted dialogue) with the requested POV. A consistently first-person account must be assessed from the narrator's own limited experience.
+- In first-person narration, the narrator naturally says "I" and "my" and need not state their own name. A character name in the outline, concept, cast list, title, or development fields does NOT require that name to appear literally in the prose. Do not flag a missing self-name as an integrity or format problem unless the author explicitly requires the name to be spoken or introduced in the story, or the character's identity truly contradicts the project.
+- A first-person narrator can describe other characters' audible sounds, visible actions, and the narrator's interpretation of them without knowing those characters' internal thoughts or intentions. Do not insist that a first-person narrator explicitly describe another character hearing a specific noise when that character's reaction is observable or reasonably conveyed. Flag only a genuine causal/continuity gap supported by the manuscript, not an unspoken inference.
+- Do not require the author to rename a project, add the narrator's name, or rewrite the plot merely to satisfy a formal name-match check. Project titles, character setup, and outlines provide context; judge whether the intended story is actually present. If a substantive discrepancy remains, explain WHY and identify the precise text/location; otherwise report no issue.
 - Distinguish an actual contradiction from an intentional mystery, reveal, unreliable narrator, flashback, or deliberate stylistic choice.
 - Do not invent problems merely to fill the report.
 - Cite the chapter/scene/section or a short identifying phrase whenever possible.
