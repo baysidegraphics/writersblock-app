@@ -5680,13 +5680,35 @@ def render_project_title_banner(stage_key):
         if _title_key not in st.session_state:
             st.session_state[_title_key] = ""
         _current_col, _rename_col, _save_col = st.columns([1.25, 1.25, .75], gap="small", vertical_alignment="bottom")
+        # Both title fields use native Streamlit inputs so the labels, text,
+        # field heights, and Save button align consistently on one row.
+        # Scope styling to this Stage 4 title row only; other fields are untouched.
+        st.markdown("""<style>
+        [class*="st-key-wbs_stage4_title_readonly_"] input:disabled {
+            color: #fff !important;
+            -webkit-text-fill-color: #fff !important;
+            opacity: 1 !important;
+            background-color: #262b36 !important;
+        }
+        [class*="st-key-wbs_stage4_title_readonly_"] input,
+        [class*="st-key-wbs_stage4_new_title_v1_"] input {
+            font-size: 1rem !important;
+            font-weight: 600 !important;
+            line-height: 1.5rem !important;
+        }
+        [class*="st-key-wbs_stage4_new_title_v1_"] input::placeholder {
+            font-size: 1rem !important;
+        }
+        </style>""", unsafe_allow_html=True)
         with _current_col:
             _current_label = current_title + (" — " + revision_display if revision_display else "")
-            st.markdown(
-                "<div style='font-size:0.83rem;margin-bottom:7px;color:#ffffff;font-weight:600'>Current Project Title/Version</div>"
-                "<div style='min-height:38px;padding:9px 12px;border:1px solid #656d79;"
-                "background:#262b36;color:#ffffff;font-weight:600;border-radius:7px'>"
-                + html.escape(_current_label) + "</div>", unsafe_allow_html=True,
+            st.text_input(
+                "Current Project Title/Version",
+                value=_current_label,
+                disabled=True,
+                key="wbs_stage4_title_readonly_" + hashlib.sha256(
+                    (_title_key + _current_label).encode("utf-8")
+                ).hexdigest()[:16],
             )
         with _rename_col:
             st.text_input(
