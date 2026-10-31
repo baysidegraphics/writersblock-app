@@ -1,8 +1,8 @@
-"""WritersBlock Studios optional Stage 6: read-only publisher/market readiness.
+"""WritersBlock Studios optional Stage 5: publisher/market readiness.
 
-Deliberately independent of the five writing stages. Reads a previously saved
-FINAL manuscript; writes only `publisher_assessment` project draft rows. Does
-not alter the manuscript, other saved project sessions, or stage 1–5 logic.
+Independent of drafting and final output. Reads the approved saved Stage 4
+manuscript; writes only publisher_assessment report rows. The optional
+submission checklist is display/session-state only: it never edits the story.
 """
 from __future__ import annotations
 
@@ -416,6 +416,110 @@ def show_report(st, *, report_document, title):
                        use_container_width=True)
 
 
+
+def render_publisher_submission_checklist(st, *, project_id, format_id, format_name):
+    """Optional, local-only writer checklist at the END of Stage 5.
+
+    Never modifies manuscript/project records and never calls the assessment AI.
+    Format-specific labels remain isolated from the drafting engines.
+    """
+    st.subheader("📋 Optional Publisher Submission Checklist")
+    st.caption(
+        "Recommended for submission-oriented projects. This review is optional, "
+        "does not alter your manuscript, and is not a substitute for an editor or a publisher's guidelines."
+    )
+    publisher_format = str(format_name or format_id or "").lower()
+    if format_id == "childrens_picture_book":
+        publisher_format = "picture book"
+    elif format_id == "novel_prose_novella":
+        publisher_format = "novel"
+    elif format_id == "podcast_script":
+        publisher_format = "podcast"
+    elif format_id == "youtube_shorts":
+        publisher_format = "youtube"
+    publisher_checklists = {
+        "picture_book": (
+            "Children's Picture Book",
+            ["Age-appropriate vocabulary and read-aloud rhythm", "Word count and page/spread pacing", "Illustration placement and page breaks", "Publisher’s special requirements (if any)"],
+        ),
+        "screenplay": (
+            "Screenplay / Film",
+            ["Scene headings, action, and dialogue conventions", "Consistent character cues and scene transitions", "Script length and requested screenplay layout", "Logline, synopsis, and submission specifications"],
+        ),
+        "stage_play": (
+            "Stage Play",
+            ["Acts/scenes and speaking-character conventions", "Stage directions and production practicality", "Cast list and approximate running time", "Requested dramatic-script submission format"],
+        ),
+        "audiobook": (
+            "Audiobook",
+            ["Narration-friendly wording and pronunciation notes", "Chapter/segment breaks and read-aloud pacing", "Rights, credits, and narrator requirements", "Audio production/submission specifications"],
+        ),
+        "podcast": (
+            "Podcast",
+            ["Episode and segment structure", "Host/guest cues, transitions, and timing", "Source/rights and production notes", "Platform or producer delivery requirements"],
+        ),
+        "youtube": (
+            "YouTube Short",
+            ["Opening hook and concise pacing", "Narration, visual cues, and on-screen wording", "Rights and platform-specific requirements", "Runtime and delivery specifications"],
+        ),
+        "commercial": (
+            "Commercial",
+            ["Clear message and call to action", "Claims, permissions, and required disclosures", "Scene/voiceover timing", "Client/platform delivery requirements"],
+        ),
+        "novel": (
+            "Novel / Long-form Fiction",
+            ["Opening pages, chapter sequence, and narrative consistency", "Target genre and manuscript length", "Synopsis, query materials, and submission sample", "Requested manuscript layout and house guidelines"],
+        ),
+        "short_story": (
+            "Short Story",
+            ["Complete narrative arc and consistent POV/tense", "Market word-count limit", "Requested manuscript and cover-letter format", "Publication rights and submission guidelines"],
+        ),
+        "standard": (
+            "Standard Manuscript",
+            ["Consistent headings, sections, and pagination", "Citations, references, and permissions where applicable", "Intended audience and editorial consistency", "Publisher's required file and house style"],
+        ),
+    }
+    if "picture" in publisher_format and "book" in publisher_format:
+        checklist_key = "picture_book"
+    elif "screenplay" in publisher_format or "film" in publisher_format:
+        checklist_key = "screenplay"
+    elif "stage" in publisher_format or "dramatic" in publisher_format or "play" in publisher_format:
+        checklist_key = "stage_play"
+    elif "audio" in publisher_format:
+        checklist_key = "audiobook"
+    elif "podcast" in publisher_format:
+        checklist_key = "podcast"
+    elif "youtube" in publisher_format or "shorts" in publisher_format:
+        checklist_key = "youtube"
+    elif "commercial" in publisher_format:
+        checklist_key = "commercial"
+    elif "short story" in publisher_format:
+        checklist_key = "short_story"
+    elif "novel" in publisher_format or "novella" in publisher_format:
+        checklist_key = "novel"
+    else:
+        checklist_key = "standard"
+    publisher_label, publisher_points = publisher_checklists[checklist_key]
+    with st.expander(f"Publisher Readiness — {publisher_label} (Optional)", expanded=False):
+        st.write("**Submission checklist (writer-controlled):**")
+        publisher_identity = str(project_id or "current")
+        checklist_state_key = "_wbs_publisher_review_" + publisher_identity + "_" + checklist_key
+        for index, check_text in enumerate(publisher_points):
+            st.checkbox(check_text, key=f"{checklist_state_key}_{index}")
+        publisher_specific = st.text_area(
+            "Publisher’s special requirements (if any)",
+            key=f"{checklist_state_key}_requirements",
+            help="Record submission standards supplied by the intended publisher. This does not change the manuscript.",
+        )
+        completed = sum(bool(st.session_state.get(f"{checklist_state_key}_{index}")) for index in range(len(publisher_points)))
+        st.caption(f"Checklist: {completed} of {len(publisher_points)} marked reviewed. "
+                   "For manuscript continuity and editorial flags, use Stage 4 Project Integrity / Final Review.")
+        if publisher_specific.strip():
+            st.info("Publisher-specific requirements recorded for this review. Confirm these manually against the finished submission.")
+        st.caption("This checklist is independent of the AI assessment above; no AI call is made by checking items.")
+            
+
+
 def render_stage5(st, *, supabase, backend, project_id, user_id, title,
                   revision_id, format_id, format_name):
     st.header("📊 Stage 5 — Publisher & Market Readiness Assessment")
@@ -475,39 +579,41 @@ def render_stage5(st, *, supabase, backend, project_id, user_id, title,
                             key=f"wbs_stage5_another_{source['id']}")
     else:
         rerun = True
-    # Optional by design: no AI request or report is required to continue.
+    if rerun:
+        calls = planned_api_calls(text)
+        st.warning(f"A new assessment calls the AI approximately **{calls} time{'s' if calls != 1 else ''}** and incurs token usage. Reopening a saved report makes no AI calls.")
+        accepted = st.checkbox("I understand this is an optional paid-API assessment and not a sales guarantee.",
+                               key=f"wbs_stage5_consent_{source['id']}")
+        if st.button("Evaluate Approved Manuscript", type="primary", use_container_width=True,
+                     disabled=not accepted, key=f"wbs_stage5_evaluate_{source['id']}"):
+            if not accepted:
+                return
+            try:
+                with st.spinner("Assessing the approved manuscript (no manuscript edits)..."):
+                    report = generate_assessment(backend, title=title, format_name=format_name,
+                                                 format_id=format_id, manuscript=text)
+                    # Check that the source approval is still current after the AI
+                    # request, before saving the assessment (never a manuscript write).
+                    checked = find_saved_editorial_revision(
+                        supabase, project_id=project_id, user_id=user_id,
+                        revision_id=revision_id, format_id=format_id, title=title,
+                        current_text=current_text)
+                    if not checked or manuscript_digest(checked["manuscript_content"].strip()) != manuscript_digest(text):
+                        raise RuntimeError("The approved source changed during assessment. Report not saved.")
+                    save_report(supabase, project_id=project_id, user_id=user_id, source_row=source,
+                                format_id=format_id, format_name=format_name, title=title,
+                                model_name=getattr(backend, "model_name", ""), report=report)
+            except Exception as exc:
+                st.error(f"Publisher assessment failed: {exc}")
+            else:
+                st.success("Publisher assessment saved separately. No manuscript or revision was changed.")
+                st.rerun()
+    st.divider()
+    render_publisher_submission_checklist(st, project_id=project_id,
+                                          format_id=format_id, format_name=format_name)
+    # The assessment and publisher checklist are optional. They never block output.
     st.divider()
     if st.button("Continue to Stage 6 — Final Manuscript (Assessment Optional)",
                  type="primary", use_container_width=True,
                  key=f"wbs_stage5_continue_{source['id']}"):
         proceed_to_final()
-    if not rerun:
-        return
-    calls = planned_api_calls(text)
-    st.warning(f"A new assessment calls the AI approximately **{calls} time{'s' if calls != 1 else ''}** and incurs token usage. Reopening a saved report makes no AI calls.")
-    accepted = st.checkbox("I understand this is an optional paid-API assessment and not a sales guarantee.",
-                           key=f"wbs_stage5_consent_{source['id']}")
-    if st.button("Evaluate Approved Manuscript", type="primary", use_container_width=True,
-                 disabled=not accepted, key=f"wbs_stage5_evaluate_{source['id']}"):
-        if not accepted:
-            return
-        try:
-            with st.spinner("Assessing the approved manuscript (no manuscript edits)..."):
-                report = generate_assessment(backend, title=title, format_name=format_name,
-                                             format_id=format_id, manuscript=text)
-                # Check that the source approval is still current after the AI
-                # request, before saving the assessment (never a manuscript write).
-                checked = find_saved_editorial_revision(
-                    supabase, project_id=project_id, user_id=user_id,
-                    revision_id=revision_id, format_id=format_id, title=title,
-                    current_text=current_text)
-                if not checked or manuscript_digest(checked["manuscript_content"].strip()) != manuscript_digest(text):
-                    raise RuntimeError("The approved source changed during assessment. Report not saved.")
-                save_report(supabase, project_id=project_id, user_id=user_id, source_row=source,
-                            format_id=format_id, format_name=format_name, title=title,
-                            model_name=getattr(backend, "model_name", ""), report=report)
-        except Exception as exc:
-            st.error(f"Publisher assessment failed: {exc}")
-        else:
-            st.success("Publisher assessment saved separately. No manuscript or revision was changed.")
-            st.rerun()

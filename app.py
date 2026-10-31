@@ -12116,7 +12116,7 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                         st.divider()
                 elif _wbs_review_blocks and st.session_state.get("project_integrity_status") != "PASS":
                     st.info("No scene location could be verified from the report's exact quotes. "
-                            "Use the Modify Script scene selector below; no scene number has been guessed.")
+                            "Use Stage 3 Scene Scripting to inspect the passage; no scene number has been guessed.")
 
                 if ("OVERALL STATUS: WARNINGS" in str(st.session_state.get("project_integrity_report") or "")
                         and "| SUGGESTED FIX:" not in str(st.session_state.get("project_integrity_report") or "")):
@@ -12152,23 +12152,6 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             st.subheader("For Final Editorial Acceptance, Check Each Button Below")
             st.caption("Save the project title beside its field above, then confirm the completed "
                        "manuscript and Integrity Report below. All three approvals use the current V-number.")
-            _titles = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
-
-            def _wbs_stage4_modify_scene_selection():
-                scene_number = st.session_state.get("wbs_stage4_modify_scene_dropdown")
-                if scene_number not in (1, 2, 3, 4):
-                    return
-                st.session_state["wbs_stage4_modify_scene_dropdown"] = None
-                if (st.session_state.get("project_integrity_report")
-                        and st.session_state.get("project_integrity_source_signature") == source_signature):
-                    wbs_ss_set_integrity_return_context(scene_number)
-                else:
-                    st.session_state.pop("_wbs_ss_integrity_return_context", None)
-                st.session_state["_wbs_ss_jump_to"] = scene_number
-                if st.session_state.get("active_format_id") != "short_story":
-                    st.session_state["_wbs_stage3_rewrite_location"] = f"Scene Beat {scene_number}"
-                wbs_request_stage_change("Plot Architect")
-
             _saved_title = get_project_title()
             _proposed_title = re.sub(r"\s+", " ", str(
                 st.session_state.get(wbs_stage4_title_input_key()) or "")).strip() or _saved_title
@@ -12271,114 +12254,12 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                 elif not _wbs_ir_ready:
                     st.caption("Run the current Integrity Report first")
 
-            # Keep the existing direct scene-modification route separate from
-            # acceptance and never regenerate or rewrite prose on navigation.
-            st.selectbox(
-                "Modify Script — select scene to edit",
-                [None, 1, 2, 3, 4],
-                key="wbs_stage4_modify_scene_dropdown",
-                format_func=lambda n: (
-                    "Modify Script — Select Scene" if n is None
-                    else f"Scene {n} — {_titles.get(n, (f'Scene {n}', '', ''))[0]}"
-                ),
-                label_visibility="collapsed",
-                on_change=_wbs_stage4_modify_scene_selection,
-            )
             if all(_wbs_current_status.values()) and _proposed_title == _saved_title:
                 st.caption("All three final editorial acceptances are saved to the current revision.")
             else:
                 st.caption("Save the project title above and confirm the final manuscript and Integrity Report "
-                           "before continuing to Stage 5 Publisher Assessment. You may return to any scene for changes.")
-        # OPTIONAL PUBLISHER READINESS — format-specific, read-only guidance.
-        # No automatic rewriting, manuscript mutation, or extra AI generation.
-        st.subheader("📋 Optional Publisher Submission Checklist")
-        st.caption(
-            "Recommended for submission-oriented projects. This review is optional, "
-            "does not alter your manuscript, and is not a substitute for an editor or a publisher's guidelines."
-        )
-        publisher_format = str(get_effective_format_type() or st.session_state.get("format_type") or "").lower()
-        publisher_checklists = {
-            "picture_book": (
-                "Children's Picture Book",
-                ["Age-appropriate vocabulary and read-aloud rhythm", "Word count and page/spread pacing", "Illustration placement and page breaks", "Publisher’s special requirements (if any)"],
-            ),
-            "screenplay": (
-                "Screenplay / Film",
-                ["Scene headings, action, and dialogue conventions", "Consistent character cues and scene transitions", "Script length and requested screenplay layout", "Logline, synopsis, and submission specifications"],
-            ),
-            "stage_play": (
-                "Stage Play",
-                ["Acts/scenes and speaking-character conventions", "Stage directions and production practicality", "Cast list and approximate running time", "Requested dramatic-script submission format"],
-            ),
-            "audiobook": (
-                "Audiobook",
-                ["Narration-friendly wording and pronunciation notes", "Chapter/segment breaks and read-aloud pacing", "Rights, credits, and narrator requirements", "Audio production/submission specifications"],
-            ),
-            "podcast": (
-                "Podcast",
-                ["Episode and segment structure", "Host/guest cues, transitions, and timing", "Source/rights and production notes", "Platform or producer delivery requirements"],
-            ),
-            "youtube": (
-                "YouTube Short",
-                ["Opening hook and concise pacing", "Narration, visual cues, and on-screen wording", "Rights and platform-specific requirements", "Runtime and delivery specifications"],
-            ),
-            "commercial": (
-                "Commercial",
-                ["Clear message and call to action", "Claims, permissions, and required disclosures", "Scene/voiceover timing", "Client/platform delivery requirements"],
-            ),
-            "novel": (
-                "Novel / Long-form Fiction",
-                ["Opening pages, chapter sequence, and narrative consistency", "Target genre and manuscript length", "Synopsis, query materials, and submission sample", "Requested manuscript layout and house guidelines"],
-            ),
-            "short_story": (
-                "Short Story",
-                ["Complete narrative arc and consistent POV/tense", "Market word-count limit", "Requested manuscript and cover-letter format", "Publication rights and submission guidelines"],
-            ),
-            "standard": (
-                "Standard Manuscript",
-                ["Consistent headings, sections, and pagination", "Citations, references, and permissions where applicable", "Intended audience and editorial consistency", "Publisher's required file and house style"],
-            ),
-        }
-        if "picture" in publisher_format and "book" in publisher_format:
-            checklist_key = "picture_book"
-        elif "screenplay" in publisher_format or "film" in publisher_format:
-            checklist_key = "screenplay"
-        elif "stage" in publisher_format or "dramatic" in publisher_format or "play" in publisher_format:
-            checklist_key = "stage_play"
-        elif "audio" in publisher_format:
-            checklist_key = "audiobook"
-        elif "podcast" in publisher_format:
-            checklist_key = "podcast"
-        elif "youtube" in publisher_format or "shorts" in publisher_format:
-            checklist_key = "youtube"
-        elif "commercial" in publisher_format:
-            checklist_key = "commercial"
-        elif "short story" in publisher_format:
-            checklist_key = "short_story"
-        elif "novel" in publisher_format or "novella" in publisher_format:
-            checklist_key = "novel"
-        else:
-            checklist_key = "standard"
-        publisher_label, publisher_points = publisher_checklists[checklist_key]
-        with st.expander(f"Publisher Readiness — {publisher_label} (Optional)", expanded=False):
-            st.write("**Submission checklist (writer-controlled):**")
-            publisher_identity = str(get_active_project_id() or "current")
-            checklist_state_key = "_wbs_publisher_review_" + publisher_identity + "_" + checklist_key
-            for index, check_text in enumerate(publisher_points):
-                st.checkbox(check_text, key=f"{checklist_state_key}_{index}")
-            publisher_specific = st.text_area(
-                "Publisher’s special requirements (if any)",
-                key=f"{checklist_state_key}_requirements",
-                help="Record submission standards supplied by the intended publisher. This does not change the manuscript.",
-            )
-            completed = sum(bool(st.session_state.get(f"{checklist_state_key}_{index}")) for index in range(len(publisher_points)))
-            st.caption(f"Checklist: {completed} of {len(publisher_points)} marked reviewed. "
-                       "For manuscript continuity and editorial flags, use Project Integrity / Final Review above.")
-            if publisher_specific.strip():
-                st.info("Publisher-specific requirements recorded for this review. Confirm these manually against the finished submission.")
-            st.caption("This checklist is independent of the optional AI assessment in Stage 5.")
-            
-        if checklist_key == "picture_book" and str(st.session_state.get("current_draft_output") or "").strip():
+                           "before continuing to Stage 5 Publisher Assessment. Scene corrections remain available in Stage 3.")
+        if is_picture_book_project() and str(st.session_state.get("current_draft_output") or "").strip():
             with st.expander("Picture Book — Illustration & Page Turn Suggestions", expanded=False):
                 st.caption("Planning suggestions only. The manuscript and version number are not changed. "
                            "Adjust the exact page breaks and artwork during layout.")
