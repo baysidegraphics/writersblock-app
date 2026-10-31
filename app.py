@@ -11348,7 +11348,7 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                         help="Edit this scene directly. Scene labels are not saved as story text.",
                     )
                 _wbs_save_corrections = st.form_submit_button(
-                    "💾 Save Manuscript Corrections",
+                    "Optional: Review And Save Any Final Manuscript Changes",
                     type="primary", use_container_width=True,
                     disabled=bool(st.session_state.get("demo_mode")),
                 )
