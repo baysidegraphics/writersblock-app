@@ -9983,23 +9983,33 @@ if st.session_state.project_stage == "Plot Architect":
         # button appearance as the adjacent primary Integrity button. Scope
         # the CSS to this keyed container; every other dropdown is unchanged.
         st.markdown("""<style>
-        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] [data-baseweb="select"] > div {
+        /* Limit the red select styling to the Stage 3 footer only. */
+        .st-key-wbs_ss_red_save_continue div[data-testid="stSelectbox"] div[data-baseweb="select"],
+        .st-key-wbs_ss_red_save_continue div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+        .st-key-wbs_ss_red_save_continue div[data-testid="stSelectbox"] div[data-baseweb="select"] > div:first-child,
+        .st-key-wbs_ss_red_save_continue div[data-testid="stSelectbox"] div[role="combobox"],
+        .st-key-wbs_ss_red_save_continue [data-baseweb="select"] [aria-haspopup="listbox"] {
+            background: #ff4b4b !important;
             background-color: #ff4b4b !important;
             border-color: #ff4b4b !important;
             border-radius: 7px !important;
+            color: white !important;
+            -webkit-text-fill-color: white !important;
+        }
+        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
             min-height: 35px !important;
         }
-        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] [role="combobox"],
-        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] [role="combobox"] *,
-        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] [data-baseweb="select"] svg {
+        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] div[data-baseweb="select"] input,
+        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] div[role="combobox"] *,
+        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] div[data-baseweb="select"] svg {
             color: white !important;
             fill: white !important;
             -webkit-text-fill-color: white !important;
             font-weight: 600 !important;
         }
-        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] [data-baseweb="select"] > div:hover {
-            background-color: #f23d43 !important;
-            border-color: #f23d43 !important;
+        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] div[data-baseweb="select"] > div:hover {
+            background: #ed4248 !important;
+            border-color: #ed4248 !important;
         }
         </style>""", unsafe_allow_html=True)
         _ss_continue_col, _ss_integrity_col = st.columns(2, gap="small")
@@ -10008,12 +10018,11 @@ if st.session_state.project_stage == "Plot Architect":
             # separate label above a gray input. Selection still performs the
             # existing Save & Continue handler below; no changes to saving.
             with st.container(key="wbs_ss_red_save_continue"):
-                st.markdown("&nbsp;", unsafe_allow_html=True)
                 _ss_destination = st.selectbox(
-                    f"Save Scene {_ss_selected} Changes and Continue to:",
+                    f"Save Scene {_ss_selected} And Continue To:",
                     options=[None, *_ss_destinations],
                     format_func=lambda value: (
-                        f"Save Scene {_ss_selected} Changes and Continue to:"
+                        f"Save Scene {_ss_selected} And Continue To:"
                         if value is None else _ss_destination_label(value)
                     ),
                     key=_ss_footer_key,
@@ -10023,9 +10032,8 @@ if st.session_state.project_stage == "Plot Architect":
                     disabled=bool(st.session_state.get("demo_mode")),
                 )
         with _ss_integrity_col:
-            st.markdown(f"**Save Scene {_ss_selected} & Return:**")
             _ss_integrity_clicked = st.button(
-                "Save & Return to Integrity Review",
+                f"Save Scene {_ss_selected} And Return To Integrity Report",
                 key=f"wbs_ss_save_return_integrity_{_ss_selected}",
                 type="primary", use_container_width=True,
                 disabled=bool(st.session_state.get("demo_mode")),
