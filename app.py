@@ -5833,9 +5833,12 @@ def wbs_stage4_save_final_acceptance(component):
         record = {}
     record["project_id"] = project_id
     record["revision_id"] = row_id
-    if component == "title":
-        record["title"] = master_title
-    elif component == "manuscript":
+    # The saved master title was verified against the current DB revision
+    # above. Confirm that EXISTING title together with either explicit final
+    # acceptance. A rename is optional and must never be needed to unlock
+    # Stage 5 for a project whose title is already saved.
+    record["title"] = master_title
+    if component == "manuscript":
         record["manuscript_signature"] = source_signature
     else:
         record["integrity_source_signature"] = source_signature
@@ -5852,6 +5855,41 @@ def wbs_stage4_save_final_acceptance(component):
     st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
     st.session_state["_wbs_last_saved_project_id"] = project_id
     return True
+
+
+
+def wbs_stage4_confirm_and_save_from_checkbox(component, widget_key):
+    """Save a checked Stage 4 approval immediately, scoped to current V-n.
+
+    The checkbox itself is an explicit writer acceptance; the UI's two red
+    buttons remain available for manual re-confirmation. Never generate a
+    manuscript, call the AI or insert a new project/revision here.
+    """
+    if not st.session_state.get(widget_key):
+        return
+    try:
+        manuscript = str(st.session_state.get("current_draft_output") or "")
+        report = str(st.session_state.get("project_integrity_report") or "")
+        if (not manuscript.strip() or not report.strip()
+                or st.session_state.get("project_integrity_source_signature")
+                    != get_text_signature(manuscript)):
+            raise ValueError("Run Integrity for the current saved manuscript first.")
+        if st.session_state.get("demo_mode"):
+            raise ValueError("Saving approvals requires the full edition.")
+        if component == "manuscript":
+            approved = wbs_stage4_accept_and_save()
+            st.session_state["_wbs_stage4_approved_scenes"] = sorted(approved)
+        wbs_stage4_save_final_acceptance(component)
+        st.session_state.pop("_wbs_stage4_checkbox_error", None)
+        st.session_state["_wbs_stage4_checkbox_notice"] = (
+            "Final manuscript acceptance saved to this revision." if component == "manuscript"
+            else "Integrity Report acceptance saved to this revision."
+        )
+    except Exception as exc:
+        # Checkbox callbacks run before the controls render, so a failed save
+        # may safely clear the checkmark. Do not show a false approval.
+        st.session_state[widget_key] = False
+        st.session_state["_wbs_stage4_checkbox_error"] = str(exc)
 
 
 def render_project_title_banner(stage_key):
@@ -11998,38 +12036,15 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             if not integrity_is_current and st.session_state.get("project_integrity_report"):
                 st.info("The manuscript has changed since the last Project Integrity review. Run the review again for the current manuscript.")
 
-            # A report inspection is free: only the explicit Run button calls AI.
-            # Bind the open state to this exact project, revision and manuscript,
-            # so an older report cannot be mistaken for the current one.
-            _wbs_integrity_review_identity = (
-                str(get_active_project_id() or "") + ":"
-                + str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
-                + ":" + source_signature
+            # A current report is automatically shown beneath the Run button.
+            # Opening or revisiting it never invokes the AI or adds API usage.
+            _wbs_report_visible = integrity_is_current
+            _wbs_run_integrity = st.button(
+                "Run Project Integrity Report",
+                key="run_project_integrity_final_review",
+                type="primary",
+                use_container_width=True,
             )
-            _wbs_report_visible = (
-                integrity_is_current
-                and st.session_state.get("_wbs_integrity_visible_identity")
-                    == _wbs_integrity_review_identity
-            )
-            _wbs_run_integrity_col, _wbs_view_integrity_col = st.columns(2, gap="small")
-            with _wbs_run_integrity_col:
-                _wbs_run_integrity = st.button(
-                    "Run Project Integrity Report",
-                    key="run_project_integrity_final_review",
-                    type="primary",
-                    use_container_width=True,
-                )
-            with _wbs_view_integrity_col:
-                _wbs_view_integrity = st.button(
-                    "Review Current Integrity Report",
-                    key="review_current_integrity_report",
-                    type="primary",
-                    disabled=not integrity_is_current,
-                    use_container_width=True,
-                )
-            if _wbs_view_integrity:
-                st.session_state["_wbs_integrity_visible_identity"] = _wbs_integrity_review_identity
-                _wbs_report_visible = True
 
             if _wbs_run_integrity:
                 with st.spinner("Running whole-manuscript Project Integrity review..."):
@@ -12047,8 +12062,7 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                             "WARNINGS"
                         )
                         st.session_state.project_integrity_status = integrity_status
-                        # Open the newly generated report below both buttons.
-                        st.session_state["_wbs_integrity_visible_identity"] = _wbs_integrity_review_identity
+                        # The newly generated current report appears automatically on rerun.
                         try:
                             persist_project_integrity_in_current_version(
                                 integrity_report, source_signature, integrity_status
@@ -12058,11 +12072,6 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                         else:
                             st.success("Project Integrity saved in the current version — no new version created.")
                         st.rerun()
-
-            if integrity_is_current and not _wbs_report_visible:
-                st.info("A report for this exact manuscript is saved. "
-                        "Select Review Current Integrity Report to open it below. "
-                        "Reviewing a saved report does not use AI tokens.")
 
             if integrity_is_current and _wbs_report_visible:
                 if st.session_state.get("project_integrity_status") == "PASS":
@@ -12150,8 +12159,13 @@ elif st.session_state.project_stage == "Isolation Guardrail":
         ))
         if _wbs_scene_review_required and _wbs_exact_four:
             st.subheader("For Final Editorial Acceptance, Check Each Button Below")
-            st.caption("Save the project title beside its field above, then confirm the completed "
-                       "manuscript and Integrity Report below. All three approvals use the current V-number.")
+            st.caption("The existing project title is verified against its saved record. "
+                       "Confirm the completed manuscript and current Integrity Report below. "
+                       "Each acceptance also confirms the saved title without renaming or changing V-number.")
+            if not _wbs_ir_ready:
+                st.info("The saved Integrity Report does not match this manuscript (or no current "
+                        "report exists). Click Run Project Integrity Report above. Once it completes, "
+                        "check each box to activate its red Save button. Your story is unchanged.")
             _saved_title = get_project_title()
             _proposed_title = re.sub(r"\s+", " ", str(
                 st.session_state.get(wbs_stage4_title_input_key()) or "")).strip() or _saved_title
@@ -12163,8 +12177,13 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                 _wbs_scene_review_complete,
                 get_active_project_id(), st.session_state.get("_wbs_active_saved_session_row_id"),
             )
+            # Scope confirmations to the exact reviewed report as well as the
+            # revision. A new report starts new checkboxes, preventing stale
+            # checkmarks from approving a changed Integrity finding.
             _stage4_scope = (str(get_active_project_id() or "new") + "_"
-                             + str(st.session_state.get("_wbs_active_saved_session_row_id") or "none"))
+                             + str(st.session_state.get("_wbs_active_saved_session_row_id") or "none")
+                             + "_" + get_text_signature(
+                                 st.session_state.get("project_integrity_report") or "")[:16])
             # WBS Stage 4 acceptance visuals only — no changes to approval logic.
             # CSS :has is supported by the Chrome client used for Streamlit.
             st.markdown("""<style>
@@ -12193,32 +12212,44 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                 opacity: .65 !important;
                 cursor: not-allowed !important;
             }
-            /* The saved report is a red action. An unavailable report stays disabled. */
-            .st-key-review_current_integrity_report button {
-                background-color: #ff4b4b !important;
-                border-color: #ff4b4b !important;
-                color: white !important;
-                font-weight: 700 !important;
-            }
-            .st-key-review_current_integrity_report button:disabled {
-                background-color: #151820 !important;
-                border: 1px solid #424957 !important;
-                color: #858b99 !important;
-                opacity: 1 !important;
-                cursor: not-allowed !important;
-            }
             </style>""", unsafe_allow_html=True)
             # Title saving was moved to the row beside Rename Project Title above.
             _manuscript_col, _integrity_col = st.columns(2, gap="small")
             if _wbs_current_status["title"] and _proposed_title == _saved_title:
-                st.caption("✓ Project title accepted and saved above")
+                st.caption("✓ Existing project title confirmed in the saved revision")
             elif _proposed_title != _saved_title:
-                st.caption("Project title has unsaved changes. Use Save Title Change above.")
+                st.caption("A new title has been entered but not saved. Save it above or clear the rename field.")
             else:
-                st.caption("Use Save Title Change above to confirm the project title.")
+                st.caption("The existing saved title will be confirmed when you accept the manuscript or Integrity Report. Renaming is optional.")
+            # Never keep an old checked box visually active after a manuscript
+            # edit invalidates its report. This only resets transient UI state;
+            # it does not modify a saved report, manuscript or revision.
+            _manuscript_check_key = "wbs_stage4_confirm_manuscript_" + _stage4_scope
+            _integrity_check_key = "wbs_stage4_confirm_integrity_" + _stage4_scope
+            if not _wbs_ir_ready:
+                st.session_state[_manuscript_check_key] = False
+                st.session_state[_integrity_check_key] = False
+            else:
+                # Reopening an already approved revision should show its
+                # exact, saved approvals; no API call or DB write is needed.
+                if _manuscript_check_key not in st.session_state:
+                    st.session_state[_manuscript_check_key] = bool(_wbs_current_status["manuscript"])
+                if _integrity_check_key not in st.session_state:
+                    st.session_state[_integrity_check_key] = bool(_wbs_current_status["integrity"])
+            _checkbox_error = st.session_state.pop("_wbs_stage4_checkbox_error", None)
+            if _checkbox_error:
+                st.error(f"Editorial acceptance was not saved: {_checkbox_error}")
+            _checkbox_notice = st.session_state.pop("_wbs_stage4_checkbox_notice", None)
+            if _checkbox_notice:
+                st.success(_checkbox_notice)
+            st.caption("Checking either box saves that approval automatically to the current revision. "
+                       "After both are checked and saved, Stage 5 unlocks. No new V-number is created.")
             with _manuscript_col:
                 _confirm_manuscript = st.checkbox("Confirm final manuscript",
-                    key="wbs_stage4_confirm_manuscript_" + _stage4_scope)
+                    key=_manuscript_check_key,
+                    on_change=wbs_stage4_confirm_and_save_from_checkbox,
+                    args=("manuscript", _manuscript_check_key),
+                    disabled=(not _wbs_ir_ready or bool(st.session_state.get("demo_mode"))))
                 if st.button("Accept And Save Final Manuscript", type="primary",
                              key="wbs_stage4_accept_full_story", use_container_width=True,
                              disabled=(not _wbs_ir_ready or not _confirm_manuscript
@@ -12238,7 +12269,10 @@ elif st.session_state.project_stage == "Isolation Guardrail":
 
             with _integrity_col:
                 _confirm_integrity = st.checkbox("Confirm Integrity Report",
-                    key="wbs_stage4_confirm_integrity_" + _stage4_scope)
+                    key=_integrity_check_key,
+                    on_change=wbs_stage4_confirm_and_save_from_checkbox,
+                    args=("integrity", _integrity_check_key),
+                    disabled=(not _wbs_ir_ready or bool(st.session_state.get("demo_mode"))))
                 if st.button("Accept And Save Integrity Report", type="primary",
                              key="wbs_stage4_accept_integrity", use_container_width=True,
                              disabled=(not _wbs_ir_ready or not _confirm_integrity
@@ -12255,10 +12289,11 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                     st.caption("Run the current Integrity Report first")
 
             if all(_wbs_current_status.values()) and _proposed_title == _saved_title:
-                st.caption("All three final editorial acceptances are saved to the current revision.")
+                st.caption("✓ Both confirmations saved. Stage 5 is unlocked for this revision.")
             else:
-                st.caption("Save the project title above and confirm the final manuscript and Integrity Report "
-                           "before continuing to Stage 5 Publisher Assessment. Scene corrections remain available in Stage 3.")
+                st.caption("Run the current Integrity Check and check both acceptance boxes. "
+                           "The approvals save automatically and Stage 5 unlocks. "
+                           "Scene corrections remain available in Stage 3.")
         if is_picture_book_project() and str(st.session_state.get("current_draft_output") or "").strip():
             with st.expander("Picture Book — Illustration & Page Turn Suggestions", expanded=False):
                 st.caption("Planning suggestions only. The manuscript and version number are not changed. "
