@@ -3814,11 +3814,15 @@ def wbs_ir_screen_generated_report(report_text, manuscript_text, scene_blocks=No
             omitted += 1
             continue
         location = item["LOCATION"]
-        claimed = re.search(r"\bscene\s*(\d+)\b", location, re.I)
+        # A continuity error can span two scenes. Require every named scene to
+        # exist, but let the one exact evidence quotation come from EITHER
+        # scene. Previously only the first scene was checked, silently dropping
+        # genuine Scene 2 -> Scene 3 transition errors.
+        claimed = [int(n) for n in re.findall(r"\bscene\s*(\d+)\b", location, re.I)]
         if claimed and scene_texts:
-            n = int(claimed.group(1))
-            if n not in scene_texts or quote_normalized not in " ".join(
-                re.findall(r"\w+", scene_texts[n].casefold())
+            if any(n not in scene_texts for n in claimed) or not any(
+                quote_normalized in " ".join(re.findall(r"\w+", scene_texts[n].casefold()))
+                for n in claimed
             ):
                 omitted += 1
                 continue
@@ -3831,12 +3835,19 @@ def wbs_ir_screen_generated_report(report_text, manuscript_text, scene_blocks=No
     accepted = sum(len(items) for items in grouped.values())
     # The quality gate does not claim that a model is infallible: it prevents
     # unsupported remarks from being presented as corrections to the author.
-    output = ["OVERALL STATUS: WARNINGS" if accepted else "OVERALL STATUS: PASS", "",
-              "PROJECT INTEGRITY SUMMARY"]
+    # A quality gate that discarded all the model's proposed findings has NOT
+    # established a clean manuscript. Keep that distinct from a genuine PASS.
+    review_status = ("WARNINGS" if accepted else
+                     "REVIEW INCONCLUSIVE" if omitted else "PASS")
+    output = [f"OVERALL STATUS: {review_status}", "", "PROJECT INTEGRITY SUMMARY"]
     if accepted:
         output.append(f"The review identified {accepted} specific finding(s) with a stated reason, "
                       "manuscript evidence and a suggested writer-controlled correction. "
                       "No manuscript text has been changed.")
+    elif omitted:
+        output.append("The review offered suggestions, but none met the evidence and specificity "
+                      "requirements. This review is inconclusive, not a confirmed clean bill "
+                      "of health. The manuscript has not been changed.")
     else:
         output.append("No sufficiently supported, actionable integrity findings were returned "
                       "by this review. The manuscript has not been changed.")
@@ -3853,6 +3864,9 @@ def wbs_ir_screen_generated_report(report_text, manuscript_text, scene_blocks=No
         # Only summarize the supported warning's specific action, not arbitrary
         # stylistic improvement suggestions from the AI response.
         output.extend("- " + item["SUGGESTED FIX"] for _, _, item in warnings)
+    elif omitted:
+        output.append("- This check was inconclusive. Review the saved manuscript yourself "
+                      "and consider running another check if further confidence is needed.")
     else:
         output.append("- No changes recommended before Final Output.")
     return "\n".join(output), {"accepted": accepted, "omitted": omitted}
@@ -3941,15 +3955,39 @@ AUDIT THE COMPLETE MANUSCRIPT FOR:
 2. Character names, identities, relationships, ages, roles, and descriptive contradictions.
 3. Timeline, dates, sequence of events, travel/time logic, and historical-period consistency.
 4. Location, object, world-rule, terminology, and factual continuity inside the manuscript.
+   IMPORTANT: Compare the END of each scene with the BEGINNING of the next scene.
+   Trace where each character/object was and where it appears next; look for
+   unmotivated jumps (e.g., under a counter -> under a chair) and unexplained
+   changes in possession, appearance, or access. Cite BOTH scenes for genuine
+   cross-scene contradictions, and quote a passage that actually exists.
 5. Repetition: duplicated passages, repeated scenes, repeated explanations, or accidental restatement.
 6. POV and tense drift, including unexplained changes between sections or chapters.
-7. Unresolved placeholders, TODO/TBD notes, bracketed drafting notes, incomplete sentences, or obvious generation artifacts.
+7. Unresolved placeholders, TODO/TBD notes, bracketed drafting notes, incomplete sentences,
+   subject/verb disagreement, accidental tense slips, dangling introductory clauses,
+   or obvious generation artifacts. Check sentence-level grammar in EACH scene.
 8. Missing, duplicated, misordered, or obviously incomplete chapters/scenes/sections when the format uses them.
 9. Chapter/section numbering and heading consistency when headings are present.
 10. Unresolved story threads, setups, promises, character actions, mysteries, or references that appear accidentally abandoned.
 11. Internal contradictions between early and late portions of the manuscript.
+    Check physical/action plausibility as established BY THE STORY: can a character
+    reach the described object from its stated position, does an action have the
+    needed physical setup, and do cause and effect follow? Missing explanation
+    alone is not an impossibility. Distinguish uncertain logistics (VERIFY) from
+    clear contradiction. Do not impose real-world physics on intentional fantasy.
 12. Output-format compliance for the selected writing format at the manuscript-content level. Do not judge typography that is applied later by Final Output.
 13. Any issue likely to embarrass the writer or damage continuity in a final manuscript.
+
+MANDATORY COVERAGE PASS (internal analysis before writing the report):
+- Examine all four scenes individually, if four scenes are supplied; do not
+  concentrate only on the last scene or on an obvious planted typo.
+- Explicitly compare Scene 1 -> 2, Scene 2 -> 3, and Scene 3 -> 4 for
+  location, time, actor/object continuity, and causal transitions.
+- On every scene, check grammar (including fragments and verb tense),
+  repeated wording, physical setup and perspective limits.
+- After the first obvious error is found, CONTINUE checking the rest of the
+  manuscript. A single finding does not conclude the review.
+- Report only genuinely supported issues found in these passes. This coverage
+  checklist is not a quota: clean scenes should produce no invented findings.
 
 IMPORTANT REVIEW RULES:
 - Determine the manuscript's actual narrative point of view before judging name usage, voice, knowledge, and plot requirements. Compare its narrative prose (not quoted dialogue) with the requested POV. A consistently first-person account must be assessed from the narrator's own limited experience.
@@ -3970,6 +4008,12 @@ IMPORTANT REVIEW RULES:
 - A quoted sentence is NOT proof of a defect. Identify the concrete conflict or objective manuscript requirement first, then quote the evidence that demonstrates it.
 - Evaluate actual published-format requirements only when they are supplied and applicable to this writing format. Never invent manuscript-format requirements or request changes because a passage \"might fail\" an unnamed rule.
 - Do not turn an unverified impression into an actionable warning. If no explicit contradiction, actual rule violation, accidental duplication, or genuinely unresolved element can be substantiated, say there are no material issues.
+- When a continuity issue spans two scenes, name BOTH in LOCATION (example:
+  "Scene 2 and Scene 3") and state the contradictory facts from each in WHY.
+  EVIDENCE must be one exact quoted passage from one of those scenes. Never
+  manufacture a connecting quotation from separate scenes.
+- Prefer a specific minimal correction for grammar, continuity, or unintended
+  repetition; do not replace a passage with an entire AI rewrite.
 - For EVERY material warning use ONE bullet in this precise form (single line):
   - ISSUE: <specific problem> | WHY: <what contradicts what, or exact objective rule> | LOCATION: <actual scene number/title if present, otherwise known section or Manuscript> | EVIDENCE: \"<exact verbatim excerpt from the manuscript of 4-18 words>\" | SUGGESTED FIX: <a precise optional correction the author can make>
 - No generic warnings, no quote-only warnings, no statements such as \"check the stated requirement\", and no unsupported claims of a format rule. If the required five fields cannot truthfully be filled, OMIT that finding. Do not propose a change that would damage an intentional first-person voice or the author's story.
@@ -11997,7 +12041,11 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                         st.session_state.project_integrity_report = integrity_report
                         st.session_state.project_integrity_source_signature = source_signature
                         first_line = integrity_report.splitlines()[0].strip().upper() if integrity_report else ""
-                        integrity_status = "PASS" if "OVERALL STATUS: PASS" in first_line else "WARNINGS"
+                        integrity_status = (
+                            "PASS" if "OVERALL STATUS: PASS" in first_line else
+                            "REVIEW INCONCLUSIVE" if "OVERALL STATUS: REVIEW INCONCLUSIVE" in first_line else
+                            "WARNINGS"
+                        )
                         st.session_state.project_integrity_status = integrity_status
                         # Open the newly generated report below both buttons.
                         st.session_state["_wbs_integrity_visible_identity"] = _wbs_integrity_review_identity
@@ -12019,6 +12067,9 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             if integrity_is_current and _wbs_report_visible:
                 if st.session_state.get("project_integrity_status") == "PASS":
                     st.success("Project Integrity Review: PASS")
+                elif st.session_state.get("project_integrity_status") == "REVIEW INCONCLUSIVE":
+                    st.warning("Project Integrity Review: INCONCLUSIVE — proposed warnings did not meet "
+                               "the evidence requirements. Review the report before Final Output.")
                 else:
                     st.warning("Project Integrity Review: WARNINGS — review the report before Final Output.")
 
