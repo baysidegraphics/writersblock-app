@@ -5459,7 +5459,113 @@ def wbs_stage4_title_input_key():
     """Title-editor state stays with one project and one saved revision."""
     project = re.sub(r"[^A-Za-z0-9_-]", "_", str(get_active_project_id() or "new"))
     revision = re.sub(r"[^A-Za-z0-9_-]", "_", str(st.session_state.get("_wbs_active_saved_session_row_id") or "none"))
-    return f"wbs_stage4_edit_master_title_{project}_{revision}"
+    return f"wbs_stage4_new_title_v1_{project}_{revision}"
+
+
+def wbs_stage4_save_renamed_title_as_new_v1(new_title):
+    """Create a NEW project V-1 from the selected saved revision; never rename V-6.
+
+    The new project has a different ID. Existing saved sessions, manuscripts,
+    scene blocks, titles and versions are left completely untouched.
+    """
+    old_project = str(get_active_project_id() or "")
+    old_row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
+    user = str(get_current_user_id() or "")
+    old_title = str(get_project_title() or "")
+    fmt = str(st.session_state.get("active_format_id") or "")
+    if not all((old_project, old_row_id, user, old_title, fmt)):
+        raise ValueError("Load an existing saved project revision before renaming it.")
+    if str(new_title).casefold() == old_title.casefold():
+        return False  # same name; title approval may still be saved
+
+    parent_rows = (supabase.table("writersblock_projects")
+                   .select("id,project_title,project_type")
+                   .eq("id", old_project).eq("user_id", user).limit(1).execute()).data or []
+    old_rows = (supabase.table("writersblock_project_drafts")
+                .select("id,project_id,draft_content")
+                .eq("id", old_row_id).eq("project_id", old_project)
+                .eq("user_id", user).eq("draft_type", "project_session")
+                .limit(1).execute()).data or []
+    if len(parent_rows) != 1 or len(old_rows) != 1 or parent_rows[0].get("project_title") != old_title:
+        raise ValueError("Cannot verify the current project and saved revision; no title was changed.")
+    snapshot = json.loads(old_rows[0].get("draft_content") or "{}")
+    if (not isinstance(snapshot, dict)
+            or str(snapshot.get("current_project_id") or old_project) != old_project
+            or snapshot.get("project_title") != old_title
+            or snapshot.get("active_format_id") != fmt):
+        raise ValueError("The saved revision's project identity or format does not match.")
+    # Copy only the saved version. Never accidentally duplicate unsaved edits.
+    current_story = str(st.session_state.get("current_draft_output") or "")
+    saved_story = str(snapshot.get("current_draft_output") or "")
+    if saved_story != current_story:
+        raise ValueError("Save manuscript corrections first, then rename this saved project.")
+    if wbs_ss_blocks(snapshot.get("scene_blocks") or {}) != wbs_ss_blocks(st.session_state.get("scene_blocks") or {}):
+        raise ValueError("Save the scene changes first, then rename this saved project.")
+    # Do not make a duplicate title with ambiguous project ownership.
+    existing = (supabase.table("writersblock_projects").select("id")
+                .eq("user_id", user).eq("project_title", new_title).limit(1).execute()).data or []
+    if existing:
+        raise ValueError("A project with that title already exists. Choose a different title.")
+
+    cloned = dict(snapshot)
+    cloned["project_title"] = new_title
+    cloned["project_version_name"] = "Original"
+    cloned["concept_change_areas"] = []
+    cloned["saved_at"] = datetime.now(timezone.utc).isoformat()
+    cloned.pop("wbs_stage4_final_acceptance", None)
+    cloned.pop("wbs_stage4_scene_approvals", None)
+    new_id = None
+    try:
+        new_project = (supabase.table("writersblock_projects").insert({
+            "user_id": user, "project_title": new_title,
+            "project_type": parent_rows[0].get("project_type") or snapshot.get("format_type") or "story",
+            "project_status": "active",
+        }).execute())
+        created = getattr(new_project, "data", None) or []
+        if len(created) != 1 or not created[0].get("id"):
+            raise RuntimeError("The renamed project's new master record was not confirmed.")
+        new_id = str(created[0]["id"])
+        cloned["current_project_id"] = new_id
+        draft = (supabase.table("writersblock_project_drafts").insert({
+            "project_id": new_id, "user_id": user,
+            "draft_title": "Saved Project Session — Original",
+            "draft_type": "project_session",
+            "draft_content": json.dumps(cloned, ensure_ascii=False),
+            "version_number": 1,
+        }).execute())
+        saved_rows = getattr(draft, "data", None) or []
+        if len(saved_rows) != 1 or not saved_rows[0].get("id"):
+            raise RuntimeError("The renamed project's new V-1 record was not confirmed.")
+        new_row_id = str(saved_rows[0]["id"])
+    except Exception:
+        # Only discard the freshly created, empty project (never touch the original).
+        if new_id:
+            try:
+                (supabase.table("writersblock_projects").delete()
+                 .eq("id", new_id).eq("user_id", user).execute())
+            except Exception:
+                pass
+        raise
+
+    # Update state only after both database inserts have succeeded.
+    st.session_state["project_title"] = new_title
+    st.session_state["current_project_id"] = new_id
+    st.session_state["project_version_name"] = "Original"
+    st.session_state["wbs_stage4_final_acceptance"] = {}
+    st.session_state["wbs_stage4_scene_approvals"] = {}
+    st.session_state["_wbs_loaded_project_id"] = new_id
+    st.session_state["_wbs_locked_project_id"] = new_id
+    st.session_state["wbs_locked_format_id"] = fmt
+    st.session_state["_wbs_loaded_project_title"] = new_title
+    st.session_state["_wbs_loaded_saved_session_id"] = new_row_id
+    st.session_state["_wbs_active_saved_session_row_id"] = new_row_id
+    st.session_state["_wbs_last_saved_project_id"] = new_id
+    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(cloned)
+    st.session_state["_wbs_saved_session_to_select"] = new_row_id
+    st.session_state["last_saved_project_at"] = cloned["saved_at"]
+    st.session_state.pop("_wbs_stage4_approved_scenes", None)
+    st.session_state.pop("_wbs_stage4_review_identity", None)
+    return True
 
 
 def wbs_stage4_final_status(record, title, manuscript, report, report_source_signature,
@@ -5568,57 +5674,60 @@ def render_project_title_banner(stage_key):
     revision_display = revision if revision.upper().startswith("V-") else ("V-" + revision if revision.isdigit() else "")
     st.markdown("<style>[class*='st-key-wbs_stage_title_'] input:disabled {color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; opacity: 1 !important;}</style>", unsafe_allow_html=True)
     if stage_key == "step_5_script_lock":
-        # Stage 4: project-wide title, name editor, and explicit save all on ONE row.
-        # The revision ID is read-only; title changes do not regenerate prose or make V-7.
+        # Rename always starts blank. The project name never embeds V numbers;
+        # Saved Projects / Versions adds V-1 and the date when the copy is saved.
         _title_key = wbs_stage4_title_input_key()
         if _title_key not in st.session_state:
-            st.session_state[_title_key] = current_title
+            st.session_state[_title_key] = ""
         _current_col, _rename_col, _save_col = st.columns([1.25, 1.25, .75], gap="small", vertical_alignment="bottom")
         with _current_col:
-            st.text_input(
-                "Current Project Title/Version",
-                value=current_title + (" — " + revision_display if revision_display else ""),
-                disabled=True,
-                key=f"wbs_stage4_current_title_{str(get_active_project_id() or 'unsaved')}_{revision_display}",
+            _current_label = current_title + (" — " + revision_display if revision_display else "")
+            st.markdown(
+                "<div style='font-size:0.83rem;margin-bottom:7px;color:#ffffff;font-weight:600'>Current Project Title/Version</div>"
+                "<div style='min-height:38px;padding:9px 12px;border:1px solid #656d79;"
+                "background:#262b36;color:#ffffff;font-weight:600;border-radius:7px'>"
+                + html.escape(_current_label) + "</div>", unsafe_allow_html=True,
             )
         with _rename_col:
             st.text_input(
-                "Rename Project Title",
+                "Rename Your Project and save",
                 key=_title_key,
                 max_chars=120,
+                placeholder="Enter new project title",
                 disabled=bool(st.session_state.get("demo_mode")),
             )
         with _save_col:
             if st.button(
-                "Save Title Change", type="primary",
-                key="wbs_stage4_save_title_inline",
+                "Save Title Change", type="primary", key="wbs_stage4_save_title_inline",
                 use_container_width=True,
                 disabled=bool(st.session_state.get("demo_mode")),
-                help="Save this project's title without changing its revision number or manuscript.",
+                help="Save a separate project copy starting at V-1; preserve the existing project and revision.",
             ):
                 _proposed_name = re.sub(r"\s+", " ", str(st.session_state.get(_title_key) or "")).strip()
-                _saved_name = get_project_title()
                 if not _proposed_name or len(_proposed_name) > 120:
-                    st.error("Enter a project title containing 1–120 characters.")
+                    st.error("Enter a new project title of 1–120 characters before saving.")
+                elif re.search(r"(?:^|\s)[—–-]?\s*V-?\d+[A-Za-z]?\s*$", _proposed_name, re.I):
+                    st.error("Enter only the new title. The V-number and date are added in Saved Projects automatically.")
+                elif _proposed_name.casefold() == current_title.casefold():
+                    st.info("Enter a different title to create a renamed V-1 copy. No data was changed.")
                 else:
-                    _renamed, _rename_msg = (
-                        rename_current_project_everywhere(_proposed_name)
-                        if _proposed_name != _saved_name else (True, "")
-                    )
-                    if not _renamed:
-                        st.error(_rename_msg)
+                    try:
+                        _made_copy = wbs_stage4_save_renamed_title_as_new_v1(_proposed_name)
+                        if not _made_copy:
+                            raise ValueError("No renamed project was created.")
+                    except Exception as exc:
+                        st.error(f"Project rename was not saved: {exc}")
                     else:
+                        # The new V-1 is independent of the original project.
+                        # Confirm its saved title on the NEW revision so the
+                        # existing Stage 4 approval path still works.
                         try:
-                            # The same approval previously saved at the bottom of Stage 4:
-                            # update only the ACTIVE revision's title-acceptance field.
                             wbs_stage4_save_final_acceptance("title")
                         except Exception as exc:
-                            st.error(f"Title was changed but its acceptance could not be saved: {exc}. "
-                                     "Use Save Title Change again to finish.")
-                        else:
-                            st.session_state[_title_key] = _proposed_name
-                            st.success("Project title accepted and saved; the current V-number is unchanged.")
-                            st.rerun()
+                            st.warning(f"The renamed V-1 project was saved, but title approval needs retrying: {exc}")
+                        st.session_state.pop(_title_key, None)
+                        st.success("Renamed project saved as V-1 with today's date in Saved Projects. The previous revision is preserved.")
+                        st.rerun()
     else:
         st.markdown(f"**{format_name} / Project Title/Revision**")
         st.text_input("Project Title/Revision", value=(current_title + (" — " + revision_display if revision_display and revision_display not in current_title else "")), disabled=True, label_visibility="collapsed", key=f"wbs_stage_title_{stage_key}_{revision_display}_{str(get_active_project_id() or 'unsaved')}")
@@ -11744,7 +11853,7 @@ elif st.session_state.project_stage == "Isolation Guardrail":
 
             _saved_title = get_project_title()
             _proposed_title = re.sub(r"\s+", " ", str(
-                st.session_state.get(wbs_stage4_title_input_key()) or "")).strip()
+                st.session_state.get(wbs_stage4_title_input_key()) or "")).strip() or _saved_title
             _wbs_current_status = wbs_stage4_final_status(
                 st.session_state.get("wbs_stage4_final_acceptance"),
                 _saved_title, current_source,
@@ -11965,10 +12074,10 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             _wbs_scene_review_complete,
             get_active_project_id(), st.session_state.get("_wbs_active_saved_session_row_id"),
         )
-        _wbs_title_has_unsaved_edit = (
-            re.sub(r"\s+", " ", str(
-                st.session_state.get(wbs_stage4_title_input_key()) or "")).strip()
-            != get_project_title()
+        _wbs_pending_rename = re.sub(r"\s+", " ", str(
+            st.session_state.get(wbs_stage4_title_input_key()) or "")).strip()
+        _wbs_title_has_unsaved_edit = bool(
+            _wbs_pending_rename and _wbs_pending_rename != get_project_title()
         )
         _wbs_ready_for_final = (
             _wbs_scene_review_complete and _wbs_ir_ready
