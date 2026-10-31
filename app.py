@@ -5702,13 +5702,18 @@ def render_project_title_banner(stage_key):
         </style>""", unsafe_allow_html=True)
         with _current_col:
             _current_label = current_title + (" — " + revision_display if revision_display else "")
-            st.text_input(
-                "Current Project Title/Version",
-                value=_current_label,
-                disabled=True,
-                key="wbs_stage4_title_readonly_" + hashlib.sha256(
-                    (_title_key + _current_label).encode("utf-8")
-                ).hexdigest()[:16],
+            # Display-only rather than a disabled Streamlit input: disabled
+            # widgets render their text gray regardless of theme overrides.
+            st.markdown(
+                '<div style="height:24px;display:flex;align-items:center;'
+                'font-size:0.875rem;font-weight:400;margin-bottom:0.5rem;'
+                'color:#ffffff">Current Project Title/Version</div>'
+                '<div style="height:40px;box-sizing:border-box;display:flex;'
+                'align-items:center;padding:0 12px;border:1px solid #656d79;'
+                'border-radius:0.5rem;background:#262b36;color:#ffffff !important;'
+                'font-size:1rem;font-weight:600;line-height:1.5rem">'
+                + html.escape(_current_label) + '</div>',
+                unsafe_allow_html=True,
             )
         with _rename_col:
             st.text_input(
