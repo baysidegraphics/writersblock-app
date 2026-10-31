@@ -451,6 +451,7 @@ def get_project_session_snapshot():
         "project_integrity_source_signature",
         "project_integrity_status",
         "wbs_stage4_scene_approvals",
+        "wbs_stage4_final_acceptance",
         "export_view",
         "final_output_format",
         "final_output_text",
@@ -5454,6 +5455,110 @@ def render_save_open_project_to_series():
                         st.rerun()
 
 
+def wbs_stage4_title_input_key():
+    """Title-editor state stays with one project and one saved revision."""
+    project = re.sub(r"[^A-Za-z0-9_-]", "_", str(get_active_project_id() or "new"))
+    revision = re.sub(r"[^A-Za-z0-9_-]", "_", str(st.session_state.get("_wbs_active_saved_session_row_id") or "none"))
+    return f"wbs_stage4_edit_master_title_{project}_{revision}"
+
+
+def wbs_stage4_final_status(record, title, manuscript, report, report_source_signature,
+                            scene_approval_complete, project_id=None, revision_id=None):
+    """Pure, fail-closed proof that each *explicit* acceptance is still current."""
+    record = record if isinstance(record, dict) else {}
+    if (record.get("project_id") != str(project_id or "")
+            or record.get("revision_id") != str(revision_id or "")):
+        record = {}
+    signature = get_text_signature(str(manuscript or ""))
+    report = str(report or "")
+    report_current = bool(report.strip() and report_source_signature == signature)
+    return {
+        "title": bool(title and record.get("title") == title),
+        "manuscript": bool(scene_approval_complete
+                           and record.get("manuscript_signature") == signature),
+        "integrity": bool(report_current
+                          and record.get("integrity_source_signature") == signature
+                          and record.get("integrity_report_signature") == get_text_signature(report)),
+    }
+
+
+def wbs_stage4_save_final_acceptance(component):
+    """Record one approval on the selected existing revision, NEVER an INSERT.
+
+    The approval record is independent of the saved story, format-specific
+    configuration and Project Integrity AI generation.
+    """
+    if component not in ("title", "manuscript", "integrity"):
+        raise ValueError("Unknown acceptance control")
+    row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
+    project_id = str(get_active_project_id() or "")
+    user_id = str(get_current_user_id() or "")
+    active_format = str(st.session_state.get("active_format_id") or "")
+    if not all((row_id, project_id, user_id, active_format)):
+        raise ValueError("Load a saved project revision before accepting.")
+    master_title = str(get_project_title_from_project_id(project_id) or "").strip()
+    if not master_title or master_title != get_project_title():
+        raise ValueError("The saved project title changed. Reload before accepting.")
+    manuscript = str(st.session_state.get("current_draft_output") or "")
+    blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
+    if set(blocks) != {1, 2, 3, 4} or wbs_ss_storyline(blocks) != manuscript:
+        raise ValueError("All four saved scenes must match the manuscript.")
+    source_signature = get_text_signature(manuscript)
+    report = str(st.session_state.get("project_integrity_report") or "")
+    report_signature = str(st.session_state.get("project_integrity_source_signature") or "")
+    rows = (supabase.table("writersblock_project_drafts")
+            .select("id, draft_content")
+            .eq("id", row_id).eq("project_id", project_id)
+            .eq("user_id", user_id).eq("draft_type", "project_session")
+            .limit(1).execute()).data or []
+    if len(rows) != 1:
+        raise ValueError("The selected saved revision could not be verified.")
+    snapshot = json.loads(rows[0].get("draft_content") or "{}")
+    if (not isinstance(snapshot, dict)
+            or str(snapshot.get("current_project_id") or project_id) != project_id
+            or str(snapshot.get("active_format_id") or "") != active_format
+            or str(snapshot.get("project_title") or "") != master_title):
+        raise ValueError("Saved project identity, title or format does not match.")
+    if (wbs_ss_blocks(snapshot.get("scene_blocks") or {}) != blocks
+            or str(snapshot.get("current_draft_output") or "") != manuscript):
+        raise ValueError("Saved manuscript has changed. Reload before accepting.")
+    if component == "manuscript":
+        approved = wbs_stage4_valid_approvals(
+            snapshot.get("wbs_stage4_scene_approvals"), blocks, manuscript)
+        if approved != {1, 2, 3, 4}:
+            raise ValueError("Accept the current four-scene manuscript first.")
+    if component == "integrity":
+        if (not report.strip() or report_signature != source_signature
+                or snapshot.get("project_integrity_report") != report
+                or snapshot.get("project_integrity_source_signature") != source_signature):
+            raise ValueError("Run and save Integrity for the current manuscript before accepting it.")
+    record = snapshot.get("wbs_stage4_final_acceptance")
+    record = dict(record) if isinstance(record, dict) else {}
+    if record.get("project_id") != project_id or record.get("revision_id") != row_id:
+        record = {}
+    record["project_id"] = project_id
+    record["revision_id"] = row_id
+    if component == "title":
+        record["title"] = master_title
+    elif component == "manuscript":
+        record["manuscript_signature"] = source_signature
+    else:
+        record["integrity_source_signature"] = source_signature
+        record["integrity_report_signature"] = get_text_signature(report)
+    snapshot["wbs_stage4_final_acceptance"] = record
+    changed = (supabase.table("writersblock_project_drafts")
+               .update({"draft_content": json.dumps(snapshot, ensure_ascii=False)})
+               .eq("id", row_id).eq("project_id", project_id)
+               .eq("user_id", user_id).eq("draft_type", "project_session")
+               .execute())
+    if not getattr(changed, "data", None):
+        raise ValueError("Acceptance was not confirmed by the database.")
+    st.session_state["wbs_stage4_final_acceptance"] = record
+    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
+    st.session_state["_wbs_last_saved_project_id"] = project_id
+    return True
+
+
 def render_project_title_banner(stage_key):
     """Universal format-aware title/revision; series assignment unchanged."""
     current_title = get_project_title_for_display()
@@ -5463,7 +5568,24 @@ def render_project_title_banner(stage_key):
     revision_display = revision if revision.upper().startswith("V-") else ("V-" + revision if revision.isdigit() else "")
     st.markdown("<style>[class*='st-key-wbs_stage_title_'] input:disabled {color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; opacity: 1 !important;}</style>", unsafe_allow_html=True)
     st.markdown(f"**{format_name} / Project Title/Revision**")
-    st.text_input("Project Title/Revision", value=(current_title + (" — " + revision_display if revision_display and revision_display not in current_title else "")), disabled=True, label_visibility="collapsed", key=f"wbs_stage_title_{stage_key}_{revision_display}_{str(get_active_project_id() or 'unsaved')}")
+    if (stage_key == "step_5_script_lock"
+            and set(wbs_ss_blocks(st.session_state.get("scene_blocks") or {})) == {1, 2, 3, 4}
+            and str(st.session_state.get("current_draft_output") or "")
+                == wbs_ss_storyline(st.session_state.get("scene_blocks") or {})):
+        # Stage 4 only for exact four-scene projects: edit the canonical project name; the title is NOT a
+        # separate part of each scene and changes only after explicit approval.
+        _title_key = wbs_stage4_title_input_key()
+        if _title_key not in st.session_state:
+            st.session_state[_title_key] = current_title
+        st.text_input(
+            "Project Title — edit here, then accept below",
+            key=_title_key, max_chars=120,
+            disabled=bool(st.session_state.get("demo_mode")),
+        )
+        st.caption(f"Active revision: {revision_display or 'current'}. "
+                   "An accepted title change applies to all scenes and saved versions; it never rewrites the story.")
+    else:
+        st.text_input("Project Title/Revision", value=(current_title + (" — " + revision_display if revision_display and revision_display not in current_title else "")), disabled=True, label_visibility="collapsed", key=f"wbs_stage_title_{stage_key}_{revision_display}_{str(get_active_project_id() or 'unsaved')}")
     if stage_key == "step_2_scripting":
         _saved_path = bool(str(st.session_state.get("chosen_option") or "").strip() and str(st.session_state.get("chosen_option_text") or "").strip())
         if _saved_path:
@@ -9522,6 +9644,7 @@ def wbs_stage4_save_manuscript_corrections(edited_blocks, expected_manuscript, e
     snapshot["current_draft_output"] = updated_story
     # Delete approval proof so old approval cannot authorize new text.
     snapshot.pop("wbs_stage4_scene_approvals", None)
+    snapshot.pop("wbs_stage4_final_acceptance", None)
     # Keep the prior integrity report for comparison, but its old source
     # signature will invalidate it until a NEW integrity run is completed.
     persisted = (supabase.table("writersblock_project_drafts")
@@ -9535,6 +9658,7 @@ def wbs_stage4_save_manuscript_corrections(edited_blocks, expected_manuscript, e
     st.session_state["scene_blocks"] = dict(revised)
     st.session_state["current_draft_output"] = updated_story
     st.session_state["wbs_stage4_scene_approvals"] = {}
+    st.session_state.pop("wbs_stage4_final_acceptance", None)
     st.session_state.pop("_wbs_stage4_approved_scenes", None)
     st.session_state.pop("_wbs_stage4_review_identity", None)
     st.session_state.pop("_wbs_final_saved_proof", None)
@@ -11561,21 +11685,15 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             and st.session_state.get("project_integrity_source_signature") == source_signature
         ))
         if _wbs_scene_review_required and _wbs_exact_four:
-            st.subheader("Final Editorial Acceptance")
-            if not _wbs_ir_ready:
-                st.warning("Run Project Integrity / Final Review above before accepting the story.")
-            # Stage 4 review remains the FULL story. The scene picker is
-            # beside Accept (in the former Modify Script button position).
-            # Selection navigates directly to that exact scene in Stage 3;
-            # it never saves, generates, or increments the V-number.
+            st.subheader("For Final Editorial Acceptance, Check Each Button Below")
+            st.caption("Confirm the project title, the complete manuscript, and the saved "
+                       "Integrity Report. All three approvals are stored on the current V-number.")
             _titles = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
 
             def _wbs_stage4_modify_scene_selection():
                 scene_number = st.session_state.get("wbs_stage4_modify_scene_dropdown")
                 if scene_number not in (1, 2, 3, 4):
                     return
-                # Reset so the same scene may be selected again on a later
-                # visit to Stage 4; widget state is modified in its callback.
                 st.session_state["wbs_stage4_modify_scene_dropdown"] = None
                 if (st.session_state.get("project_integrity_report")
                         and st.session_state.get("project_integrity_source_signature") == source_signature):
@@ -11587,38 +11705,104 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                     st.session_state["_wbs_stage3_rewrite_location"] = f"Scene Beat {scene_number}"
                 wbs_request_stage_change("Plot Architect")
 
-            _accept_col, _modify_col = st.columns(2, gap="small")
-            with _accept_col:
-                if st.button("Accept And Save Complete Story",
-                             key="wbs_stage4_accept_full_story", type="primary",
-                             use_container_width=True,
-                             disabled=(not _wbs_ir_ready or _wbs_scene_review_complete
-                                           or bool(st.session_state.get("demo_mode")))):
+            _saved_title = get_project_title()
+            _proposed_title = re.sub(r"\s+", " ", str(
+                st.session_state.get(wbs_stage4_title_input_key()) or "")).strip()
+            _wbs_current_status = wbs_stage4_final_status(
+                st.session_state.get("wbs_stage4_final_acceptance"),
+                _saved_title, current_source,
+                st.session_state.get("project_integrity_report") or "",
+                st.session_state.get("project_integrity_source_signature"),
+                _wbs_scene_review_complete,
+                get_active_project_id(), st.session_state.get("_wbs_active_saved_session_row_id"),
+            )
+            _stage4_scope = (str(get_active_project_id() or "new") + "_"
+                             + str(st.session_state.get("_wbs_active_saved_session_row_id") or "none"))
+            _title_col, _manuscript_col, _integrity_col = st.columns(3, gap="small")
+            with _title_col:
+                _confirm_title = st.checkbox("Confirm project title",
+                    key="wbs_stage4_confirm_title_" + _stage4_scope)
+                if st.button("Accept And Save Project Title", type="primary",
+                             key="wbs_stage4_accept_title", use_container_width=True,
+                             disabled=bool(st.session_state.get("demo_mode")) or not _confirm_title):
+                    if not _proposed_title or len(_proposed_title) > 120:
+                        st.error("Enter a project title of 1–120 characters at the top of this page.")
+                    else:
+                        if _proposed_title != _saved_title:
+                            _renamed, _rename_msg = rename_current_project_everywhere(_proposed_title)
+                        else:
+                            _renamed, _rename_msg = True, ""
+                        if not _renamed:
+                            st.error(_rename_msg)
+                        else:
+                            try:
+                                wbs_stage4_save_final_acceptance("title")
+                            except Exception as exc:
+                                st.error(f"Title acceptance was not saved: {exc}")
+                            else:
+                                st.session_state[wbs_stage4_title_input_key()] = _proposed_title
+                                st.rerun()
+                if _wbs_current_status["title"] and _proposed_title == _saved_title:
+                    st.caption("✓ Project title accepted and saved")
+                elif _proposed_title != _saved_title:
+                    st.caption("Title edited — select this button to save the project-wide change")
+
+            with _manuscript_col:
+                _confirm_manuscript = st.checkbox("Confirm final manuscript",
+                    key="wbs_stage4_confirm_manuscript_" + _stage4_scope)
+                if st.button("Accept And Save Final Manuscript", type="primary",
+                             key="wbs_stage4_accept_full_story", use_container_width=True,
+                             disabled=(not _wbs_ir_ready or not _confirm_manuscript
+                                       or bool(st.session_state.get("demo_mode")))):
                     try:
                         _approved = wbs_stage4_accept_and_save()
-                    except Exception as _approval_error:
-                        st.error(f"Complete story could not be accepted: {_approval_error}")
-                    else:
                         st.session_state["_wbs_stage4_approved_scenes"] = sorted(_approved)
+                        wbs_stage4_save_final_acceptance("manuscript")
+                    except Exception as exc:
+                        st.error(f"Manuscript acceptance was not saved: {exc}")
+                    else:
                         st.rerun()
-            with _modify_col:
-                st.selectbox(
-                    "Modify Script — select scene",
-                    [None, 1, 2, 3, 4],
-                    key="wbs_stage4_modify_scene_dropdown",
-                    format_func=lambda n: (
-                        "Modify Script — Select Scene" if n is None
-                        else f"Scene {n} — {_titles.get(n, (f'Scene {n}', '', ''))[0]}"
-                    ),
-                    label_visibility="collapsed",
-                    on_change=_wbs_stage4_modify_scene_selection,
-                )
-            if _wbs_scene_review_complete:
-                st.success("Entire story accepted and saved in the current V-number. "
-                           "Proceed to Final Manuscript when ready.")
+                if _wbs_current_status["manuscript"]:
+                    st.caption("✓ Final manuscript accepted and saved")
+                elif not _wbs_ir_ready:
+                    st.caption("Run Integrity before final manuscript acceptance")
+
+            with _integrity_col:
+                _confirm_integrity = st.checkbox("Confirm Integrity Report",
+                    key="wbs_stage4_confirm_integrity_" + _stage4_scope)
+                if st.button("Accept And Save Integrity Report", type="primary",
+                             key="wbs_stage4_accept_integrity", use_container_width=True,
+                             disabled=(not _wbs_ir_ready or not _confirm_integrity
+                                       or bool(st.session_state.get("demo_mode")))):
+                    try:
+                        wbs_stage4_save_final_acceptance("integrity")
+                    except Exception as exc:
+                        st.error(f"Integrity acceptance was not saved: {exc}")
+                    else:
+                        st.rerun()
+                if _wbs_current_status["integrity"]:
+                    st.caption("✓ Current Integrity Report accepted and saved")
+                elif not _wbs_ir_ready:
+                    st.caption("Run the current Integrity Report first")
+
+            # Keep the existing direct scene-modification route separate from
+            # acceptance and never regenerate or rewrite prose on navigation.
+            st.selectbox(
+                "Modify Script — select scene to edit",
+                [None, 1, 2, 3, 4],
+                key="wbs_stage4_modify_scene_dropdown",
+                format_func=lambda n: (
+                    "Modify Script — Select Scene" if n is None
+                    else f"Scene {n} — {_titles.get(n, (f'Scene {n}', '', ''))[0]}"
+                ),
+                label_visibility="collapsed",
+                on_change=_wbs_stage4_modify_scene_selection,
+            )
+            if all(_wbs_current_status.values()) and _proposed_title == _saved_title:
+                st.caption("All three final editorial acceptances are saved to the current revision.")
             else:
-                st.info("Review the complete story, then choose Accept And Save Complete Story. "
-                        "To make changes, select a scene from Modify Script to open it directly in Scene Scripting.")
+                st.caption("Confirm and save all three items above before continuing to Stage 5. "
+                           "You may return to a scene for changes at any time.")
         # OPTIONAL PUBLISHER READINESS — format-specific, read-only guidance.
         # No automatic rewriting, manuscript mutation, or extra AI generation.
         st.subheader("📋 Optional Publisher Readiness Review")
@@ -11717,9 +11901,28 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                     key="wbs_picture_book_cue_preview", disabled=True)
 
         st.markdown("---")
+        _wbs_final_acceptances = wbs_stage4_final_status(
+            st.session_state.get("wbs_stage4_final_acceptance"),
+            get_project_title(), str(st.session_state.get("current_draft_output") or ""),
+            st.session_state.get("project_integrity_report") or "",
+            st.session_state.get("project_integrity_source_signature"),
+            _wbs_scene_review_complete,
+            get_active_project_id(), st.session_state.get("_wbs_active_saved_session_row_id"),
+        )
+        _wbs_title_has_unsaved_edit = (
+            re.sub(r"\s+", " ", str(
+                st.session_state.get(wbs_stage4_title_input_key()) or "")).strip()
+            != get_project_title()
+        )
+        _wbs_ready_for_final = (
+            _wbs_scene_review_complete and _wbs_ir_ready
+            and (not _wbs_scene_review_required or (
+                all(_wbs_final_acceptances.values())
+                and not _wbs_title_has_unsaved_edit))
+        )
         if st.button("Proceed to Stage 5 — Final Manuscript", key="wbs_editorial_to_final", type="primary",
-                     disabled=(not _wbs_scene_review_complete or not _wbs_ir_ready), use_container_width=True):
-            if _wbs_scene_review_complete and _wbs_ir_ready:
+                     disabled=not _wbs_ready_for_final, use_container_width=True):
+            if _wbs_ready_for_final:
                 wbs_request_stage_change("Isolation Guardrail", export_view=True)
         # Stage 4 ends here. Draft history, download, and final approval belong to Stage 5.
         st.stop()
