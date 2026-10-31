@@ -9953,66 +9953,78 @@ if st.session_state.project_stage == "Plot Architect":
                         st.rerun()
             if _ss_changed:
                 st.caption("Accepted edits appear on the left. Save Scene or use the bottom button to save them to this revision.")
-        # Stage 3 bottom controls have exactly two mutually exclusive routes.
-        # A scene opened from Integrity: Save & Return is the only red button.
-        # Normal scene development: Save & Continue is the only red button.
-        # Neither path creates another V-number or changes any other format.
-        _ss_return_to_integrity = wbs_ss_is_integrity_return_context()
+        # Stage 3 footer: writer chooses a destination from a dropdown.
+        # Existing scenes may be revisited in any order. Only the NEXT missing
+        # scene can be generated; jumping past unwritten scenes is never allowed.
+        # Save & Return to Integrity is always available, even when this scene
+        # was opened from ordinary development rather than a report shortcut.
+        # These controls affect only Short Story Stage 3, not other formats.
         _ss_next_missing = next((n for n in range(2, 5) if n not in _ss_blocks), None)
-        _ss_following = _ss_selected + 1
-        _ss_has_following = _ss_following in _ss_blocks
-        _ss_generate_following = (_ss_next_missing == _ss_following and _ss_following <= 4)
-        _ss_go_review = (_ss_selected == 4 and set(_ss_blocks) == {1, 2, 3, 4})
-        _ss_can_continue = _ss_go_review or _ss_has_following or _ss_generate_following
+        _ss_destinations = [("scene", n) for n in sorted(set(_ss_blocks) | {1})]
+        if _ss_next_missing is not None:
+            _ss_destinations.append(("generate", _ss_next_missing))
+        if set(_ss_blocks) == {1, 2, 3, 4}:
+            _ss_destinations.append(("review", 4))
 
-        if _ss_go_review:
-            _ss_continue_label = "Save & Continue to Editorial Review"
-        elif _ss_generate_following:
-            _ss_continue_label = f"Save Scene {_ss_selected} & Generate Scene {_ss_following}"
-        elif _ss_has_following:
-            _ss_continue_label = f"Save Scene {_ss_selected} & Continue to Scene {_ss_following}"
-        else:
-            _ss_continue_label = f"Save Scene {_ss_selected} & Continue"
+        def _ss_destination_label(value):
+            if value is None:
+                return "Choose a scene or Editorial Review..."
+            kind, number = value
+            if kind == "review":
+                return "Stage 4 — Editorial & Publisher Review"
+            title = _ss_parts.get(number, (f"Scene {number}", "", ""))[0]
+            if kind == "generate":
+                return f"Generate Scene {number} — {title}"
+            return f"Scene {number} — {title}"
 
-        _ss_normal_col, _ss_integrity_col = st.columns(2, gap="small")
-        with _ss_normal_col:
-            _ss_normal_clicked = st.button(
-                _ss_continue_label,
-                key=f"wbs_ss_save_continue_{_ss_selected}",
-                type="primary" if not _ss_return_to_integrity else "secondary",
-                use_container_width=True,
-                disabled=(bool(st.session_state.get("demo_mode"))
-                          or _ss_return_to_integrity or not _ss_can_continue),
+        _ss_footer_epoch = int(st.session_state.get("_wbs_ss_footer_epoch") or 0)
+        _ss_footer_key = f"wbs_ss_save_continue_destination_{_ss_selected}_{_ss_footer_epoch}"
+        _ss_continue_col, _ss_integrity_col = st.columns(2, gap="small")
+        with _ss_continue_col:
+            _ss_destination = st.selectbox(
+                f"Save Scene {_ss_selected} & Continue To:",
+                options=[None, *_ss_destinations],
+                format_func=_ss_destination_label,
+                key=_ss_footer_key,
+                help="Choosing a destination saves the current scene to this revision, "
+                     "then opens that scene. Only the next unwritten scene can be generated.",
+                disabled=bool(st.session_state.get("demo_mode")),
             )
         with _ss_integrity_col:
+            st.markdown(f"**Save Scene {_ss_selected} & Return:**")
             _ss_integrity_clicked = st.button(
                 "Save & Return to Integrity Review",
                 key=f"wbs_ss_save_return_integrity_{_ss_selected}",
-                type="primary" if _ss_return_to_integrity else "secondary",
-                use_container_width=True,
-                disabled=(bool(st.session_state.get("demo_mode"))
-                          or not _ss_return_to_integrity),
+                type="primary", use_container_width=True,
+                disabled=bool(st.session_state.get("demo_mode")),
             )
 
-        if _ss_normal_clicked or _ss_integrity_clicked:
-            # Never allow a stale empty text widget to erase existing scene prose.
+        # Selecting the dropdown is itself the intentional Save & Continue
+        # action. No supplementary click, no new V-number, no automatic API call
+        # for previously written scenes or for returning to Integrity.
+        if _ss_destination is not None or _ss_integrity_clicked:
             _ss_final_text = wbs_ss_safe_scene_draft(
                 st.session_state.get(_ss_widget_key),
                 _ss_blocks.get(_ss_selected, _ss_seed_one if _ss_selected == 1 else ""),
             )
             if not str(_ss_final_text or "").strip():
                 st.error("This scene has no story text. Nothing was saved.")
+                st.session_state["_wbs_ss_footer_epoch"] = _ss_footer_epoch + 1
             else:
                 try:
-                    # Unchanged, previously saved scenes need no database write.
-                    # This also preserves an existing Integrity report until text
-                    # really changes, so merely returning never incurs API usage.
-                    _ss_needs_save = (_ss_selected not in _ss_blocks
-                                      or _ss_blocks[_ss_selected] != _ss_final_text)
+                    # A newly generated scene exists in session before its first
+                    # database save. Compare against the SAVED baseline, not
+                    # _ss_blocks, so it cannot disappear after reloading V-6.
+                    _ss_saved_baseline = st.session_state.get("_wbs_ss_db_scene_baseline")
+                    if _ss_saved_baseline is None:
+                        _ss_saved_baseline = st.session_state.get("_wbs_ss_initial_loaded_blocks") or {}
+                    _ss_saved_baseline = wbs_ss_blocks(_ss_saved_baseline)
+                    _ss_needs_save = _ss_saved_baseline.get(_ss_selected) != _ss_final_text
                     if _ss_needs_save:
                         wbs_ss_save_scene_to_current_revision(_ss_selected, _ss_final_text)
                 except Exception as _ss_save_exc:
                     st.error(f"Scene {_ss_selected} could not be saved: {_ss_save_exc}")
+                    st.session_state["_wbs_ss_footer_epoch"] = _ss_footer_epoch + 1
                 else:
                     _ss_blocks[_ss_selected] = _ss_final_text
                     st.session_state.scene_blocks = _ss_blocks
@@ -10022,26 +10034,23 @@ if st.session_state.project_stage == "Plot Architect":
                     if set(_ss_blocks) == {1, 2, 3, 4}:
                         st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
                     st.session_state.pop("_wbs_ss_rewrite_preview", None)
+                    st.session_state["_wbs_ss_footer_epoch"] = _ss_footer_epoch + 1
 
-                    if _ss_integrity_clicked:
-                        # Clear shortcut ONLY after a verified successful save.
+                    if _ss_integrity_clicked or _ss_destination[0] == "review":
                         st.session_state.pop("_wbs_ss_integrity_return_context", None)
                         st.session_state["_wbs_unlocked_saved_stage"] = max(
                             int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 4)
                         wbs_request_stage_change("Isolation Guardrail", export_view=False)
-                    elif _ss_go_review:
-                        st.session_state["_wbs_unlocked_saved_stage"] = max(
-                            int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 4)
-                        wbs_request_stage_change("Isolation Guardrail", export_view=False)
-                    elif _ss_has_following:
-                        st.session_state["_wbs_ss_jump_to"] = _ss_following
+                    elif _ss_destination[0] == "scene":
+                        st.session_state["_wbs_ss_jump_to"] = _ss_destination[1]
                         st.rerun()
-                    elif _ss_generate_following:
+                    elif _ss_destination[0] == "generate":
+                        _ss_target_scene = _ss_destination[1]
                         # Generate ONLY the next missing scene, after the
                         # preceding scene has been saved. No other scene changes.
-                        _ss_beat = _ss_parts.get(_ss_following, ("", "", ""))[2]
+                        _ss_beat = _ss_parts.get(_ss_target_scene, ("", "", ""))[2]
                         if not _ss_beat:
-                            st.error(f"Scene {_ss_following} has no saved plot beat; no scene was generated.")
+                            st.error(f"Scene {_ss_target_scene} has no saved plot beat; no scene was generated.")
                         else:
                             _ss_backend = st.session_state.get("backend")
                             _ss_client = getattr(_ss_backend, "client", None)
@@ -10052,7 +10061,7 @@ if st.session_state.project_stage == "Plot Architect":
                                 try:
                                     require_product_access("drafting")
                                     _ss_prompt = (
-                                        f"Write ONLY Scene {_ss_following} of a FOUR-SCENE short story. "
+                                        f"Write ONLY Scene {_ss_target_scene} of a FOUR-SCENE short story. "
                                         "Return ONLY complete, finished narrative prose in natural paragraphs. "
                                         "No tags, titles, writing directives, recap or explanations. "
                                         "Preserve characters, continuity, voice, dialogue style and tense. "
@@ -10068,17 +10077,17 @@ if st.session_state.project_stage == "Plot Architect":
                                     if not _ss_text or re.search(r"(?im)^\s*\[(BEAT|CORE OBJECTIVE|STYLE)", _ss_text):
                                         raise ValueError("The generator did not return clean scene prose")
                                 except Exception as _ss_gen_exc:
-                                    st.error(f"Scene {_ss_following} was not created: {_ss_gen_exc}")
+                                    st.error(f"Scene {_ss_target_scene} was not created: {_ss_gen_exc}")
                                 else:
-                                    _ss_blocks[_ss_following] = _ss_text
+                                    _ss_blocks[_ss_target_scene] = _ss_text
                                     st.session_state.scene_blocks = _ss_blocks
                                     _ss_next_buffers = dict(st.session_state.get("_wbs_ss_edit_buffers") or {})
-                                    _ss_next_buffers[_ss_following] = _ss_text
+                                    _ss_next_buffers[_ss_target_scene] = _ss_text
                                     st.session_state["_wbs_ss_edit_buffers"] = _ss_next_buffers
                                     if set(_ss_blocks) == {1, 2, 3, 4}:
                                         st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
-                                    st.session_state["_wbs_ss_jump_to"] = _ss_following
-                                    st.success(f"Scene {_ss_following} generated as working text. Review it before saving.")
+                                    st.session_state["_wbs_ss_jump_to"] = _ss_target_scene
+                                    st.success(f"Scene {_ss_target_scene} generated as working text. Review it before saving.")
                                     st.rerun()
         st.stop()
 
