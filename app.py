@@ -3726,6 +3726,138 @@ def render_project_integrity_report_html(report_text, located_issues=None):
     return "\n".join(chunks)
 
 
+# Integrity findings are *advice*, not manuscript edits. Reject assertions that
+# cannot name a real reason, location, verbatim excerpt AND a specific action.
+# This runs locally without another AI request or any database/manuscript writes.
+_WBS_IR_FINDING_SECTIONS = (
+    "CRITICAL WARNINGS", "CONTINUITY / CHARACTER / TIMELINE",
+    "REPETITION / POV / TENSE", "CHAPTER / SECTION / STRUCTURE INTEGRITY",
+    "PLACEHOLDERS / MISSING / DUPLICATE CONTENT",
+    "UNRESOLVED STORY ELEMENTS", "FORMAT COMPLIANCE",
+)
+_WBS_IR_ALL_SECTIONS = (
+    "PROJECT INTEGRITY SUMMARY", *_WBS_IR_FINDING_SECTIONS,
+    "RECOMMENDED WRITER CHECKS",
+)
+
+
+def wbs_ir_parse_actionable_finding(text):
+    """Parse the five required report fields; return None for vague findings."""
+    raw = re.sub(r"^\s*(?:[-•*]|\d+[.)])\s*", "", str(text or "").strip())
+    fields = re.split(
+        r"\s*\|\s*(?=(?:ISSUE|WHY|LOCATION|EVIDENCE|SUGGESTED FIX)\s*:)" , raw,
+        flags=re.IGNORECASE,
+    )
+    values = {}
+    for field in fields:
+        match = re.fullmatch(r"(ISSUE|WHY|LOCATION|EVIDENCE|SUGGESTED FIX)\s*:\s*(.+)", field.strip(), re.I | re.S)
+        if match:
+            values[match.group(1).upper()] = match.group(2).strip()
+    if len(values) != 5 or not all(values.values()):
+        return None
+    evidence_match = re.fullmatch(r'["“](.+?)["”]', values["EVIDENCE"])
+    if not evidence_match:
+        return None
+    values["QUOTE"] = evidence_match.group(1).strip()
+    # Vague or formulaic filler is NOT a rule, explanation, or correction.
+    vague = (
+        "check the stated", "review the stated", "relevant text only if",
+        "check whether", "consider whether", "might violate",
+        "could potentially", "refer to the", "review for compliance",
+        "check compliance", "verify the requirement", "if it fails",
+    )
+    for key in ("ISSUE", "WHY", "SUGGESTED FIX"):
+        value = values[key].casefold()
+        if len(value.split()) < 5 or any(phrase in value for phrase in vague):
+            return None
+    # An identifying quotation alone is insufficient: the reviewer needs to
+    # explain a concrete mistake. An evocative quotation is not itself wrong.
+    if values["WHY"].casefold() == values["ISSUE"].casefold():
+        return None
+    return values
+
+
+def wbs_ir_screen_generated_report(report_text, manuscript_text, scene_blocks=None):
+    """Remove unsubstantiated AI *warnings*, never remove or change story text.
+
+    No extra API call. The returned REPORT can be saved alongside the unchanged
+    manuscript. Older saved reports are left intact and are not silently edited.
+    """
+    source = str(manuscript_text or "")
+    scene_texts = wbs_ss_blocks(scene_blocks or {})
+    source_normalized = " ".join(re.findall(r"\w+", source.casefold()))
+    warnings = []
+    omitted = 0
+    current_section = ""
+    summary = []
+    lines = str(report_text or "").splitlines()
+    for line in lines:
+        stripped = line.strip()
+        if stripped.upper() in _WBS_IR_ALL_SECTIONS:
+            current_section = stripped.upper()
+            continue
+        if current_section not in _WBS_IR_FINDING_SECTIONS:
+            continue
+        bullet = re.sub(r"^\s*(?:[-•*]|\d+[.)])\s*", "", stripped)
+        if not bullet or bullet.upper().startswith(("NONE FOUND", "NO MATERIAL ISSUES", "NO ISSUES")):
+            continue
+        item = wbs_ir_parse_actionable_finding(bullet)
+        if item is None:
+            omitted += 1
+            continue
+        quote_words = re.findall(r"\w+", item["QUOTE"].casefold())
+        if len(quote_words) < 4 or len(quote_words) > 22:
+            omitted += 1
+            continue
+        quote_normalized = " ".join(quote_words)
+        if quote_normalized not in source_normalized:
+            omitted += 1
+            continue
+        location = item["LOCATION"]
+        claimed = re.search(r"\bscene\s*(\d+)\b", location, re.I)
+        if claimed and scene_texts:
+            n = int(claimed.group(1))
+            if n not in scene_texts or quote_normalized not in " ".join(
+                re.findall(r"\w+", scene_texts[n].casefold())
+            ):
+                omitted += 1
+                continue
+        warnings.append((current_section, bullet, item))
+
+    grouped = {name: [] for name in _WBS_IR_FINDING_SECTIONS}
+    for section, bullet, item in warnings:
+        if bullet not in grouped[section]:
+            grouped[section].append(bullet)
+    accepted = sum(len(items) for items in grouped.values())
+    # The quality gate does not claim that a model is infallible: it prevents
+    # unsupported remarks from being presented as corrections to the author.
+    output = ["OVERALL STATUS: WARNINGS" if accepted else "OVERALL STATUS: PASS", "",
+              "PROJECT INTEGRITY SUMMARY"]
+    if accepted:
+        output.append(f"The review identified {accepted} specific finding(s) with a stated reason, "
+                      "manuscript evidence and a suggested writer-controlled correction. "
+                      "No manuscript text has been changed.")
+    else:
+        output.append("No sufficiently supported, actionable integrity findings were returned "
+                      "by this review. The manuscript has not been changed.")
+    if omitted:
+        output.append(f"{omitted} unsupported or unclear AI suggestion(s) were excluded "
+                      "because they did not establish an actionable defect.")
+    for section in _WBS_IR_FINDING_SECTIONS:
+        output.extend(("", section))
+        output.extend("- " + bullet for bullet in grouped[section])
+        if not grouped[section]:
+            output.append("- None found." if section == "CRITICAL WARNINGS" else "- No material issues found.")
+    output.extend(("", "RECOMMENDED WRITER CHECKS"))
+    if accepted:
+        # Only summarize the supported warning's specific action, not arbitrary
+        # stylistic improvement suggestions from the AI response.
+        output.extend("- " + item["SUGGESTED FIX"] for _, _, item in warnings)
+    else:
+        output.append("- No changes recommended before Final Output.")
+    return "\n".join(output), {"accepted": accepted, "omitted": omitted}
+
+
 def run_project_integrity_final_review(manuscript_text):
     """Read-only whole-project quality-control review. Never rewrites manuscript text."""
     manuscript_text = str(manuscript_text or "").strip()
@@ -3834,6 +3966,14 @@ IMPORTANT REVIEW RULES:
 - First-person dialogue inside quotation marks is normal in third-person narration and is NOT, by itself, a POV violation.
 - When evaluating POV compliance, judge the narrative prose outside character dialogue and direct quotations.
 - If the project requirements call for first-person POV but the manuscript uses third-person narration with normal first-person dialogue, report it as a narrative POV mismatch rather than a dialogue problem.
+- A colorful description, emotion, plausible inference, stylistic choice, normal sensory detail, or playful metaphor is NOT a formatting or continuity error by itself. For example, a kitten saying a cereal flake is a \"tiny explosion of flavor\" is not an integrity defect. Never invent a rule merely to criticize evocative writing.
+- A quoted sentence is NOT proof of a defect. Identify the concrete conflict or objective manuscript requirement first, then quote the evidence that demonstrates it.
+- Evaluate actual published-format requirements only when they are supplied and applicable to this writing format. Never invent manuscript-format requirements or request changes because a passage \"might fail\" an unnamed rule.
+- Do not turn an unverified impression into an actionable warning. If no explicit contradiction, actual rule violation, accidental duplication, or genuinely unresolved element can be substantiated, say there are no material issues.
+- For EVERY material warning use ONE bullet in this precise form (single line):
+  - ISSUE: <specific problem> | WHY: <what contradicts what, or exact objective rule> | LOCATION: <actual scene number/title if present, otherwise known section or Manuscript> | EVIDENCE: \"<exact verbatim excerpt from the manuscript of 4-18 words>\" | SUGGESTED FIX: <a precise optional correction the author can make>
+- No generic warnings, no quote-only warnings, no statements such as \"check the stated requirement\", and no unsupported claims of a format rule. If the required five fields cannot truthfully be filled, OMIT that finding. Do not propose a change that would damage an intentional first-person voice or the author's story.
+- In RECOMMENDED WRITER CHECKS, repeat only specific fixes for genuinely supported warnings. When there are none, write \"No changes recommended before Final Output.\". Do not generate extra optional stylistic criticism in this integrity gate.
 
 RETURN EXACTLY THIS REPORT STRUCTURE:
 OVERALL STATUS: PASS
@@ -3844,7 +3984,7 @@ PROJECT INTEGRITY SUMMARY
 [2-6 concise sentences]
 
 CRITICAL WARNINGS
-- [items, or "None found."]
+- [supported actionable issue in the required ISSUE/WHY/LOCATION/EVIDENCE/SUGGESTED FIX format, or "None found."]
 
 CONTINUITY / CHARACTER / TIMELINE
 - [items, or "No material issues found."]
@@ -3884,7 +4024,12 @@ LOCATION REFERENCE:
     report = str(getattr(response, "text", "") or "").strip()
     if not report:
         raise RuntimeError("The Project Integrity review returned no report.")
-    return report
+    # QC of the QC: only supported, specific, directly locatable warnings
+    # survive to the report. The author's manuscript is never modified.
+    checked_report, _review_qc = wbs_ir_screen_generated_report(
+        report, manuscript_text, _ir_blocks
+    )
+    return checked_report
 
 
 def wbs_ir_located_issues(report_text, blocks, titles, manuscript_text=None):
@@ -11896,11 +12041,18 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                         # The quoted sentence is a location anchor, not necessarily
                         # the mistake. Always display the actual AI finding and a
                         # concrete writer-controlled review action beside that anchor.
+                        _wbs_finding = wbs_ir_parse_actionable_finding(_ir_issue["issue"])
                         st.markdown("**Why this scene was flagged:**")
-                        st.write(_ir_issue["issue"])
-                        st.markdown("**What to review or correct:**")
-                        st.write(wbs_ir_review_action(
-                            _ir_issue["issue"], _ir_issue.get("section", "")))
+                        if _wbs_finding:
+                            st.write(_wbs_finding["ISSUE"] + " — " + _wbs_finding["WHY"])
+                            st.markdown("**Specific suggested correction (optional):**")
+                            st.write(_wbs_finding["SUGGESTED FIX"])
+                        else:
+                            # Historical reports may predate the new evidence standard.
+                            st.warning("This older warning does not give a verified, "
+                                       "specific correction. Do not alter your story on "
+                                       "the basis of this excerpt alone.")
+                            st.write(_ir_issue["issue"])
                         if _ir_issue["quote"]:
                             st.caption("Passage used to locate the warning (not necessarily erroneous): “"
                                        + _ir_issue["quote"] + "”")
@@ -11915,6 +12067,11 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                     st.info("No scene location could be verified from the report's exact quotes. "
                             "Use the Modify Script scene selector below; no scene number has been guessed.")
 
+                if ("OVERALL STATUS: WARNINGS" in str(st.session_state.get("project_integrity_report") or "")
+                        and "| SUGGESTED FIX:" not in str(st.session_state.get("project_integrity_report") or "")):
+                    st.info("This report predates the stricter evidence checks. A quoted "
+                            "passage does not by itself prove a problem; you can run "
+                            "a new review if you want verified, specific recommendations.")
                 st.markdown("**Project Integrity Report:**")
                 st.markdown(
                     render_project_integrity_report_html(
