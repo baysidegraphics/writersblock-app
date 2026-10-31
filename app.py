@@ -5501,7 +5501,7 @@ def wbs_stage4_save_final_acceptance(component):
         raise ValueError("The saved project title changed. Reload before accepting.")
     manuscript = str(st.session_state.get("current_draft_output") or "")
     blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
-    if set(blocks) != {1, 2, 3, 4} or wbs_ss_storyline(blocks) != manuscript:
+    if component != "title" and (set(blocks) != {1, 2, 3, 4} or wbs_ss_storyline(blocks) != manuscript):
         raise ValueError("All four saved scenes must match the manuscript.")
     source_signature = get_text_signature(manuscript)
     report = str(st.session_state.get("project_integrity_report") or "")
@@ -5519,7 +5519,7 @@ def wbs_stage4_save_final_acceptance(component):
             or str(snapshot.get("active_format_id") or "") != active_format
             or str(snapshot.get("project_title") or "") != master_title):
         raise ValueError("Saved project identity, title or format does not match.")
-    if (wbs_ss_blocks(snapshot.get("scene_blocks") or {}) != blocks
+    if component != "title" and (wbs_ss_blocks(snapshot.get("scene_blocks") or {}) != blocks
             or str(snapshot.get("current_draft_output") or "") != manuscript):
         raise ValueError("Saved manuscript has changed. Reload before accepting.")
     if component == "manuscript":
@@ -5567,24 +5567,60 @@ def render_project_title_banner(stage_key):
     # Match the active saved revision displayed in Project Status.
     revision_display = revision if revision.upper().startswith("V-") else ("V-" + revision if revision.isdigit() else "")
     st.markdown("<style>[class*='st-key-wbs_stage_title_'] input:disabled {color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; opacity: 1 !important;}</style>", unsafe_allow_html=True)
-    st.markdown(f"**{format_name} / Project Title/Revision**")
-    if (stage_key == "step_5_script_lock"
-            and set(wbs_ss_blocks(st.session_state.get("scene_blocks") or {})) == {1, 2, 3, 4}
-            and str(st.session_state.get("current_draft_output") or "")
-                == wbs_ss_storyline(st.session_state.get("scene_blocks") or {})):
-        # Stage 4 only for exact four-scene projects: edit the canonical project name; the title is NOT a
-        # separate part of each scene and changes only after explicit approval.
+    if stage_key == "step_5_script_lock":
+        # Stage 4: project-wide title, name editor, and explicit save all on ONE row.
+        # The revision ID is read-only; title changes do not regenerate prose or make V-7.
         _title_key = wbs_stage4_title_input_key()
         if _title_key not in st.session_state:
             st.session_state[_title_key] = current_title
-        st.text_input(
-            "Project Title — edit here, then accept below",
-            key=_title_key, max_chars=120,
-            disabled=bool(st.session_state.get("demo_mode")),
-        )
-        st.caption(f"Active revision: {revision_display or 'current'}. "
-                   "An accepted title change applies to all scenes and saved versions; it never rewrites the story.")
+        _current_col, _rename_col, _save_col = st.columns([1.25, 1.25, .75], gap="small", vertical_alignment="bottom")
+        with _current_col:
+            st.text_input(
+                "Current Project Title/Version",
+                value=current_title + (" — " + revision_display if revision_display else ""),
+                disabled=True,
+                key=f"wbs_stage4_current_title_{str(get_active_project_id() or 'unsaved')}_{revision_display}",
+            )
+        with _rename_col:
+            st.text_input(
+                "Rename Project Title",
+                key=_title_key,
+                max_chars=120,
+                disabled=bool(st.session_state.get("demo_mode")),
+            )
+        with _save_col:
+            if st.button(
+                "Save Title Change", type="primary",
+                key="wbs_stage4_save_title_inline",
+                use_container_width=True,
+                disabled=bool(st.session_state.get("demo_mode")),
+                help="Save this project's title without changing its revision number or manuscript.",
+            ):
+                _proposed_name = re.sub(r"\s+", " ", str(st.session_state.get(_title_key) or "")).strip()
+                _saved_name = get_project_title()
+                if not _proposed_name or len(_proposed_name) > 120:
+                    st.error("Enter a project title containing 1–120 characters.")
+                else:
+                    _renamed, _rename_msg = (
+                        rename_current_project_everywhere(_proposed_name)
+                        if _proposed_name != _saved_name else (True, "")
+                    )
+                    if not _renamed:
+                        st.error(_rename_msg)
+                    else:
+                        try:
+                            # The same approval previously saved at the bottom of Stage 4:
+                            # update only the ACTIVE revision's title-acceptance field.
+                            wbs_stage4_save_final_acceptance("title")
+                        except Exception as exc:
+                            st.error(f"Title was changed but its acceptance could not be saved: {exc}. "
+                                     "Use Save Title Change again to finish.")
+                        else:
+                            st.session_state[_title_key] = _proposed_name
+                            st.success("Project title accepted and saved; the current V-number is unchanged.")
+                            st.rerun()
     else:
+        st.markdown(f"**{format_name} / Project Title/Revision**")
         st.text_input("Project Title/Revision", value=(current_title + (" — " + revision_display if revision_display and revision_display not in current_title else "")), disabled=True, label_visibility="collapsed", key=f"wbs_stage_title_{stage_key}_{revision_display}_{str(get_active_project_id() or 'unsaved')}")
     if stage_key == "step_2_scripting":
         _saved_path = bool(str(st.session_state.get("chosen_option") or "").strip() and str(st.session_state.get("chosen_option_text") or "").strip())
@@ -11436,11 +11472,15 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             st.markdown("##### This is the final manuscript output stage. Save the final manuscript before downloading or starting a new project.")
         render_project_title_banner("step_8_manuscript_output")
     else:
+        # Stage 4 only: reduce unused space above the central working column.
+        # The one-row title/rename/save controls always render, whether or not
+        # older scene records match the exact compiled manuscript.
+        st.markdown("""<style>
+        [data-testid="stMainBlockContainer"] {padding-top: 0 !important;}
+        [data-testid="stMainBlockContainer"] h2 {margin-top: 0 !important;}
+        </style>""", unsafe_allow_html=True)
         st.header("🛡️ Stage 4: Editorial & Publisher Review")
-        st.markdown("##### Examine the draft, run optional editorial and submission checks, then approve it for Final Manuscript. Polish and Rewrite remain available on request.")
         render_project_title_banner("step_5_script_lock")
-        st.markdown("---")
-        st.subheader("Editorial & Publisher Review")
         current_source = str(st.session_state.get("current_draft_output") or "").strip()
         source_signature = get_text_signature(current_source)
         _wbs_review_blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
@@ -11683,8 +11723,8 @@ elif st.session_state.project_stage == "Isolation Guardrail":
         ))
         if _wbs_scene_review_required and _wbs_exact_four:
             st.subheader("For Final Editorial Acceptance, Check Each Button Below")
-            st.caption("Confirm the project title, the complete manuscript, and the saved "
-                       "Integrity Report. All three approvals are stored on the current V-number.")
+            st.caption("Save the project title beside its field above, then confirm the completed "
+                       "manuscript and Integrity Report below. All three approvals use the current V-number.")
             _titles = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
 
             def _wbs_stage4_modify_scene_selection():
@@ -11718,7 +11758,7 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             # WBS Stage 4 acceptance visuals only — no changes to approval logic.
             # CSS :has is supported by the Chrome client used for Streamlit.
             st.markdown("""<style>
-            /* Make the three approval checkboxes visible on the charcoal theme. */
+            /* Make the two remaining approval checkboxes visible on the charcoal theme. */
             [class*="st-key-wbs_stage4_confirm_"] label[data-baseweb="checkbox"] > div:first-child,
             [class*="st-key-wbs_stage4_confirm_"] label[data-baseweb="checkbox"] input[type="checkbox"] + div,
             [class*="st-key-wbs_stage4_confirm_"] label[data-baseweb="checkbox"] input[type="checkbox"] + span {
@@ -11728,8 +11768,6 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             }
             /* Once a confirmation is checked, its button becomes visibly red.
                The existing disabled gates (e.g., missing Integrity report) remain. */
-            [data-testid="stColumn"]:has([class*="st-key-wbs_stage4_confirm_title_"] input:checked)
-              .st-key-wbs_stage4_accept_title button,
             [data-testid="stColumn"]:has([class*="st-key-wbs_stage4_confirm_manuscript_"] input:checked)
               .st-key-wbs_stage4_accept_full_story button,
             [data-testid="stColumn"]:has([class*="st-key-wbs_stage4_confirm_integrity_"] input:checked)
@@ -11757,35 +11795,14 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                 cursor: not-allowed !important;
             }
             </style>""", unsafe_allow_html=True)
-            _title_col, _manuscript_col, _integrity_col = st.columns(3, gap="small")
-            with _title_col:
-                _confirm_title = st.checkbox("Confirm project title",
-                    key="wbs_stage4_confirm_title_" + _stage4_scope)
-                if st.button("Accept And Save Project Title", type="primary",
-                             key="wbs_stage4_accept_title", use_container_width=True,
-                             disabled=bool(st.session_state.get("demo_mode")) or not _confirm_title):
-                    if not _proposed_title or len(_proposed_title) > 120:
-                        st.error("Enter a project title of 1–120 characters at the top of this page.")
-                    else:
-                        if _proposed_title != _saved_title:
-                            _renamed, _rename_msg = rename_current_project_everywhere(_proposed_title)
-                        else:
-                            _renamed, _rename_msg = True, ""
-                        if not _renamed:
-                            st.error(_rename_msg)
-                        else:
-                            try:
-                                wbs_stage4_save_final_acceptance("title")
-                            except Exception as exc:
-                                st.error(f"Title acceptance was not saved: {exc}")
-                            else:
-                                st.session_state[wbs_stage4_title_input_key()] = _proposed_title
-                                st.rerun()
-                if _wbs_current_status["title"] and _proposed_title == _saved_title:
-                    st.caption("✓ Project title accepted and saved")
-                elif _proposed_title != _saved_title:
-                    st.caption("Title edited — select this button to save the project-wide change")
-
+            # Title saving was moved to the row beside Rename Project Title above.
+            _manuscript_col, _integrity_col = st.columns(2, gap="small")
+            if _wbs_current_status["title"] and _proposed_title == _saved_title:
+                st.caption("✓ Project title accepted and saved above")
+            elif _proposed_title != _saved_title:
+                st.caption("Project title has unsaved changes. Use Save Title Change above.")
+            else:
+                st.caption("Use Save Title Change above to confirm the project title.")
             with _manuscript_col:
                 _confirm_manuscript = st.checkbox("Confirm final manuscript",
                     key="wbs_stage4_confirm_manuscript_" + _stage4_scope)
@@ -11840,8 +11857,8 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             if all(_wbs_current_status.values()) and _proposed_title == _saved_title:
                 st.caption("All three final editorial acceptances are saved to the current revision.")
             else:
-                st.caption("Confirm and save all three items above before continuing to Stage 5. "
-                           "You may return to a scene for changes at any time.")
+                st.caption("Save the project title above and confirm the final manuscript and Integrity Report "
+                           "before continuing to Stage 5. You may return to any scene for changes.")
         # OPTIONAL PUBLISHER READINESS — format-specific, read-only guidance.
         # No automatic rewriting, manuscript mutation, or extra AI generation.
         st.subheader("📋 Optional Publisher Readiness Review")
