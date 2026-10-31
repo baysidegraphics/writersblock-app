@@ -3984,6 +3984,37 @@ def wbs_ir_located_issues(report_text, blocks, titles, manuscript_text=None):
     return unique
 
 
+
+def wbs_ir_review_action(issue, section):
+    """Suggest a writer check, never an automatic change to the manuscript.
+
+    The original AI finding is always shown verbatim. This supplemental
+    instruction is deliberately conservative and does not invent a correction.
+    """
+    finding = str(issue or "").casefold()
+    heading = str(section or "").casefold()
+    if ("name" in finding or "named" in finding) and any(
+        term in finding for term in ("not present", "not used", "not mentioned", "absent", "never appears")
+    ):
+        return ("Check whether the character's name needs to appear in the story. "
+                "In first-person narration, not naming the narrator may be intentional. "
+                "Add the name only if you decide the omission is a problem.")
+    if any(term in finding for term in ("repetit", "similar", "duplicate", "redundant")):
+        return ("Compare the passages identified by the report. If the repetition "
+                "is unintentional, rephrase or remove the duplicate wording.")
+    if "point of view" in finding or "pov" in finding or "tense" in finding:
+        return ("Check the cited passage against the chosen point of view "
+                "and tense; correct an unintended shift only.")
+    if "continuity" in heading or "character" in heading or "timeline" in heading:
+        return ("Compare the reported detail with the surrounding story and "
+                "project requirements. Edit only if the inconsistency is real.")
+    if "format compliance" in heading:
+        return ("Check the stated manuscript-format requirement and update "
+                "the relevant text only if it fails that requirement.")
+    return ("Read the specific finding above and inspect the quoted passage "
+            "in context. Change the story only if the warning is valid.")
+
+
 def wbs_ir_go_to_scene(number):
     """Open the exact existing scene; never save, generate or renumber work."""
     number = int(number)
@@ -11386,14 +11417,24 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                     st.markdown("### Integrity Warnings — Scene Locations")
                     for _ir_index, _ir_issue in enumerate(_ir_matches):
                         st.markdown(f"**Scene {_ir_issue['scene']} — {_ir_issue['title']}**")
+                        # The quoted sentence is a location anchor, not necessarily
+                        # the mistake. Always display the actual AI finding and a
+                        # concrete writer-controlled review action beside that anchor.
+                        st.markdown("**Why this scene was flagged:**")
+                        st.write(_ir_issue["issue"])
+                        st.markdown("**What to review or correct:**")
+                        st.write(wbs_ir_review_action(
+                            _ir_issue["issue"], _ir_issue.get("section", "")))
                         if _ir_issue["quote"]:
-                            st.caption("Reported passage: “" + _ir_issue["quote"] + "”")
+                            st.caption("Passage used to locate the warning (not necessarily erroneous): “"
+                                       + _ir_issue["quote"] + "”")
                         if st.button(
                             f"Modify This Scene {_ir_issue['scene']}",
                             key=f"wbs_integrity_modify_scene_{_ir_index}_{source_signature[:12]}",
                             use_container_width=False,
                         ):
                             wbs_ir_go_to_scene(_ir_issue["scene"])
+                        st.divider()
                 elif _wbs_review_blocks and st.session_state.get("project_integrity_status") != "PASS":
                     st.info("No scene location could be verified from the report's exact quotes. "
                             "Use the Modify Script scene selector below; no scene number has been guessed.")
