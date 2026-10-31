@@ -16,13 +16,14 @@ import re
 from docx import Document
 from docx.shared import Pt
 
-ASSESSMENT_SCHEMA_VERSION = "publisher-readiness-v1"
+ASSESSMENT_SCHEMA_VERSION = "publisher-readiness-v2"
+LEGACY_SCHEMA_VERSION = "publisher-readiness-v1"
 DIRECT_MAX_CHARS = 75_000
 CHUNK_MAX_CHARS = 38_000
 MAX_CHUNKS = 25
 MAX_MANUSCRIPT_CHARS = CHUNK_MAX_CHARS * (MAX_CHUNKS - 1)
 REPORT_DRAFT_TYPE = "publisher_assessment"
-FINAL_SOURCE_STAGE = "final_output"
+EDITORIAL_SOURCE_STAGE = "project_session"
 
 # Only the writing-format-specific guidance varies. All other assessment code
 # is common and wholly isolated from the format-specific writing engines.
@@ -199,44 +200,112 @@ def generate_assessment(backend, *, title: str, format_name: str, format_id: str
     return result
 
 
-def find_saved_final(supabase, *, project_id, user_id, current_text):
-    """Read only verified saved FINAL checkpoints owned by the current user/project."""
-    if not project_id or not user_id:
+def _normalized_text_signature(text: str) -> str:
+    """Match the exact saved Stage 4 approval signature (whitespace normalized)."""
+    normalized = re.sub(r"\s+", " ", str(text or "").strip())
+    return sha256(normalized.encode("utf-8")).hexdigest() if normalized else ""
+
+
+def find_saved_editorial_revision(supabase, *, project_id, user_id, revision_id,
+                                  format_id, title, current_text):
+    """Read ONLY the active approved editorial project_session, never FINAL output.
+
+    Verify user, project, selected saved revision, format, source text, title,
+    current integrity, and all three approvals for scene-based manuscripts.
+    An evaluation cannot silently use some other project or an unsaved edit.
+    """
+    if not all((project_id, user_id, revision_id, format_id, title, current_text.strip())):
         return None
-    response = (supabase.table("writersblock_manuscript_versions")
-                .select("id,project_id,user_id,version_number,version_label,manuscript_content,source_stage")
-                .eq("project_id", project_id).eq("user_id", user_id)
-                .eq("source_stage", FINAL_SOURCE_STAGE)
-                .order("version_number", desc=True).limit(30).execute())
-    for row in getattr(response, "data", None) or []:
-        if (str(row.get("project_id")) == str(project_id) and
-                str(row.get("user_id")) == str(user_id) and
-                str(row.get("source_stage")) == FINAL_SOURCE_STAGE and
-                str(row.get("manuscript_content") or "").strip() == current_text.strip()):
-            return row
-    return None
+    response = (supabase.table("writersblock_project_drafts")
+                .select("id,project_id,user_id,version_number,draft_type,draft_content")
+                .eq("id", revision_id).eq("project_id", project_id)
+                .eq("user_id", user_id).eq("draft_type", EDITORIAL_SOURCE_STAGE)
+                .limit(1).execute())
+    rows = getattr(response, "data", None) or []
+    if len(rows) != 1:
+        return None
+    row = rows[0]
+    if (str(row.get("id")) != str(revision_id)
+            or str(row.get("project_id")) != str(project_id)
+            or str(row.get("user_id")) != str(user_id)
+            or row.get("draft_type") != EDITORIAL_SOURCE_STAGE):
+        return None
+    try:
+        snapshot = json.loads(row.get("draft_content") or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(snapshot, dict):
+        return None
+    text = str(snapshot.get("current_draft_output") or "")
+    if (str(snapshot.get("current_project_id") or "") != str(project_id)
+            or str(snapshot.get("active_format_id") or "") != str(format_id)
+            or str(snapshot.get("project_title") or "") != str(title)
+            or text != current_text or not text.strip()):
+        return None
+    signature = _normalized_text_signature(text)
+    report = str(snapshot.get("project_integrity_report") or "")
+    # The assessment is downstream of the editorial Integrity step. Fail
+    # closed rather than assessing stale or absent review records.
+    if (not report.strip()
+            or snapshot.get("project_integrity_source_signature") != signature):
+        return None
+    scene_blocks = snapshot.get("scene_blocks") or {}
+    if not isinstance(scene_blocks, dict):
+        return None
+    blocks = {str(k): v for k, v in scene_blocks.items() if str(k) in {"1", "2", "3", "4"}}
+    four_scene = (set(blocks) == {"1", "2", "3", "4"}
+                  and all(isinstance(blocks[str(i)], str) and blocks[str(i)].strip() for i in range(1, 5))
+                  and text == "\n\n".join(blocks[str(i)] for i in range(1, 5)))
+    if format_id == "short_story" or four_scene:
+        if not four_scene:
+            return None
+        record = snapshot.get("wbs_stage4_final_acceptance") or {}
+        approvals = snapshot.get("wbs_stage4_scene_approvals") or {}
+        if (not isinstance(record, dict) or not isinstance(approvals, dict)
+                or str(record.get("project_id")) != str(project_id)
+                or str(record.get("revision_id")) != str(revision_id)
+                or record.get("title") != str(title)
+                or record.get("manuscript_signature") != signature
+                or record.get("integrity_source_signature") != signature
+                or record.get("integrity_report_signature") != _normalized_text_signature(report)
+                or approvals.get("source_signature") != signature
+                or approvals.get("scene_signatures") != {
+                    str(i): _normalized_text_signature(blocks[str(i)]) for i in range(1, 5)}
+                or set(approvals.get("approved") or []) != {1, 2, 3, 4}):
+            return None
+    return {
+        "id": row["id"], "project_id": project_id, "user_id": user_id,
+        "version_number": row.get("version_number"), "source_stage": "editorial_approved",
+        "manuscript_content": text,
+    }
 
 
-def get_existing_reports(supabase, *, project_id, user_id, final_row, format_id):
+def get_existing_reports(supabase, *, project_id, user_id, source_row, format_id):
     response = (supabase.table("writersblock_project_drafts")
                 .select("id,project_id,user_id,version_number,draft_content,created_at")
                 .eq("project_id", project_id).eq("user_id", user_id)
                 .eq("draft_type", REPORT_DRAFT_TYPE)
                 .order("version_number", desc=True).limit(100).execute())
     reports = []
-    fingerprint = manuscript_digest(str(final_row.get("manuscript_content") or "").strip())
+    fingerprint = manuscript_digest(str(source_row.get("manuscript_content") or "").strip())
     for row in getattr(response, "data", None) or []:
         try:
             doc = json.loads(row.get("draft_content") or "{}")
         except (ValueError, TypeError):
             continue
-        if not isinstance(doc, dict) or any((
-            str(doc.get("project_id")) != str(project_id),
-            str(doc.get("format_id")) != str(format_id),
-            str(doc.get("final_manuscript_id")) != str(final_row.get("id")),
-            doc.get("manuscript_sha256") != fingerprint,
-            doc.get("schema_version") != ASSESSMENT_SCHEMA_VERSION,
-        )):
+        if not isinstance(doc, dict):
+            continue
+        same_new_source = (doc.get("schema_version") == ASSESSMENT_SCHEMA_VERSION
+                           and str(doc.get("source_revision_id") or "") == str(source_row["id"]))
+        # Legacy Stage 6 reports are still readable if the manuscript bytes
+        # truly match. Existing saved report rows are never mutated.
+        same_legacy_text = (doc.get("schema_version") == LEGACY_SCHEMA_VERSION
+                            and bool(doc.get("final_manuscript_id")))
+        if (not (same_new_source or same_legacy_text)
+                or str(doc.get("project_id")) != str(project_id)
+                or str(row.get("user_id")) != str(user_id)
+                or str(doc.get("format_id")) != str(format_id)
+                or doc.get("manuscript_sha256") != fingerprint):
             continue
         try:
             doc["report"] = parse_assessment_json(json.dumps(doc.get("report")))
@@ -246,8 +315,8 @@ def get_existing_reports(supabase, *, project_id, user_id, final_row, format_id)
     return reports
 
 
-def save_report(supabase, *, project_id, user_id, final_row, format_id, format_name, title, model_name, report):
-    """INSERT into publisher_assessment ONLY. No manuscript/session update paths."""
+def save_report(supabase, *, project_id, user_id, source_row, format_id, format_name, title, model_name, report):
+    """INSERT publisher_assessment ONLY; never update manuscript or session."""
     existing = (supabase.table("writersblock_project_drafts")
                 .select("version_number")
                 .eq("project_id", project_id).eq("user_id", user_id)
@@ -257,9 +326,9 @@ def save_report(supabase, *, project_id, user_id, final_row, format_id, format_n
     doc = {
         "schema_version": ASSESSMENT_SCHEMA_VERSION,
         "project_id": str(project_id), "format_id": format_id, "format_name": format_name,
-        "final_manuscript_id": str(final_row["id"]),
-        "final_manuscript_version": final_row.get("version_number"),
-        "manuscript_sha256": manuscript_digest(str(final_row.get("manuscript_content") or "").strip()),
+        "source_revision_id": str(source_row["id"]),
+        "source_revision_number": source_row.get("version_number"),
+        "manuscript_sha256": manuscript_digest(str(source_row.get("manuscript_content") or "").strip()),
         "title": title, "model": str(model_name or ""),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "report": report,
@@ -267,7 +336,7 @@ def save_report(supabase, *, project_id, user_id, final_row, format_id, format_n
     response = (supabase.table("writersblock_project_drafts").insert({
         "project_id": project_id,
         "user_id": user_id,
-        "draft_title": "Stage 6 — Publisher & Market Readiness Assessment",
+        "draft_title": "Stage 5 — Publisher & Market Readiness Assessment",
         "draft_type": REPORT_DRAFT_TYPE,
         "version_number": next_number,
         "draft_content": json.dumps(doc, ensure_ascii=False),
@@ -347,69 +416,98 @@ def show_report(st, *, report_document, title):
                        use_container_width=True)
 
 
-def render_stage6(st, *, supabase, backend, project_id, user_id, title, format_id, format_name):
-    st.header("📊 Stage 6 — Publisher & Market Readiness Assessment")
-    st.caption("Optional, independent assessment of a previously saved Final Manuscript. No changes to manuscript, Stage 5, saved V-number or Quill.")
-    st.info("Scores are AI editorial opinions, NOT validated Amazon sales predictions or publisher decisions. Live market statistics are not included.")
+def render_stage5(st, *, supabase, backend, project_id, user_id, title,
+                  revision_id, format_id, format_name):
+    st.header("📊 Stage 5 — Publisher & Market Readiness Assessment")
+    st.caption("Optional pre-publication assessment of your approved Stage 4 manuscript. Stage 6 handles final save, print and export.")
+    st.info("Scores are AI editorial opinions, not validated Amazon sales predictions or publisher decisions. Live market statistics are not included.")
+
+    def proceed_to_final():
+        st.session_state["project_stage"] = "Isolation Guardrail"
+        st.session_state["export_view"] = True
+        st.rerun()
+
     if st.session_state.get("demo_mode"):
-        st.warning("Publisher Assessment requires a licensed edition.")
+        st.warning("Publisher Assessment requires a licensed edition. You may skip to Stage 6.")
+        if st.button("Skip Assessment — Continue to Stage 6 Final Manuscript", type="primary"):
+            proceed_to_final()
         return
-    current_text = str(st.session_state.get("current_draft_output") or "").strip()
-    if not project_id or not user_id or not current_text:
-        st.warning("Load your saved project and save its Final Manuscript in Stage 5 before requesting an assessment.")
+    current_text = str(st.session_state.get("current_draft_output") or "")
+    if not project_id or not user_id or not current_text.strip():
+        st.warning("Load and approve the saved manuscript in Stage 4 first.")
         return
     try:
-        saved_final = find_saved_final(supabase, project_id=project_id, user_id=user_id,
-                                       current_text=current_text)
+        source = find_saved_editorial_revision(
+            supabase, project_id=project_id, user_id=user_id, revision_id=revision_id,
+            format_id=format_id, title=title, current_text=current_text,
+        )
     except Exception as exc:
-        st.error(f"Cannot verify the saved Final Manuscript: {exc}")
+        st.error(f"Cannot verify approved manuscript: {exc}")
         return
-    if not saved_final:
-        st.warning("This exact manuscript has not been confirmed as a saved FINAL checkpoint. Save it in Stage 5 first; no assessment has been generated.")
+    if not source:
+        st.warning("The exact Stage 4 approved manuscript could not be verified. Reload the saved revision and complete Stage 4; no assessment was generated.")
         return
-    text = str(saved_final["manuscript_content"] or "").strip()
+    # Only a verified exact saved editorial revision grants Stage 6 access.
+    # Merely opening Stage 5 or navigating a sidebar is not authorization.
+    st.session_state["_wbs_stage5_passport"] = (
+        str(project_id), str(revision_id), _normalized_text_signature(current_text))
+    text = str(source["manuscript_content"] or "").strip()
     if len(text) > MAX_MANUSCRIPT_CHARS or planned_api_calls(text) > MAX_CHUNKS + 1:
-        st.error("This manuscript is too long for the current Stage 6 assessment limit. Nothing was submitted to the AI.")
+        st.error("This manuscript is too long for the current assessment limit. You can still continue to Stage 6.")
+        if st.button("Skip Assessment — Continue to Stage 6 Final Manuscript", type="primary"):
+            proceed_to_final()
         return
-    st.write(f"**Project:** {title} · **Format:** {format_name} · **Saved manuscript:** V{saved_final.get('version_number')} · **Words:** {word_total(text):,}")
-    st.caption("Stage 6 reads the exact saved FINAL manuscript; it does not create or modify a manuscript revision.")
+    st.write(f"**Project:** {title} · **Format:** {format_name} · **Saved project revision:** V{source.get('version_number')} · **Words:** {word_total(text):,}")
+    st.caption("This assessment reads the saved editorial manuscript. It cannot create or modify a manuscript revision.")
     try:
         history = get_existing_reports(supabase, project_id=project_id, user_id=user_id,
-                                       final_row=saved_final, format_id=format_id)
+                                       source_row=source, format_id=format_id)
     except Exception as exc:
-        st.error(f"Saved assessment history is unavailable; evaluation blocked to avoid duplicate API usage: {exc}")
+        st.error(f"Saved assessment history unavailable; assessment blocked to avoid repeat API usage: {exc}")
         return
     if history:
         selected = st.selectbox("Saved assessment reports", range(len(history)),
                                 format_func=lambda i: f"Assessment {history[i][0].get('version_number')} — {history[i][1].get('created_at', '')[:16]}",
-                                key=f"wbs_stage6_report_{saved_final['id']}")
+                                key=f"wbs_stage5_report_{source['id']}")
         show_report(st, report_document=history[selected][1], title=title)
         st.markdown("---")
         rerun = st.checkbox("Run another assessment of the same saved manuscript (additional API usage)",
-                            key=f"wbs_stage6_another_{saved_final['id']}")
-        if not rerun:
-            return
+                            key=f"wbs_stage5_another_{source['id']}")
+    else:
+        rerun = True
+    # Optional by design: no AI request or report is required to continue.
+    st.divider()
+    if st.button("Continue to Stage 6 — Final Manuscript (Assessment Optional)",
+                 type="primary", use_container_width=True,
+                 key=f"wbs_stage5_continue_{source['id']}"):
+        proceed_to_final()
+    if not rerun:
+        return
     calls = planned_api_calls(text)
-    st.warning(f"A new assessment calls the AI approximately **{calls} time{'s' if calls != 1 else ''}** and incurs token usage. Previous saved reports reopen without API calls.")
+    st.warning(f"A new assessment calls the AI approximately **{calls} time{'s' if calls != 1 else ''}** and incurs token usage. Reopening a saved report makes no AI calls.")
     accepted = st.checkbox("I understand this is an optional paid-API assessment and not a sales guarantee.",
-                           key=f"wbs_stage6_consent_{saved_final['id']}")
-    if st.button("Evaluate Saved Final Manuscript", type="primary", use_container_width=True,
-                 disabled=(not accepted), key=f"wbs_stage6_evaluate_{saved_final['id']}"):
+                           key=f"wbs_stage5_consent_{source['id']}")
+    if st.button("Evaluate Approved Manuscript", type="primary", use_container_width=True,
+                 disabled=not accepted, key=f"wbs_stage5_evaluate_{source['id']}"):
         if not accepted:
             return
         try:
-            with st.spinner("Reviewing the saved manuscript (no manuscript edits)..."):
+            with st.spinner("Assessing the approved manuscript (no manuscript edits)..."):
                 report = generate_assessment(backend, title=title, format_name=format_name,
                                              format_id=format_id, manuscript=text)
-            doc = save_report(supabase, project_id=project_id, user_id=user_id,
-                              final_row=saved_final, format_id=format_id, format_name=format_name,
-                              title=title, model_name=getattr(backend, "model_name", ""), report=report)
+                # Check that the source approval is still current after the AI
+                # request, before saving the assessment (never a manuscript write).
+                checked = find_saved_editorial_revision(
+                    supabase, project_id=project_id, user_id=user_id,
+                    revision_id=revision_id, format_id=format_id, title=title,
+                    current_text=current_text)
+                if not checked or manuscript_digest(checked["manuscript_content"].strip()) != manuscript_digest(text):
+                    raise RuntimeError("The approved source changed during assessment. Report not saved.")
+                save_report(supabase, project_id=project_id, user_id=user_id, source_row=source,
+                            format_id=format_id, format_name=format_name, title=title,
+                            model_name=getattr(backend, "model_name", ""), report=report)
         except Exception as exc:
-            # A model call may already have incurred token charges. Never imply otherwise.
-            st.error(f"Stage 6 assessment could not be completed or saved: {exc}. Earlier API calls may still be billed.")
-            if "report" in locals():
-                st.warning("Assessment generated but not saved. It is shown below so you do not lose the result.")
-                show_report(st, report_document={"report": report}, title=title)
+            st.error(f"Publisher assessment failed: {exc}")
         else:
-            st.success("Publisher assessment saved separately. The manuscript and its revision remain unchanged.")
-            show_report(st, report_document=doc, title=title)
+            st.success("Publisher assessment saved separately. No manuscript or revision was changed.")
+            st.rerun()

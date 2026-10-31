@@ -7983,6 +7983,40 @@ def wbs_stage4_final_access_ready():
             and set(approval.get("approved") or []) == {1, 2, 3, 4})
 
 
+def wbs_editorial_ready_for_assessment():
+    """Read-only Stage 4 approval gate, scoped to this saved project/revision/text.
+
+    A four-scene manuscript needs all three explicit approvals. Non-scene
+    formats retain the existing editorial Integrity requirements.
+    """
+    manuscript = str(st.session_state.get("current_draft_output") or "")
+    project = str(get_active_project_id() or "")
+    row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
+    if not manuscript.strip() or not project or not row_id:
+        return False
+    if not wbs_stage4_final_access_ready():
+        return False
+    signature = get_text_signature(manuscript)
+    if project_integrity_review_applies():
+        if (not str(st.session_state.get("project_integrity_report") or "").strip()
+                or st.session_state.get("project_integrity_source_signature") != signature):
+            return False
+    blocks = st.session_state.get("scene_blocks") or {}
+    exact_four = (isinstance(blocks, dict)
+                  and {int(k) for k in blocks if str(k) in ("1", "2", "3", "4")} == {1, 2, 3, 4}
+                  and manuscript == "\n\n".join(str(blocks.get(n, blocks.get(str(n), ""))) for n in range(1, 5)))
+    if st.session_state.get("active_format_id") == "short_story" or exact_four:
+        approvals = wbs_stage4_final_status(
+            st.session_state.get("wbs_stage4_final_acceptance"),
+            get_project_title(), manuscript,
+            st.session_state.get("project_integrity_report") or "",
+            st.session_state.get("project_integrity_source_signature"),
+            True, project, row_id,
+        )
+        return all(approvals.values())
+    return True
+
+
 def wbs_request_stage_change(destination, export_view=None):
     """Go directly to the requested writing stage; never display a second save gate.
 
@@ -8022,7 +8056,7 @@ def wbs_request_stage_change(destination, export_view=None):
     target_level = 5 if destination == "Isolation Guardrail" and target_export else review_levels.get(destination, 99)
     if (destination == "Isolation Guardrail" and target_export
             and not wbs_stage4_final_access_ready()):
-        st.warning("Review and accept the complete four-scene story in Stage 4 before Final Manuscript.")
+        st.warning("Review and accept the complete story in Stage 4 before Final Manuscript.")
         return
     if target_level > wbs_reached_review_level(st.session_state):
         st.warning("This stage has not been developed yet.")
@@ -8067,6 +8101,12 @@ def wbs_reached_review_level(state):
     if str(state.get("current_draft_output") or "").strip() or str(state.get("rewritten_manuscript") or "").strip():
         level = max(level, 4)
     if str(state.get("final_output_text") or "").strip() or bool(state.get("export_view")):
+        level = max(level, 5)
+    # Visiting optional Stage 5 unlocks final output without forcing an AI call.
+    passport = (str(get_active_project_id() or ""),
+                str(state.get("_wbs_active_saved_session_row_id") or ""),
+                get_text_signature(state.get("current_draft_output") or ""))
+    if state.get("_wbs_stage5_passport") == passport and passport[0] and passport[1]:
         level = max(level, 5)
     if str(state.get("current_manuscript_save_status") or "").upper() == "FINAL":
         level = max(level, 5)
@@ -8126,33 +8166,50 @@ elif can_navigate_to_guardrail:
 else:
     st.sidebar.button("🔒 4. Editorial & Publisher Review (Locked)", key="nav_guard_locked", disabled=True, use_container_width=True)
 
-stage_8_label = "Manuscript Review" if st.session_state.get("demo_mode") else "Final Manuscript"
-if st.session_state.project_stage == "Isolation Guardrail" and st.session_state.get("export_view", False):
-    st.sidebar.button(f"🔵 5. {stage_8_label} (Active)", key="nav_export_active", use_container_width=True)
-elif _wbs_unlocked >= 5:
-    if st.sidebar.button(f"⚪ 5. {stage_8_label}", key="nav_export", use_container_width=True):
-        wbs_request_stage_change("Isolation Guardrail", export_view=True)
-else:
-    st.sidebar.button(f"🔒 5. {stage_8_label} (Locked)", key="nav_export_locked", disabled=True, use_container_width=True)
-
-# WBS STAGE 6 — separate publisher assessment (no Stage 5 implementation changes).
-# Sidebar access only after a FINAL manuscript exists; Stage 6 independently
-# verifies the exact user-owned saved FINAL record before any AI request.
+# The original saved internal stage IDs remain unchanged for project/session restoration.
+# New sequence: Stage 4 editorial approval -> Stage 5 optional publisher assessment
+# -> Stage 6 existing final save/print/export engine.
+_wbs_stage5_ready = (
+    not st.session_state.get("demo_mode")
+    and bool(get_active_project_id())
+    and wbs_editorial_ready_for_assessment()
+)
+_wbs_stage5_passport = (
+    str(get_active_project_id() or ""),
+    str(st.session_state.get("_wbs_active_saved_session_row_id") or ""),
+    get_text_signature(st.session_state.get("current_draft_output") or ""),
+)
+_wbs_stage5_visited = st.session_state.get("_wbs_stage5_passport") == _wbs_stage5_passport
 if st.session_state.project_stage == "Publisher Assessment":
-    st.sidebar.button("🔵 6. Publisher & Market Readiness (Active)",
+    st.sidebar.button("🔵 5. Publisher & Market Readiness (Active)",
                       key="nav_publisher_assessment_active", use_container_width=True)
-elif (not st.session_state.get("demo_mode")
-      and str(st.session_state.get("current_manuscript_save_status") or "").upper() == "FINAL"
-      and get_active_project_id()):
-    if st.sidebar.button("⚪ 6. Publisher & Market Readiness",
+elif _wbs_stage5_ready:
+    if st.sidebar.button("⚪ 5. Publisher & Market Readiness (Optional)",
                          key="nav_publisher_assessment", use_container_width=True):
         st.session_state.project_stage = "Publisher Assessment"
         st.session_state.export_view = False
         st.rerun()
 else:
-    st.sidebar.button("🔒 6. Publisher & Market Readiness (Locked)",
+    st.sidebar.button("🔒 5. Publisher & Market Readiness (Locked)",
                       key="nav_publisher_assessment_locked", disabled=True,
                       use_container_width=True)
+
+stage_8_label = "Manuscript Review" if st.session_state.get("demo_mode") else "Final Manuscript"
+_wbs_stage6_ready = (_wbs_stage5_ready and _wbs_stage5_visited)
+# Previously saved FINAL checkpoints must remain accessible after upgrading,
+# even if the older record predates the optional assessment stage.
+_wbs_legacy_final_exists = (
+    str(st.session_state.get("current_manuscript_save_status") or "").upper() == "FINAL"
+    and bool(get_active_project_id())
+    and wbs_stage4_final_access_ready()
+)
+if st.session_state.project_stage == "Isolation Guardrail" and st.session_state.get("export_view", False):
+    st.sidebar.button(f"🔵 6. {stage_8_label} (Active)", key="nav_export_active", use_container_width=True)
+elif _wbs_stage6_ready or _wbs_legacy_final_exists:
+    if st.sidebar.button(f"⚪ 6. {stage_8_label}", key="nav_export", use_container_width=True):
+        wbs_request_stage_change("Isolation Guardrail", export_view=True)
+else:
+    st.sidebar.button(f"🔒 6. {stage_8_label} (Locked)", key="nav_export_locked", disabled=True, use_container_width=True)
 
 st.sidebar.markdown("---")
 
@@ -8303,19 +8360,22 @@ SPARK_BANK = {
 }
 
 
-# Stage 6 lives in its own module and reads saved FINAL output only.
-# No Stage 5 rendering, saving, exporting or Quill logic is altered here.
+# Stage 5 is a separate, optional publisher assessment module. It reads
+# the exact saved Stage 4 editorial revision; it cannot alter manuscript text.
 if st.session_state.project_stage == "Publisher Assessment":
-    from wbs_publisher_assessment import render_stage6
+    from wbs_publisher_assessment import render_stage5
     _wbs_publisher_format = str(st.session_state.get("active_format_id") or "")
     if _wbs_publisher_format not in WBS_FORMAT_IDS:
         st.error("Saved writing format is unavailable. Reload the original project.")
+    elif not wbs_editorial_ready_for_assessment():
+        st.warning("Complete and save Stage 4 Editorial Review and Integrity before opening Stage 5.")
     else:
-        render_stage6(
+        render_stage5(
             st, supabase=supabase,
             backend=st.session_state.get("backend"),
             project_id=get_active_project_id(), user_id=get_current_user_id(),
-            title=get_project_title_for_display(),
+            title=get_project_title(),
+            revision_id=st.session_state.get("_wbs_active_saved_session_row_id"),
             format_id=_wbs_publisher_format,
             format_name=get_wbs_format_display_name(_wbs_publisher_format),
         )
@@ -11523,7 +11583,7 @@ elif st.session_state.project_stage == "Isolation Guardrail":
 
     # Step 8 is the only place where the neutral working manuscript is converted to an industry format.
     if st.session_state.get("export_view", False):
-        st.header("📤 Stage 5: Manuscript Review" if st.session_state.get("demo_mode") else "✅ Stage 5: Final Manuscript")
+        st.header("📤 Stage 6: Manuscript Review" if st.session_state.get("demo_mode") else "✅ Stage 6: Final Manuscript")
         render_project_title_banner("step_8_final_output_conversion")
         st.markdown("---")
 
@@ -11624,11 +11684,11 @@ elif st.session_state.project_stage == "Isolation Guardrail":
 
     if st.session_state.get("export_view", False):
         if st.session_state.get("demo_mode"):
-            st.header("📤 Stage 5: Manuscript Review")
+            st.header("📤 Stage 6: Manuscript Review")
             st.markdown("##### Review the completed manuscript. Final manuscript saving and printout are available in the full Writer Edition.")
         else:
-            st.header("📤 Stage 5: FINAL OUTPUT")
-            st.markdown("##### This is the final manuscript output stage. Save the final manuscript before downloading or starting a new project.")
+            st.header("📤 Stage 6: FINAL OUTPUT")
+            st.markdown("##### Stage 6 is final manuscript output. Save the final manuscript before downloading or starting a new project.")
         render_project_title_banner("step_8_manuscript_output")
     else:
         # Stage 4 only: reduce unused space above the central working column.
@@ -11950,7 +12010,10 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                 font-weight: 700 !important;
             }
             .st-key-review_current_integrity_report button:disabled {
-                opacity: .55 !important;
+                background-color: #151820 !important;
+                border: 1px solid #424957 !important;
+                color: #858b99 !important;
+                opacity: 1 !important;
                 cursor: not-allowed !important;
             }
             </style>""", unsafe_allow_html=True)
@@ -12017,10 +12080,10 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                 st.caption("All three final editorial acceptances are saved to the current revision.")
             else:
                 st.caption("Save the project title above and confirm the final manuscript and Integrity Report "
-                           "before continuing to Stage 5. You may return to any scene for changes.")
+                           "before continuing to Stage 5 Publisher Assessment. You may return to any scene for changes.")
         # OPTIONAL PUBLISHER READINESS — format-specific, read-only guidance.
         # No automatic rewriting, manuscript mutation, or extra AI generation.
-        st.subheader("📋 Optional Publisher Readiness Review")
+        st.subheader("📋 Optional Publisher Submission Checklist")
         st.caption(
             "Recommended for submission-oriented projects. This review is optional, "
             "does not alter your manuscript, and is not a substitute for an editor or a publisher's guidelines."
@@ -12105,7 +12168,7 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                        "For manuscript continuity and editorial flags, use Project Integrity / Final Review above.")
             if publisher_specific.strip():
                 st.info("Publisher-specific requirements recorded for this review. Confirm these manually against the finished submission.")
-            st.caption("You may continue to Final Output without completing this optional checklist.")
+            st.caption("This checklist is independent of the optional AI assessment in Stage 5.")
             
         if checklist_key == "picture_book" and str(st.session_state.get("current_draft_output") or "").strip():
             with st.expander("Picture Book — Illustration & Page Turn Suggestions", expanded=False):
@@ -12135,18 +12198,22 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                 all(_wbs_final_acceptances.values())
                 and not _wbs_title_has_unsaved_edit))
         )
-        if st.button("Proceed to Stage 5 — Final Manuscript", key="wbs_editorial_to_final", type="primary",
+        if st.button("Proceed to Stage 5 — Publisher & Market Readiness (Optional)",
+                     key="wbs_editorial_to_final", type="primary",
                      disabled=not _wbs_ready_for_final, use_container_width=True):
             if _wbs_ready_for_final:
-                wbs_request_stage_change("Isolation Guardrail", export_view=True)
-        # Stage 4 ends here. Draft history, download, and final approval belong to Stage 5.
+                st.session_state.project_stage = "Publisher Assessment"
+                st.session_state.export_view = False
+                st.rerun()
+        # Stage 4 ends here. Stage 5 publisher review is optional and separate;
+        # the unchanged save/print/export engine follows as Stage 6.
         st.stop()
     st.markdown("---")
 
     if st.session_state.get("export_view", False):
         st.info("✅ FINAL OUTPUT is ready. Save the final manuscript before downloading or starting a new project.")
     else:
-        st.info("This is a working draft. Editorial review does not automatically change or save it; Stage 5 handles final approval and export.")
+        st.info("This is a working draft. Stage 5 provides optional publisher assessment; Stage 6 handles final saving and export.")
 
     if not st.session_state.get("export_view", False):
         st.markdown("## 📝 DRAFT OUTPUT")
