@@ -11415,13 +11415,40 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             if not integrity_is_current and st.session_state.get("project_integrity_report"):
                 st.info("The manuscript has changed since the last Project Integrity review. Run the review again for the current manuscript.")
 
-            review_label = "REFRESH PROJECT INTEGRITY REVIEW" if integrity_is_current else "RUN PROJECT INTEGRITY FINAL REVIEW"
-            if st.button(
-                review_label,
-                key="run_project_integrity_final_review",
-                type="primary",
-                use_container_width=True,
-            ):
+            # A report inspection is free: only the explicit Run button calls AI.
+            # Bind the open state to this exact project, revision and manuscript,
+            # so an older report cannot be mistaken for the current one.
+            _wbs_integrity_review_identity = (
+                str(get_active_project_id() or "") + ":"
+                + str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
+                + ":" + source_signature
+            )
+            _wbs_report_visible = (
+                integrity_is_current
+                and st.session_state.get("_wbs_integrity_visible_identity")
+                    == _wbs_integrity_review_identity
+            )
+            _wbs_run_integrity_col, _wbs_view_integrity_col = st.columns(2, gap="small")
+            with _wbs_run_integrity_col:
+                _wbs_run_integrity = st.button(
+                    "Run Project Integrity Report",
+                    key="run_project_integrity_final_review",
+                    type="primary",
+                    use_container_width=True,
+                )
+            with _wbs_view_integrity_col:
+                _wbs_view_integrity = st.button(
+                    "Review Current Integrity Report",
+                    key="review_current_integrity_report",
+                    type="secondary",
+                    disabled=not integrity_is_current,
+                    use_container_width=True,
+                )
+            if _wbs_view_integrity:
+                st.session_state["_wbs_integrity_visible_identity"] = _wbs_integrity_review_identity
+                _wbs_report_visible = True
+
+            if _wbs_run_integrity:
                 with st.spinner("Running whole-manuscript Project Integrity review..."):
                     try:
                         integrity_report = run_project_integrity_final_review(current_source)
@@ -11433,6 +11460,8 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                         first_line = integrity_report.splitlines()[0].strip().upper() if integrity_report else ""
                         integrity_status = "PASS" if "OVERALL STATUS: PASS" in first_line else "WARNINGS"
                         st.session_state.project_integrity_status = integrity_status
+                        # Open the newly generated report below both buttons.
+                        st.session_state["_wbs_integrity_visible_identity"] = _wbs_integrity_review_identity
                         try:
                             persist_project_integrity_in_current_version(
                                 integrity_report, source_signature, integrity_status
@@ -11443,7 +11472,12 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                             st.success("Project Integrity saved in the current version — no new version created.")
                         st.rerun()
 
-            if integrity_is_current:
+            if integrity_is_current and not _wbs_report_visible:
+                st.info("A report for this exact manuscript is saved. "
+                        "Select Review Current Integrity Report to open it below. "
+                        "Reviewing a saved report does not use AI tokens.")
+
+            if integrity_is_current and _wbs_report_visible:
                 if st.session_state.get("project_integrity_status") == "PASS":
                     st.success("Project Integrity Review: PASS")
                 else:
@@ -11495,7 +11529,7 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                     ),
                     unsafe_allow_html=True,
                 )
-            else:
+            elif not integrity_is_current:
                 st.info("Run Project Integrity for the current saved manuscript. "
                         "It reads your saved corrections but does not alter them.")
                 if str(st.session_state.get("project_integrity_report") or "").strip():
