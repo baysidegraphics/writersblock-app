@@ -5729,7 +5729,10 @@ def render_project_title_banner(stage_key):
         with _current_col:
             _current_label = current_title + (" — " + revision_display if revision_display else "")
             st.markdown(
-                '<div class="wbs-stage4-current-title">'
+                # Offset the markdown-only display by the 14px extra widget
+                # spacing measured against Streamlit's adjacent native input.
+                # Visual correction only: read-only title and saved data untouched.
+                '<div class="wbs-stage4-current-title" style="position:relative;top:-14px">'
                 '<div class="wbs-title-caption">Current Project Title/Version</div>'
                 '<div class="wbs-title-value">' + html.escape(_current_label) + '</div>'
                 '</div>',
