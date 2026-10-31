@@ -9979,17 +9979,49 @@ if st.session_state.project_stage == "Plot Architect":
 
         _ss_footer_epoch = int(st.session_state.get("_wbs_ss_footer_epoch") or 0)
         _ss_footer_key = f"wbs_ss_save_continue_destination_{_ss_selected}_{_ss_footer_epoch}"
+        # Presentation only: give the SAVE & CONTINUE selector the same red
+        # button appearance as the adjacent primary Integrity button. Scope
+        # the CSS to this keyed container; every other dropdown is unchanged.
+        st.markdown("""<style>
+        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] [data-baseweb="select"] > div {
+            background-color: #ff4b4b !important;
+            border-color: #ff4b4b !important;
+            border-radius: 7px !important;
+            min-height: 35px !important;
+        }
+        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] [role="combobox"],
+        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] [role="combobox"] *,
+        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] [data-baseweb="select"] svg {
+            color: white !important;
+            fill: white !important;
+            -webkit-text-fill-color: white !important;
+            font-weight: 600 !important;
+        }
+        .st-key-wbs_ss_red_save_continue [data-testid="stSelectbox"] [data-baseweb="select"] > div:hover {
+            background-color: #f23d43 !important;
+            border-color: #f23d43 !important;
+        }
+        </style>""", unsafe_allow_html=True)
         _ss_continue_col, _ss_integrity_col = st.columns(2, gap="small")
         with _ss_continue_col:
-            _ss_destination = st.selectbox(
-                f"Save Scene {_ss_selected} & Continue To:",
-                options=[None, *_ss_destinations],
-                format_func=_ss_destination_label,
-                key=_ss_footer_key,
-                help="Choosing a destination saves the current scene to this revision, "
-                     "then opens that scene. Only the next unwritten scene can be generated.",
-                disabled=bool(st.session_state.get("demo_mode")),
-            )
+            # The button text itself occupies the dropdown, instead of a
+            # separate label above a gray input. Selection still performs the
+            # existing Save & Continue handler below; no changes to saving.
+            with st.container(key="wbs_ss_red_save_continue"):
+                st.markdown("&nbsp;", unsafe_allow_html=True)
+                _ss_destination = st.selectbox(
+                    f"Save Scene {_ss_selected} Changes and Continue to:",
+                    options=[None, *_ss_destinations],
+                    format_func=lambda value: (
+                        f"Save Scene {_ss_selected} Changes and Continue to:"
+                        if value is None else _ss_destination_label(value)
+                    ),
+                    key=_ss_footer_key,
+                    label_visibility="collapsed",
+                    help="Choose a destination to save this scene to the current revision "
+                         "and open it. Only the next unwritten scene can be generated.",
+                    disabled=bool(st.session_state.get("demo_mode")),
+                )
         with _ss_integrity_col:
             st.markdown(f"**Save Scene {_ss_selected} & Return:**")
             _ss_integrity_clicked = st.button(
