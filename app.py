@@ -5680,39 +5680,59 @@ def render_project_title_banner(stage_key):
         if _title_key not in st.session_state:
             st.session_state[_title_key] = ""
         _current_col, _rename_col, _save_col = st.columns([1.25, 1.25, .75], gap="small", vertical_alignment="bottom")
-        # Both title fields use native Streamlit inputs so the labels, text,
-        # field heights, and Save button align consistently on one row.
-        # Scope styling to this Stage 4 title row only; other fields are untouched.
+        # The read-only field is HTML to keep its value fully white. Match
+        # Streamlit's text-input dimensions precisely so all three controls
+        # line up along their bottom edges. Do not use a disabled input:
+        # Streamlit dims the entire control even with CSS color overrides.
         st.markdown("""<style>
-        [class*="st-key-wbs_stage4_title_readonly_"] input:disabled {
+        div[data-testid="stMarkdown"]:has(.wbs-stage4-current-title) {
+            margin: 0 !important;
+            padding: 0 !important;
+        }
+        .wbs-stage4-current-title {
+            box-sizing: border-box;
+            height: 68px;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            margin: 0;
+        }
+        .wbs-stage4-current-title .wbs-title-caption {
+            box-sizing: border-box;
+            height: 20px;
+            line-height: 20px;
+            margin: 0 0 8px 0;
+            color: #fff;
+            font-size: 0.875rem;
+            font-weight: 400;
+        }
+        .wbs-stage4-current-title .wbs-title-value {
+            box-sizing: border-box;
+            height: 40px;
+            min-height: 40px;
+            display: flex;
+            align-items: center;
+            padding: 0 12px;
+            border: 1px solid #656d79;
+            border-radius: 0.5rem;
+            background: #262b36;
             color: #fff !important;
-            -webkit-text-fill-color: #fff !important;
             opacity: 1 !important;
-            background-color: #262b36 !important;
-        }
-        [class*="st-key-wbs_stage4_title_readonly_"] input,
-        [class*="st-key-wbs_stage4_new_title_v1_"] input {
-            font-size: 1rem !important;
-            font-weight: 600 !important;
-            line-height: 1.5rem !important;
-        }
-        [class*="st-key-wbs_stage4_new_title_v1_"] input::placeholder {
-            font-size: 1rem !important;
+            font-size: 1rem;
+            font-weight: 600;
+            line-height: 1.5rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         </style>""", unsafe_allow_html=True)
         with _current_col:
             _current_label = current_title + (" — " + revision_display if revision_display else "")
-            # Display-only rather than a disabled Streamlit input: disabled
-            # widgets render their text gray regardless of theme overrides.
             st.markdown(
-                '<div style="height:24px;display:flex;align-items:center;'
-                'font-size:0.875rem;font-weight:400;margin-bottom:0.5rem;'
-                'color:#ffffff">Current Project Title/Version</div>'
-                '<div style="height:40px;box-sizing:border-box;display:flex;'
-                'align-items:center;padding:0 12px;border:1px solid #656d79;'
-                'border-radius:0.5rem;background:#262b36;color:#ffffff !important;'
-                'font-size:1rem;font-weight:600;line-height:1.5rem">'
-                + html.escape(_current_label) + '</div>',
+                '<div class="wbs-stage4-current-title">'
+                '<div class="wbs-title-caption">Current Project Title/Version</div>'
+                '<div class="wbs-title-value">' + html.escape(_current_label) + '</div>'
+                '</div>',
                 unsafe_allow_html=True,
             )
         with _rename_col:
