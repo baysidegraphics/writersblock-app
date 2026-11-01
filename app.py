@@ -7820,7 +7820,14 @@ with st.sidebar.container(border=True):
     else:
         st.write("License: Not Activated")
 
-    st.write(f"Current Project: {get_project_title_for_display()}")
+    # On an unsaved Concept project, the title widget may update after the sidebar
+    # renders. Display its live value without changing the saved master title.
+    _status_project_title = get_project_title_for_display()
+    if not get_active_project_id() and st.session_state.get("project_stage") == "Intake":
+        _pending_title = str(st.session_state.get("project_title_input") or "").strip()
+        if _pending_title:
+            _status_project_title = _pending_title
+    st.write(f"Current Project: {_status_project_title}")
 
     if st.session_state.get("project_scope") == "Book in a Series":
         st.write(
