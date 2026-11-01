@@ -8975,9 +8975,66 @@ if st.session_state.project_stage == "Intake":
         else:
             st.session_state.series_reference_ids = []
 
+        # Keep the author-selected Prose Tone visible alongside Stage 1 setup.
+        # Format-specific tone, source intake, and style controls are supplied by
+        # the active template so the lower half of Concept Development is no
+        # longer a generic story form.
+        tone_options = list(concept_ui.get("tone_options") or [
+            "Professional", "Warm", "Serious", "Humorous", "Suspenseful", "Cinematic"
+        ])
+        # All writing formats: retain every existing tone and allow vivid prose.
+        # Existing saved tone selections remain unchanged on reload.
+        if "Vivid & Descriptive" not in tone_options:
+            tone_options.append("Vivid & Descriptive")
+        tone_label = str(concept_ui.get("tone_label") or "Tone / Aesthetic:")
+        current_tone = str(st.session_state.get("tone_style") or "")
+        default_tone_index = tone_options.index(current_tone) if current_tone in tone_options else 0
+
+        _tone_col, _tone_spacer = st.columns([3.0, 1.2])
+        with _tone_col:
+            st.session_state.tone_style = st.selectbox(
+                tone_label,
+                tone_options,
+                index=default_tone_index,
+                key=f"tone_style_{st.session_state.active_format_id}",
+            )
+
         # Render the selected format's independent development fields.
         # Common WritersBlock controls (title, source/premise, dialogue style) remain shared.
         render_active_format_development_fields()
+
+        # Story Premise is always visible with Central Conflict and Subplots.
+        # For imported/saved/Quill sources it is read-only until the writer
+        # explicitly chooses the Custom Plot Line source; do not mutate those modes.
+        _wbs_premise_mode = str(
+            st.session_state.get("version_source_mode")
+            or st.session_state.get("starting_source_mode")
+            or "Custom Plot Line"
+        )
+        _wbs_premise_editable = _wbs_premise_mode in ("Custom Plot Line", "Story Idea")
+        _wbs_premise_current = str(
+            st.session_state.get("story_seed")
+            or st.session_state.get("wbs_project_original_concept")
+            or ""
+        )
+        st.markdown("#### Story Premise")
+        _wbs_premise_text = st.text_area(
+            "Story Premise:",
+            value=_wbs_premise_current,
+            height=210,
+            key=f"custom_plot_line_input_{st.session_state.active_format_id}",
+            disabled=not _wbs_premise_editable,
+            help="The author's story blueprint. Used with Central Conflict and Subplots to develop Plot A, B and C.",
+        )
+        if _wbs_premise_editable:
+            st.session_state.story_seed = _wbs_premise_text
+            _wbs_premise_words = count_words(_wbs_premise_text)
+            st.caption(f"{_wbs_premise_words:,} / 1,000 words")
+            if _wbs_premise_words > 1000:
+                st.warning("This entry exceeds the 1,000-word Concept Development limit.")
+        else:
+            st.caption("Select the Enter Your Own Premise starting source below to edit this field.")
+
 
         # The project format is selected once from the Format Template dropdown
         # beneath the WritersBlock header. Do not ask for the same format twice.
@@ -9064,29 +9121,6 @@ if st.session_state.project_stage == "Intake":
             # not an artificial dialogue percentage.
             st.session_state.dialogue_style = "Story-Driven / Automatic"
 
-
-        # Format-specific tone, source intake, and style controls are supplied by
-        # the active template so the lower half of Concept Development is no
-        # longer a generic story form.
-        tone_options = list(concept_ui.get("tone_options") or [
-            "Professional", "Warm", "Serious", "Humorous", "Suspenseful", "Cinematic"
-        ])
-        # All writing formats: retain every existing tone and allow vivid prose.
-        # Existing saved tone selections remain unchanged on reload.
-        if "Vivid & Descriptive" not in tone_options:
-            tone_options.append("Vivid & Descriptive")
-        tone_label = str(concept_ui.get("tone_label") or "Tone / Aesthetic:")
-        current_tone = str(st.session_state.get("tone_style") or "")
-        default_tone_index = tone_options.index(current_tone) if current_tone in tone_options else 0
-
-        _tone_col, _tone_spacer = st.columns([3.0, 1.2])
-        with _tone_col:
-            st.session_state.tone_style = st.selectbox(
-                tone_label,
-                tone_options,
-                index=default_tone_index,
-                key=f"tone_style_{st.session_state.active_format_id}",
-            )
 
         st.markdown("---")
         st.markdown(f"### {concept_ui.get('source_heading') or 'Choose a Starting Point'}")
@@ -9216,24 +9250,7 @@ if st.session_state.project_stage == "Intake":
         elif selected_seed == custom_plot_option:
             st.session_state.version_source_mode = "Custom Plot Line"
             st.session_state.starting_source_mode = "Custom Plot Line"
-            custom_value = str(
-                st.session_state.get("story_seed")
-                or st.session_state.get("wbs_project_original_concept")
-                or ""
-            )
-            st.session_state.story_seed = st.text_area(
-                str(concept_ui.get("custom_label") or "Enter Your Project Premise:"),
-                value=custom_value,
-                height=170,
-                key=f"custom_plot_line_input_{st.session_state.active_format_id}",
-                placeholder=(
-                    "Describe what you want to create in your own words. Quill will use this concept/brief, together with the selected template, to guide development."
-                ),
-            )
-            custom_word_count = count_words(st.session_state.story_seed)
-            st.caption(f"{custom_word_count:,} / 1,000 words")
-            if custom_word_count > 1000:
-                st.warning("This entry exceeds the 1,000-word Concept Development limit.")
+            st.caption("The Story Premise field is above, alongside the other Stage 1 development information.")
 
         elif selected_seed == quill_start_option:
             st.session_state.version_source_mode = "Quill Assisted"
