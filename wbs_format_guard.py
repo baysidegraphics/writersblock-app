@@ -37,15 +37,6 @@ LEGACY_FORMAT_IDS.update({
 # Reused for loads from older project-session snapshots that omitted newer keys.
 # No keys connected to access, licensing, authentication, or secrets belong here.
 PROJECT_RESTORE_DEFAULTS = {
-    "_wbs_picture_book_budget_age": '',
-    "picture_book_word_target": None,
-    "concept_change_areas": [],
-    "project_version_name": 'Original',
-    "quill_starting_direction": '',
-    "saved_version_source_word_count": 0,
-    "saved_version_source_name": '',
-    "saved_version_source_text": '',
-    "version_source_mode": 'Custom Plot Line',
     "project_stage": "Intake",
     "story_seed": "",
     "wbs_project_original_concept": "",
@@ -137,15 +128,12 @@ def resolve_saved_format(snapshot: dict) -> str:
     return fmt
 
 
-def prepare_saved_snapshot(snapshot: dict, row_project_id: object = None,
-                           selected_format_id: str | None = None) -> dict:
+def prepare_saved_snapshot(snapshot: dict, row_project_id: object = None) -> dict:
     """Return validated, normalized, independent project state; never mutate inputs."""
     fmt = resolve_saved_format(snapshot)
     snapshot_pid = snapshot.get("current_project_id")
     if row_project_id and snapshot_pid and str(row_project_id) != str(snapshot_pid):
         raise SavedFormatError("Project-session record does not match its project ID.")
-    if selected_format_id is not None:
-        fmt = require_format_id(selected_format_id)
     normalized = {key: deepcopy(value) for key, value in PROJECT_RESTORE_DEFAULTS.items()}
     for key in PROJECT_RESTORE_DEFAULTS:
         if key in snapshot:
@@ -158,7 +146,7 @@ def prepare_saved_snapshot(snapshot: dict, row_project_id: object = None,
         all_values = {}
     normalized["format_template_values"] = {
         k: deepcopy(v) for k, v in all_values.items()
-        if k == fmt and isinstance(v, dict)
+        if k in FORMAT_LEGACY and isinstance(v, dict)
     }
     return normalized
 
