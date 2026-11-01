@@ -378,6 +378,22 @@ class WBSExecutionBridge:
                 or _dialogue_packet(state)
             )
 
+            # Stage 2: pass the complete Stage 1 premise, conflict, subplot and
+            # premise-fidelity rules to the model, not merely to adapter metadata.
+            # The adapter previously captured format_development_context but the
+            # backend never received it, so the rules had no effect on plots.
+            premise_contract = _clean(
+                payload.get("format_development_context")
+                or state.get("format_development_context")
+                or state.get("active_format_development_context")
+            )
+            if premise_contract:
+                story_seed = _append_packet(
+                    story_seed,
+                    "AUTHOR'S BINDING STAGE 1 DEVELOPMENT SPECIFICATION "
+                    "(all plot options must obey):\n" + premise_contract,
+                )
+
             return {
                 "story_seed": story_seed,
                 "format_type": _append_packet(format_context, dialogue_packet),
@@ -413,6 +429,19 @@ class WBSExecutionBridge:
                 or state.get("series_aware_story_seed")
                 or _series_aware_source(state)
             )
+            # Preserve the same authoritative Stage 1 context when expanding
+            # a selected path into scene beats; never use option prose alone.
+            premise_contract = _clean(
+                payload.get("format_development_context")
+                or state.get("format_development_context")
+                or state.get("active_format_development_context")
+            )
+            if premise_contract:
+                story_seed = _append_packet(
+                    story_seed,
+                    "AUTHOR'S BINDING STAGE 1 DEVELOPMENT SPECIFICATION "
+                    "(every beat must follow):\n" + premise_contract,
+                )
             plot_dialogue_context = _clean(
                 payload.get("plot_dialogue_context")
                 or state.get("plot_dialogue_context")

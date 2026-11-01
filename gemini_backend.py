@@ -74,19 +74,38 @@ Generate exactly 3 unique narrative direction slates matching these distinct str
 Classic, genre-compliant, stable framework maximizing standard user/audience expectations.
 
 ### Option B: The Conceptual Subversion
-Inverted framework, ironic twists, altered perspectives, or non-linear setups.
+Alter the order of REVELATION, viewpoint emphasis, or thematic framing, but NEVER
+alter the established plot events, identities, causal facts, or stated outcome.
 
 ### Option C: The High-Impact Track
-Pacing-forward framework, heavy sensory engagement, rapid escalation, immediate hooks.
+Increase urgency and momentum without skipping the original cause of the story,
+required intermediate developments, or any aftermath following the climax.
 
-For each option, provide 2-3 strong paragraphs with this structure:
-- Title line
-- Overview paragraph
-- Narrative Direction paragraph
-- Tone / Structure paragraph
+AUTHOR'S PREMISE IS BINDING — ALL WRITING FORMATS:
+- The Core Input Seed includes the writer's Story Premise, Central Conflict and
+  Subplot and may contain an explicitly labeled Stage 1 specification. Treat all
+  three as required source facts, not inspiration to create a substitute storyline.
+- Retain every substantive author-supplied occurrence, its cause and consequence,
+  including material from the FIRST and LAST paragraphs. Never invent an ending
+  that replaces the one the author specified.
+- Each option must trace the whole causal sequence: origin/opening, central
+  conflict, subplot, complications and twists, crisis, climax, aftermath and
+  the actual final outcome. The climax is NOT the ending if the premise continues.
+- For every option identify the specific events and their consequences in story
+  terms. Do not substitute generic phrases such as 'a shocking final image'.
+- A/B/C vary the narrative delivery, pacing and emphasis, NEVER the facts,
+  plot destination or resolution supplied by the author.
+- Favor inclusion over omission. Develop, connect and enrich all supplied plot
+  information; the writer can subsequently remove unwanted details.
+- Before replying, cross-check EACH option against every explicit key event in
+  the provided Stage 1 material; revise any option with missing plot events.
 
-Each option must be detailed enough for a creator to choose a story direction.
-Do not write the full story. Do not be vague. Do not shorten to only 2-3 sentences.
+For EACH option return a title and clear plot-development sections covering:
+Opening/Origin; Central Conflict; Subplot; Escalation and Twists; Climax;
+Aftermath and Ending. Use concrete events, not generalized marketing language.
+Keep each option detailed enough to map the complete intended story, while
+remaining a plot plan rather than finished prose. Return all three options in
+sections headed exactly '### Option A', '### Option B', and '### Option C'.
 """
 
         try:
@@ -112,28 +131,14 @@ Do not write the full story. Do not be vague. Do not shorten to only 2-3 sentenc
             return slates
 
         except Exception as e:
+            # Fail closed. Invented generic fallback plots must never be displayed
+            # or mistaken for premise-compliant author choices.
             return {
                 "is_fallback": True,
                 "error_message": str(e),
-                "Option A": (
-                    f"FALLBACK OPTION A — Structural Core\n\n"
-                    f"Overview: This path treats the seed as a clean four-act short story built around a strong central mystery: '{story_seed}'. "
-                    f"The creator gets a reliable dramatic spine: a clear opening hook, a steadily tightening second act, a third-act revelation that changes the meaning of the event, and a final consequence that leaves the reader with a strong last image.\n\n"
-                    f"Narrative Direction: Beat 1 establishes the ordinary world and the impossible intrusion. Beat 2 removes easy explanations and increases pressure. Beat 3 reveals that the anomaly is not random but connected to a hidden truth, past crime, curse, machine, memory, or character secret. Beat 4 resolves the immediate story while leaving a final sting, reversal, or consequence.\n\n"
-                    f"Tone / Structure: Keep the {tone_style} tone consistent while making each beat serve a different purpose. Do not let the scenes repeat the same escalation. The structure should feel classic, readable, and creator-friendly, with enough room for later free-form rewrite instructions."
-                ),
-                "Option B": (
-                    f"FALLBACK OPTION B — Conceptual Subversion\n\n"
-                    f"Overview: This path reframes the premise from an unexpected angle. Instead of treating '{story_seed}' as a straightforward mystery, the story gradually reveals that the apparent threat may be a mirror, trap, confession, test, or punishment designed around the protagonist’s own hidden history.\n\n"
-                    f"Narrative Direction: Beat 1 begins with the object/event appearing external and unexplained. Beat 2 makes the protagonist investigate while unknowingly exposing personal guilt, obsession, or denial. Beat 3 twists the story by revealing that the anomaly is responding to the protagonist, not merely happening around them. Beat 4 concludes with a reversal: the protagonist is judged, replaced, consumed, or forced to understand the truth too late.\n\n"
-                    f"Tone / Structure: Use the {tone_style} atmosphere to make the reader question what is real, what is remembered, and what is being hidden. The story should still resolve clearly, but the emotional meaning should shift in the third act."
-                ),
-                "Option C": (
-                    f"FALLBACK OPTION C — High-Impact Track\n\n"
-                    f"Overview: This path begins close to the crisis and uses the seed as an immediate pressure device: '{story_seed}'. The story should feel urgent, visual, and hook-heavy, built for strong reader momentum.\n\n"
-                    f"Narrative Direction: Beat 1 opens with the problem already active. Beat 2 accelerates sensory pressure and forces desperate action. Beat 3 delivers a hard reveal or reversal that makes the protagonist’s earlier choices dangerous. Beat 4 lands with a sharp final consequence, preferably a memorable last image or cyclical ending that suggests the danger continues.\n\n"
-                    f"Tone / Structure: Preserve the {tone_style} mood but avoid slow setup. Each beat should increase urgency in a different way: physical pressure, psychological pressure, revelation, then consequence."
-                ),
+                "Option A": "",
+                "Option B": "",
+                "Option C": "",
             }
 
     def generate_plot_outline(self, chosen_option, option_text, story_seed, format_type, tone_style, author_style=""):
@@ -156,6 +161,22 @@ PROFILE: {option_text}
 SEED: {story_seed}
 FORMAT: {format_type}
 TONE: {tone_style}
+
+MANDATORY PLOT FIDELITY FOR EVERY FORMAT:
+- SEED contains the Stage 1 premise, conflict and subplot; it is the binding
+  source of the actual events and outcome. PROFILE controls only presentation.
+- Expand the author-established opening and causal history into Beat 1 and
+  subsequent beats as needed. Never discard backstory simply because an
+  option starts in the middle of the action.
+- Carry the author's conflict and subplot through concrete consequences.
+- Include the full climax AND any subsequent rescue, intervention, aftermath,
+  restoration, epilogue or final twist the author specified. A climactic blast,
+  death or confrontation is not automatically the ending.
+- The fourth beat must include the author's complete stated ending, not an
+  invented cliffhanger or substitute last image.
+- Preserve all named characters, important events, chronology and causality.
+- Expand detail rather than omit author-supplied events. No new contradictory
+  storyline; verify all key facts before returning.
 
 Audio Short Story Rule:
 If FORMAT is "Audio Short Story — 15–30 min", construct the outline as a narration-ready short audio story designed for a 15–30 minute listening experience.
