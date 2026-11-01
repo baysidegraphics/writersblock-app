@@ -9635,7 +9635,27 @@ if st.session_state.project_stage == "Intake":
                     prepared_context={
                         "series_aware_story_seed": get_series_aware_story_seed(),
                         "scripting_format_context": get_scripting_format_context(),
-                        "format_development_context": get_full_project_continuity_context(),
+                        "format_development_context": get_full_project_continuity_context() + (
+                            "\n\nSTAGE 2 — AUTHOR PREMISE IS THE STORY AUTHORITY (ALL FORMATS):\n"
+                            "Use the Stage 1 author-supplied premise as the narrative foundation. "
+                            "Produce THREE distinct DEVELOPMENT APPROACHES (A/B/C) to that SAME story, "
+                            "never three unrelated or replacement stories. Each approach must carry "
+                            "the premise's recognizable beginning/backstory, core characters and "
+                            "relationships, setting, central conflict, major causal events, and "
+                            "author-indicated outcome through a coherent beginning, middle, climax, "
+                            "and resolution. You may vary entry point (including in medias res), "
+                            "pacing, point of emphasis, reveals, subplot arrangements and suspense, "
+                            "but explain how earlier events are revealed and how the stated ending "
+                            "is reached. Invent appropriate plot complications, meaningful twists "
+                            "and character development consistent with the author's direction; "
+                            "do not discard, contradict, or replace the stated ending. "
+                            "A dramatic climax is NOT a substitute for the author's aftermath. "
+                            "If the premise is open-ended, propose plausible outcomes clearly "
+                            "as suggestions, not established facts. Each option must explicitly "
+                            "describe its beginning, development, climax and outcome in prose "
+                            "appropriate to the active writing format. Never include internal "
+                            "generation instructions in the displayed story text.\n"
+                        ),
                         "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
                         "quill_template_context": refresh_quill_template_context(),
                     },
