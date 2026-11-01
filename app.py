@@ -2677,6 +2677,14 @@ def render_active_format_development_fields():
             with col:
                 if field.get("type") == "select":
                     options = list(field.get("options") or [])
+                    # Shared Concept Development author/influence selection across formats.
+                    if ("author" in key.lower() or "author" in label.lower()
+                            or key == "production_influence"
+                            or "writing influence" in label.lower()):
+                        if "Arthur C. Clarke" not in options:
+                            custom_index = next((i for i, item in enumerate(options)
+                                                 if "custom" in str(item).lower() or "other" == str(item).strip().lower()), len(options))
+                            options.insert(custom_index, "Arthur C. Clarke")
                     if (("genre" in key.lower() or "genre" in label.lower())
                             and "Spiritual" not in options):
                         options.append("Spiritual")
@@ -3910,7 +3918,19 @@ def run_project_integrity_final_review(manuscript_text):
     # into the stored manuscript or change its text. Use actual four-scene blocks.
     _ir_blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
     _ir_titles = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
-    if (set(_ir_blocks) == {1, 2, 3, 4}
+    _novel_ir_blocks = (wbs_novel_blocks(st.session_state.get("scene_blocks") or {})
+                        if st.session_state.get("active_format_id") == "novel_prose_novella" else {})
+    if (_novel_ir_blocks and set(_novel_ir_blocks) == set(range(1, max(_novel_ir_blocks) + 1))
+            and manuscript_text == wbs_novel_manuscript(_novel_ir_blocks).strip()):
+        _ir_annotated = "\n\n".join(
+            f"[CHAPTER {n}]\n" + _novel_ir_blocks[n] + f"\n[END CHAPTER {n}]"
+            for n in sorted(_novel_ir_blocks))
+        _ir_scene_guidance = (
+            "The manuscript contains CHAPTER boundary labels used solely for the integrity audit. "
+            "For every warning identify the actual chapter number and paragraph number, "
+            "and quote a short exact passage. Cross-chapter contradictions must identify "
+            "both affected chapters. Do not treat boundary labels as story prose.")
+    elif (set(_ir_blocks) == {1, 2, 3, 4}
             and manuscript_text == wbs_ss_storyline(_ir_blocks).strip()):
         _ir_annotated = "\n\n".join(
             f"[SCENE {n} — {_ir_titles.get(n, (f'Scene {n}',))[0]}]\n"
@@ -9820,6 +9840,75 @@ elif st.session_state.project_stage == "Sandbox":
                     int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 3)
                 st.rerun()
 
+# WBS FIXES-4 — Novel/Novella helpers. Other writing formats are not modified.
+def wbs_novel_blocks(source):
+    if not isinstance(source, dict):
+        return {}
+    blocks = {}
+    for key, value in source.items():
+        try:
+            number = int(key)
+        except (TypeError, ValueError):
+            continue
+        if number > 0 and isinstance(value, str) and value.strip():
+            blocks[number] = value
+    return blocks
+
+
+def wbs_novel_manuscript(blocks):
+    return "\n\n".join(wbs_novel_blocks(blocks)[number]
+                         for number in sorted(wbs_novel_blocks(blocks)))
+
+
+def wbs_novel_save_chapters(changed, previous_source):
+    """Save chapter corrections in the selected existing revision only; no INSERT."""
+    project_id = get_active_project_id()
+    user_id = get_current_user_id()
+    row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
+    if not (project_id and user_id and row_id):
+        raise RuntimeError("Load and save a project revision before editing chapters.")
+    old_blocks = wbs_novel_blocks(st.session_state.get("scene_blocks") or {})
+    if set(changed) != set(old_blocks) or not all(str(v or "").strip() for v in changed.values()):
+        raise ValueError("All saved chapters must remain present and nonempty.")
+    if str(st.session_state.get("current_draft_output") or "").strip() != previous_source:
+        raise RuntimeError("The working manuscript changed. Reload it before saving corrections.")
+    updated = {int(k): str(v) for k, v in changed.items()}
+    if updated == old_blocks:
+        return False
+    result = (supabase.table("writersblock_project_drafts")
+              .select("id, draft_content").eq("id", row_id)
+              .eq("project_id", project_id).eq("user_id", user_id)
+              .eq("draft_type", "project_session").limit(1).execute())
+    rows = getattr(result, "data", None) or []
+    if len(rows) != 1:
+        raise RuntimeError("The exact saved revision could not be verified.")
+    snapshot = json.loads(rows[0].get("draft_content") or "{}")
+    if snapshot.get("active_format_id") != "novel_prose_novella":
+        raise RuntimeError("The saved revision is not a Novel/Novella.")
+    saved_blocks = wbs_novel_blocks(snapshot.get("scene_blocks") or {})
+    if saved_blocks != old_blocks or str(snapshot.get("current_draft_output") or "").strip() != previous_source:
+        raise RuntimeError("The saved revision has changed. Reload before editing.")
+    manuscript = wbs_novel_manuscript(updated)
+    snapshot["scene_blocks"] = {str(k): v for k, v in updated.items()}
+    snapshot["current_draft_output"] = manuscript
+    snapshot["project_integrity_report"] = ""
+    snapshot["project_integrity_source_signature"] = ""
+    snapshot["project_integrity_status"] = ""
+    saved = (supabase.table("writersblock_project_drafts")
+             .update({"draft_content": json.dumps(snapshot)})
+             .eq("id", row_id).eq("project_id", project_id)
+             .eq("user_id", user_id).eq("draft_type", "project_session").execute())
+    if not getattr(saved, "data", None):
+        raise RuntimeError("Chapter corrections could not be saved.")
+    st.session_state.scene_blocks = updated
+    st.session_state.current_draft_output = manuscript
+    for key in ("project_integrity_report", "project_integrity_source_signature", "project_integrity_status"):
+        st.session_state[key] = ""
+    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
+    st.session_state["_wbs_last_saved_project_id"] = str(project_id)
+    return True
+
+
 # SHORT STORY SCENE SCRIPTING — independent of other format pipelines.
 # Existing stage identifiers and Supabase revision IDs are not changed.
 def wbs_ss_blocks(source):
@@ -11144,6 +11233,8 @@ if st.session_state.project_stage == "Plot Architect":
 elif st.session_state.project_stage in ["Drafting", "Drafting Engine"]:
     require_product_access("drafting")
 
+    _wbs_novel_draft = st.session_state.get("active_format_id") == "novel_prose_novella"
+    _wbs_unit = "Chapter" if _wbs_novel_draft else "Scene Block"
     st.header("📄 Generating Your Creative Draft")
     st.caption("WBS is writing the approved story sections in sequence and preserving continuity. Each section is generated only once.")
     render_project_title_banner("step_4_creative_draft")
@@ -11237,7 +11328,7 @@ elif st.session_state.project_stage in ["Drafting", "Drafting Engine"]:
         else:
             st.session_state.current_processing_beat = total_beats + 1
 
-        recommended_scene_word_count = 1200
+        recommended_scene_word_count = 2000 if _wbs_novel_draft else 1200
         audiobook_scene_instruction = ""
 
         if is_picture_book_project():
@@ -11359,14 +11450,14 @@ Keep this scene close to its assigned target so the completed manuscript remains
 
             chapter_title = st.text_input(
                 "Chapter / Scene Title:",
-                value=f"Scene Block {st.session_state.current_processing_beat}",
+                value=f"{_wbs_unit} {st.session_state.current_processing_beat}",
                 key=f"chapter_title_{st.session_state.current_processing_beat}"
             )
 
             target_word_count = st.number_input(
-                "Target Word Count Per Scene Block:",
+                "Target Word Count Per Chapter:" if _wbs_novel_draft else "Target Word Count Per Scene Block:",
                 min_value=50,
-                max_value=2500,
+                max_value=6000 if _wbs_novel_draft else 2500,
                 value=recommended_scene_word_count,
                 step=25,
                 key=f"target_word_count_{st.session_state.current_processing_beat}"
@@ -11553,7 +11644,7 @@ STORY OUTLINE:
                                 supabase.table("writersblock_project_drafts").insert({
                                     "project_id": _project_id,
                                     "user_id": get_current_user_id(),
-                                    "draft_title": f"Scene Block {current_scene_number}",
+                                    "draft_title": f"{_wbs_unit} {current_scene_number}",
                                     "draft_type": "scene_draft",
                                     "draft_content": _review,
                                     "version_number": current_scene_number,
@@ -11586,11 +11677,11 @@ STORY OUTLINE:
                         st.rerun()
                 st.info("Your generated scene has not been added. Edit and accept it, or discard and regenerate.")
 
-            btn_label = f"Execute Scene Block {current_scene_number} of {total_beats} ⚡"
+            btn_label = f"Execute {_wbs_unit} {current_scene_number} of {total_beats} ⚡"
 
             # Explicit writer action only. Never generate scene blocks on navigation or rerun.
             # Preserve existing scene text and all saved revision records.
-            if st.button(f"Develop Scene Block {current_scene_number} — Writer Approval Required", key=f"wbs_manual_scene_{current_scene_number}", use_container_width=True):
+            if st.button(f"Develop {_wbs_unit} {current_scene_number} — Writer Approval Required", key=f"wbs_manual_scene_{current_scene_number}", use_container_width=True):
                 require_product_access("drafting")
                 require_demo_action_available("draft_scene", current_scene_number)
                 current_beat_data = filtered_beats[current_scene_number - 1]
@@ -11737,7 +11828,7 @@ Write ONLY this single scene block. Do not repeat earlier scenes. Do not summari
                             supabase.table("writersblock_project_drafts").insert({
                                 "project_id": active_project_id,
                                 "user_id": get_current_user_id(),
-                                "draft_title": f"Scene Block {current_scene_number}",
+                                "draft_title": f"{_wbs_unit} {current_scene_number}",
                                 "draft_type": "scene_draft",
                                 "draft_content": narrative_text,
                                 "version_number": current_scene_number
@@ -11895,14 +11986,45 @@ elif st.session_state.project_stage == "Isolation Guardrail":
         render_project_title_banner("step_5_script_lock")
         current_source = str(st.session_state.get("current_draft_output") or "").strip()
         source_signature = get_text_signature(current_source)
-        _wbs_review_blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
+        _wbs_novel_active = st.session_state.get("active_format_id") == "novel_prose_novella"
+        _wbs_review_blocks = (wbs_novel_blocks(st.session_state.get("scene_blocks") or {})
+                              if _wbs_novel_active else wbs_ss_blocks(st.session_state.get("scene_blocks") or {}))
+        _wbs_novel_complete = (bool(_wbs_review_blocks)
+                               and set(_wbs_review_blocks) == set(range(1, max(_wbs_review_blocks) + 1))
+                               and current_source == wbs_novel_manuscript(_wbs_review_blocks)) if _wbs_novel_active else False
         _wbs_exact_four = (set(_wbs_review_blocks) == {1, 2, 3, 4}
-                           and current_source == wbs_ss_storyline(_wbs_review_blocks))
+                           and current_source == wbs_ss_storyline(_wbs_review_blocks)) if not _wbs_novel_active else False
         st.markdown("### Complete Manuscript — Review & Correct")
         st.caption("The full story is shown in order with permanent scene labels. "
                    "Edit any or all scenes here, then click Save Manuscript Corrections once. "
                    "No AI is used when saving; run Integrity again after the save.")
-        if _wbs_exact_four:
+        if _wbs_novel_active and _wbs_novel_complete:
+            _wbs_chapter_scope = (str(get_active_project_id() or "") + "_"
+                                  + str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
+                                  + "_" + source_signature[:16])
+            st.caption(f"{len(_wbs_review_blocks)} saved chapters · {count_words(current_source):,} words")
+            with st.form(key="wbs_novel_chapter_review_" + _wbs_chapter_scope):
+                _novel_changed = {}
+                for _n in sorted(_wbs_review_blocks):
+                    st.markdown(f"#### Chapter {_n}")
+                    _novel_changed[_n] = st.text_area(
+                        f"Chapter {_n} text", value=_wbs_review_blocks[_n],
+                        height=350, key=f"wbs_novel_review_{_n}_{_wbs_chapter_scope}",
+                        disabled=bool(st.session_state.get("demo_mode")))
+                _novel_submit = st.form_submit_button(
+                    "Save Manuscript Corrections", type="primary",
+                    disabled=bool(st.session_state.get("demo_mode")), use_container_width=True)
+            if _novel_submit:
+                try:
+                    changed = wbs_novel_save_chapters(_novel_changed, current_source)
+                except Exception as exc:
+                    st.error(f"Chapter corrections were not saved: {exc}")
+                else:
+                    st.session_state["_wbs_stage4_corrections_notice"] = (
+                        "Chapter corrections saved. Run Project Integrity again." if changed
+                        else "No chapter changes detected.")
+                    st.rerun()
+        elif _wbs_exact_four:
             _wbs_scene_titles = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
             _wbs_editor_tag = (str(get_active_project_id() or "") + "_"
                                + str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
