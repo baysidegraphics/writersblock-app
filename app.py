@@ -2625,43 +2625,6 @@ def get_active_format_development_context():
     return "\n".join(lines).strip()
 
 
-# WBS UNIVERSAL STAGE 2 STORY-PREMISE AUTHORITY — all writing formats.
-# Scope: generation context only; no saved versions, stage layout, or backend writes.
-WBS_STAGE2_PLOT_INTENT = """
-STAGE 2 — PLOT ARCHITECTURE: AUTHOR-PREMISE FIRST (ALL WRITING FORMATS).
-The Stage 1 author-supplied premise is the primary creative authority, not merely
-an optional theme. Generate THREE distinct ways to DEVELOP THAT SAME STORY.
-Each A/B/C option must establish a coherent beginning, middle, escalation,
-climax, and outcome in the format-appropriate scale. Preserve the premise's
-recognizable characters, identities, time period, setting, central conflict,
-causal direction and explicitly supplied outcome/ending. A plot option may
-begin in medias res or change presentation order, but must make the necessary
-backstory understandable and must still reach the premise's established ending.
-Develop fresh, logical subplots, obstacles, discoveries, emotional turns and
-surprising twists that SUPPORT and CONNECT the author's established events.
-Do not quietly omit or contradict foundational events, replace the central
-conflict, substitute a different ending, or turn the writer's resolution into
-an unanswered cliffhanger. Do not invent a replacement finale when the author
-has specified one. When the premise leaves a genuine gap, invent a plausible
-connection consistent with its intent, without implying the author specified it.
-A, B and C must differ meaningfully in structure, emphasis, pacing and dramatic
-technique — NOT in ownership of the story or its intended destination.
-BEFORE RETURNING ALL THREE OPTIONS, internally check each against the Stage 1
-premise for a recognizable setup, coherent causality, and faithful intended
-resolution; revise any option that fails. Keep the writer-facing prose focused
-on the story rather than instruction or analysis.
-""".strip()
-
-
-def wbs_stage2_author_premise_context():
-    """Stage-2-only instruction. Does not change legacy stage persistence."""
-    author_premise = str(st.session_state.get("wbs_project_original_concept") or
-                         st.session_state.get("story_seed") or "").strip()
-    return (WBS_STAGE2_PLOT_INTENT +
-            "\n\nAUTHOR'S STAGE 1 PREMISE (PRESERVE ITS DIRECTION AND OUTCOME):\n" +
-            (author_premise or "[Use the current saved Stage 1 source exactly as supplied.]"))
-
-
 def get_full_project_continuity_context():
     """Bounded, shared creative reference for all WBS production stages.
 
@@ -9672,7 +9635,7 @@ if st.session_state.project_stage == "Intake":
                     prepared_context={
                         "series_aware_story_seed": get_series_aware_story_seed(),
                         "scripting_format_context": get_scripting_format_context(),
-                        "format_development_context": wbs_stage2_author_premise_context() + "\n\n" + get_full_project_continuity_context(),
+                        "format_development_context": get_full_project_continuity_context(),
                         "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
                         "quill_template_context": refresh_quill_template_context(),
                     },
@@ -10409,7 +10372,7 @@ if st.session_state.project_stage == "Plot Architect":
                 prepared_context={
                     "series_aware_story_seed": get_series_aware_story_seed(),
                     "effective_format_type": get_effective_format_type(),
-                    "format_development_context": wbs_stage2_author_premise_context() + "\n\n" + get_full_project_continuity_context(),
+                    "format_development_context": get_full_project_continuity_context(),
                     "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
                     "quill_template_context": refresh_quill_template_context(),
                     "initial_scene_length_guidance": _wbs_plot_length_guidance,
