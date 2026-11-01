@@ -717,7 +717,7 @@ def render_save_as_named_version_control(location_key):
 
 
 def save_current_project_session_to_supabase(version_name=None, save_as_new_version=False):
-    """First save creates the master; all subsequent changed saves make versions.
+    """First save creates V-1; routine stage saves remain on the active V-n.
 
     Never edit an existing snapshot and never silently rename the parent project.
     Stage checkpoint callers use this same protection in ALL formats.
@@ -805,6 +805,55 @@ def save_current_project_session_to_supabase(version_name=None, save_as_new_vers
         if changed is None:
             st.error("Saved-version baseline is unavailable. Reload this project before saving; nothing was written.")
             return None
+
+    # SHARED BACKEND RULE: only explicit Save as New Version increments V-n.
+    if master_saved and not save_as_new_version:
+        row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "").strip()
+        if not row_id:
+            st.error("Exact active revision cannot be verified. Reload the saved project; nothing was changed.")
+            return None
+        try:
+            rows = (supabase.table("writersblock_project_drafts")
+                    .select("id, project_id, user_id, version_number, draft_content")
+                    .eq("id", row_id).eq("project_id", project_id)
+                    .eq("user_id", user_id).eq("draft_type", "project_session")
+                    .limit(1).execute()).data or []
+            if len(rows) != 1:
+                raise ValueError("The selected revision was not found")
+            previous = json.loads(rows[0].get("draft_content") or "{}")
+            if not isinstance(previous, dict):
+                raise ValueError("Saved revision is invalid")
+            previous_format = str(previous.get("active_format_id") or "")
+            if previous_format != snapshot.get("active_format_id"):
+                raise ValueError("Saved format does not match the active writing format")
+            previous_id = str(previous.get("current_project_id") or project_id)
+            if previous_id != str(project_id):
+                raise ValueError("Saved project identity mismatch")
+            # Keep the revision's existing identity, and retain separately
+            # persisted review metadata if it isn't in the live snapshot.
+            snapshot["project_version_name"] = previous.get("project_version_name") or "Original"
+            snapshot["concept_change_areas"] = previous.get("concept_change_areas") or []
+            for review_key in ("project_integrity_report", "project_integrity_source_signature",
+                               "project_integrity_status"):
+                if not snapshot.get(review_key) and previous.get(review_key):
+                    snapshot[review_key] = previous[review_key]
+            updated = (supabase.table("writersblock_project_drafts")
+                       .update({"draft_content": json.dumps(snapshot)})
+                       .eq("id", row_id).eq("project_id", project_id)
+                       .eq("user_id", user_id).eq("draft_type", "project_session")
+                       .execute())
+            if not getattr(updated, "data", None):
+                raise RuntimeError("Save not confirmed by database")
+        except Exception as exc:
+            st.error(f"Current revision was not saved: {exc}")
+            return None
+        st.session_state.last_saved_project_at = snapshot.get("saved_at")
+        st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
+        st.session_state["_wbs_last_saved_project_id"] = str(project_id)
+        st.session_state["_wbs_active_saved_session_row_id"] = row_id
+        st.session_state["_wbs_loaded_saved_session_id"] = row_id
+        set_loaded_concept_version_baseline(snapshot)
+        return SimpleNamespace(unchanged=False, updated_current=True, data=updated.data)
 
     changed_areas = get_changed_concept_version_areas()
     requested_version_name = clean_project_version_name(
@@ -9615,10 +9664,9 @@ if st.session_state.project_stage == "Intake":
                 mark_demo_action_used("sandbox")
 
                 if _wbs_create_saved_first_paths:
-                    # INSERT ONLY: V-1 remains intact, first generated paths
-                    # are committed as the next saved project version (V-2).
+                    # Routine initial plot paths are saved within current V-n.
                     first_paths_save = save_current_project_session_to_supabase(
-                        version_name="First Scripting Paths", save_as_new_version=True,
+                        version_name="First Scripting Paths", save_as_new_version=False,
                     )
                     if not first_paths_save or getattr(first_paths_save, "unchanged", False):
                         st.error(
