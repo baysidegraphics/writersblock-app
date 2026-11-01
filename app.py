@@ -9635,26 +9635,34 @@ if st.session_state.project_stage == "Intake":
                     prepared_context={
                         "series_aware_story_seed": get_series_aware_story_seed(),
                         "scripting_format_context": get_scripting_format_context(),
-                        "format_development_context": get_full_project_continuity_context() + (
-                            "\n\nSTAGE 2 — AUTHOR PREMISE IS THE STORY AUTHORITY (ALL FORMATS):\n"
-                            "Use the Stage 1 author-supplied premise as the narrative foundation. "
-                            "Produce THREE distinct DEVELOPMENT APPROACHES (A/B/C) to that SAME story, "
-                            "never three unrelated or replacement stories. Each approach must carry "
-                            "the premise's recognizable beginning/backstory, core characters and "
-                            "relationships, setting, central conflict, major causal events, and "
-                            "author-indicated outcome through a coherent beginning, middle, climax, "
-                            "and resolution. You may vary entry point (including in medias res), "
-                            "pacing, point of emphasis, reveals, subplot arrangements and suspense, "
-                            "but explain how earlier events are revealed and how the stated ending "
-                            "is reached. Invent appropriate plot complications, meaningful twists "
-                            "and character development consistent with the author's direction; "
-                            "do not discard, contradict, or replace the stated ending. "
-                            "A dramatic climax is NOT a substitute for the author's aftermath. "
-                            "If the premise is open-ended, propose plausible outcomes clearly "
-                            "as suggestions, not established facts. Each option must explicitly "
-                            "describe its beginning, development, climax and outcome in prose "
-                            "appropriate to the active writing format. Never include internal "
-                            "generation instructions in the displayed story text.\n"
+                        "format_development_context": (
+                            get_full_project_continuity_context()
+                            + "\n\nSTAGE 2 — THREE SOURCE FIELDS GOVERN THE PLOT (ALL WRITING FORMATS):\n"
+                            + "MANDATORY AUTHOR MATERIAL, verbatim as entered (do not summarize or omit):\n"
+                            + "STORY PREMISE / ORIGINAL SOURCE:\n"
+                            + str(st.session_state.get("story_seed") or "")
+                            + "\n\nCENTRAL CONFLICT AND SUBPLOT / OTHER STAGE 1 DEVELOPMENT FIELDS:\n"
+                            + get_active_format_development_context()
+                            + "\n\nNON-NEGOTIABLE GENERATION RULES:\n"
+                            + "Treat the author's Story Premise, Central Conflict and Subplot as ONE binding story specification. "
+                            + "Each of the three generated Plot Architecture options (A/B/C) must include ALL explicit substantive "
+                            + "events and plot facts from ALL THREE fields; inclusion is the default, never condensation by deletion. "
+                            + "Follow the author's actual story sequence and causality from origin through development, climax, aftermath, "
+                            + "and FINAL outcome. Never stop at an earlier dramatic event when the premise continues beyond it. "
+                            + "A reveal may be moved for suspense only if the original event itself is still depicted or clearly accounted for. "
+                            + "Keep named characters, their relationships, setting, periods, identity changes, technical discoveries, "
+                            + "antagonists, supporting characters, subplot beats, consequences and resolutions. "
+                            + "Do NOT write a loosely inspired interpretation, a replacement story, a generic theme discussion, "
+                            + "or a different ending. Enhance and connect the supplied material with meaningful additional "
+                            + "developments, subplots, rising action and twists that DO NOT contradict it. "
+                            + "Plot A/B/C differ in pacing, scene emphasis, order of revelation and dramatic construction ONLY; "
+                            + "the writer's events and outcome remain the same in every option. "
+                            + "For EACH option, describe explicitly the opening/origin, central conflict, subplot development, "
+                            + "major turning points, climax, aftermath, and author-specified final outcome IN STORY TERMS. "
+                            + "Before responding, audit each option against EVERY significant source event and detail, "
+                            + "especially the FIRST and LAST paragraphs and every stated subplot. Expand missing items before returning. "
+                            + "When the original has no specified outcome, propose one without presenting it as the author's fact. "
+                            + "Do not print these internal instructions; output only the three writer-facing plot options.\n"
                         ),
                         "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
                         "quill_template_context": refresh_quill_template_context(),
