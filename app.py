@@ -387,6 +387,20 @@ def wbs_merge_live_concept_widgets_into_snapshot(snapshot, fmt):
                 value = value.isoformat()
             values[name] = value
     snapshot["format_template_values"] = {fmt: values}
+
+    # Stage 1 sidebar saves run BEFORE the center-panel widgets are rendered.
+    # Copy the live, project/format/revision-scoped values into the snapshot;
+    # otherwise an old generic widget (or old session value) can be saved.
+    if st.session_state.get("project_stage") == "Intake":
+        tone_key = get_active_format_widget_key("concept_prose_tone")
+        if tone_key in st.session_state:
+            snapshot["tone_style"] = str(st.session_state[tone_key] or "")
+        premise_key = get_active_format_widget_key("concept_story_premise")
+        source_mode = str(snapshot.get("version_source_mode") or
+                          snapshot.get("starting_source_mode") or "")
+        if (source_mode in {"Custom Plot Line", "Story Idea"}
+                and premise_key in st.session_state):
+            snapshot["story_seed"] = str(st.session_state[premise_key] or "")
     return snapshot
 
 
@@ -1009,6 +1023,12 @@ def clear_concept_widget_state_for_loaded_project():
         key_text = str(key)
         if key_text in exact_keys or any(key_text.startswith(prefix) for prefix in prefix_keys):
             st.session_state.pop(key, None)
+
+    # A saved V-n may be reopened in the same browser after viewing/editing it.
+    # Its widget keys otherwise retain the old on-screen value and override
+    # that revision's freshly loaded, authoritative snapshot.
+    for field_name in ("concept_prose_tone", "concept_story_premise"):
+        st.session_state.pop(get_active_format_widget_key(field_name), None)
 
 
 def get_best_saved_manuscript_source(source=None):
@@ -8992,17 +9012,23 @@ if st.session_state.project_stage == "Intake":
             tone_options.append("Vivid & Descriptive")
         tone_label = str(concept_ui.get("tone_label") or "Tone / Aesthetic:")
         current_tone = str(st.session_state.get("tone_style") or "")
+        # The saved choice takes priority over the template default.  Streamlit
+        # ignores index= when a keyed widget already exists, so each revision
+        # needs its own scoped control and initial value.
+        if current_tone and current_tone not in tone_options:
+            tone_options.append(current_tone)
         default_tone_index = tone_options.index(current_tone) if current_tone in tone_options else 0
+        _wbs_tone_widget_key = get_active_format_widget_key("concept_prose_tone")
+        if _wbs_tone_widget_key not in st.session_state:
+            st.session_state[_wbs_tone_widget_key] = tone_options[default_tone_index]
 
         _tone_col, _tone_spacer = st.columns([3.0, 1.2])
         with _tone_col:
             st.session_state.tone_style = st.selectbox(
                 tone_label,
                 tone_options,
-                index=default_tone_index,
-                key=f"tone_style_{st.session_state.active_format_id}",
+                key=_wbs_tone_widget_key,
             )
-
 
         # Story Premise is always visible with Central Conflict and Subplots.
         # For imported/saved/Quill sources it is read-only until the writer
@@ -9018,12 +9044,17 @@ if st.session_state.project_stage == "Intake":
             or st.session_state.get("wbs_project_original_concept")
             or ""
         )
+        _wbs_premise_widget_key = get_active_format_widget_key("concept_story_premise")
+        # On a saved project's first render, seed from its loaded snapshot.
+        # When non-editable, always mirror the authoritative story text (e.g.
+        # after Quill generates or a saved source is selected), not stale UI.
+        if _wbs_premise_widget_key not in st.session_state or not _wbs_premise_editable:
+            st.session_state[_wbs_premise_widget_key] = _wbs_premise_current
         st.markdown("#### Story Premise")
         _wbs_premise_text = st.text_area(
             "Story Premise:",
-            value=_wbs_premise_current,
             height=210,
-            key=f"custom_plot_line_input_{st.session_state.active_format_id}",
+            key=_wbs_premise_widget_key,
             disabled=not _wbs_premise_editable,
             help="The author's story blueprint. Used with Central Conflict and Subplots to develop Plot A, B and C.",
         )
