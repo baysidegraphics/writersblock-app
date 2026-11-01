@@ -2689,7 +2689,7 @@ def render_active_format_development_fields():
                             and any(re.search(r"(?:20,?000|20\s*k)\s*[-–—to]+\s*(?:40,?000|40\s*k)", str(opt), re.I)
                                     for opt in options)
                             and any(term in (key + " " + label).lower()
-                                    for term in ("length", "word", "size"))):
+                                    for term in ("length", "word", "size", "scale"))):
                         if "Less than 20,000 words" not in options:
                             options.insert(0, "Less than 20,000 words")
                     # Shared Concept Development author/influence selection across formats.
