@@ -8979,6 +8979,31 @@ if st.session_state.project_stage == "Intake":
         # Common WritersBlock controls (title, source/premise, dialogue style) remain shared.
         render_active_format_development_fields()
 
+        # Keep the author-selected Prose Tone visible alongside Stage 1 setup.
+        # Format-specific tone, source intake, and style controls are supplied by
+        # the active template so the lower half of Concept Development is no
+        # longer a generic story form.
+        tone_options = list(concept_ui.get("tone_options") or [
+            "Professional", "Warm", "Serious", "Humorous", "Suspenseful", "Cinematic"
+        ])
+        # All writing formats: retain every existing tone and allow vivid prose.
+        # Existing saved tone selections remain unchanged on reload.
+        if "Vivid & Descriptive" not in tone_options:
+            tone_options.append("Vivid & Descriptive")
+        tone_label = str(concept_ui.get("tone_label") or "Tone / Aesthetic:")
+        current_tone = str(st.session_state.get("tone_style") or "")
+        default_tone_index = tone_options.index(current_tone) if current_tone in tone_options else 0
+
+        _tone_col, _tone_spacer = st.columns([3.0, 1.2])
+        with _tone_col:
+            st.session_state.tone_style = st.selectbox(
+                tone_label,
+                tone_options,
+                index=default_tone_index,
+                key=f"tone_style_{st.session_state.active_format_id}",
+            )
+
+
         # Story Premise is always visible with Central Conflict and Subplots.
         # For imported/saved/Quill sources it is read-only until the writer
         # explicitly chooses the Custom Plot Line source; do not mutate those modes.
@@ -9011,30 +9036,6 @@ if st.session_state.project_stage == "Intake":
         else:
             st.caption("Select the Enter Your Own Premise starting source below to edit this field.")
 
-
-        # Keep the author-selected Prose Tone visible alongside Stage 1 setup.
-        # Format-specific tone, source intake, and style controls are supplied by
-        # the active template so the lower half of Concept Development is no
-        # longer a generic story form.
-        tone_options = list(concept_ui.get("tone_options") or [
-            "Professional", "Warm", "Serious", "Humorous", "Suspenseful", "Cinematic"
-        ])
-        # All writing formats: retain every existing tone and allow vivid prose.
-        # Existing saved tone selections remain unchanged on reload.
-        if "Vivid & Descriptive" not in tone_options:
-            tone_options.append("Vivid & Descriptive")
-        tone_label = str(concept_ui.get("tone_label") or "Tone / Aesthetic:")
-        current_tone = str(st.session_state.get("tone_style") or "")
-        default_tone_index = tone_options.index(current_tone) if current_tone in tone_options else 0
-
-        _tone_col, _tone_spacer = st.columns([3.0, 1.2])
-        with _tone_col:
-            st.session_state.tone_style = st.selectbox(
-                tone_label,
-                tone_options,
-                index=default_tone_index,
-                key=f"tone_style_{st.session_state.active_format_id}",
-            )
 
         # The project format is selected once from the Format Template dropdown
         # beneath the WritersBlock header. Do not ask for the same format twice.
