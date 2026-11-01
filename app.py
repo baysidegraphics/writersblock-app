@@ -1332,8 +1332,14 @@ def load_saved_project_session_to_state(saved_session_row):
         normalized_raw["project_title"] = parent_project_title
     normalized_raw["format_template_values"] = {restored_format_id: dict(per_format.get(restored_format_id) or {})}
     try:
-        verified = prepare_saved_snapshot(normalized_raw, load_project_id, restored_format_id)
-    except SavedFormatError as exc:
+        # Format guard accepts the saved snapshot and project ID only.
+        # Verify the restored ID separately; never load a different format.
+        normalized_raw["active_format_id"] = restored_format_id
+        normalized_raw["format_type"] = WBS_LEGACY_FORMAT_BY_TEMPLATE_ID[restored_format_id]
+        verified = prepare_saved_snapshot(normalized_raw, load_project_id)
+        if not isinstance(verified, dict) or verified.get("active_format_id") != restored_format_id:
+            raise SavedFormatError("Saved writing format could not be verified.")
+    except (SavedFormatError, TypeError) as exc:
         st.error(f"Saved project could not be loaded: {exc}")
         return False
     for key, value in verified.items():
@@ -2677,6 +2683,15 @@ def render_active_format_development_fields():
             with col:
                 if field.get("type") == "select":
                     options = list(field.get("options") or [])
+                    # Novel/Novella: allow economical short test manuscripts while
+                    # preserving every existing production-length choice.
+                    if (st.session_state.get("active_format_id") == "novel_prose_novella"
+                            and any(re.search(r"(?:20,?000|20\s*k)\s*[-–—to]+\s*(?:40,?000|40\s*k)", str(opt), re.I)
+                                    for opt in options)
+                            and any(term in (key + " " + label).lower()
+                                    for term in ("length", "word", "size"))):
+                        if "Less than 20,000 words" not in options:
+                            options.insert(0, "Less than 20,000 words")
                     # Shared Concept Development author/influence selection across formats.
                     if ("author" in key.lower() or "author" in label.lower()
                             or key == "production_influence"
@@ -9007,6 +9022,10 @@ if st.session_state.project_stage == "Intake":
         tone_options = list(concept_ui.get("tone_options") or [
             "Professional", "Warm", "Serious", "Humorous", "Suspenseful", "Cinematic"
         ])
+        # All writing formats: retain every existing tone and allow vivid prose.
+        # Existing saved tone selections remain unchanged on reload.
+        if "Vivid & Descriptive" not in tone_options:
+            tone_options.append("Vivid & Descriptive")
         tone_label = str(concept_ui.get("tone_label") or "Tone / Aesthetic:")
         current_tone = str(st.session_state.get("tone_style") or "")
         default_tone_index = tone_options.index(current_tone) if current_tone in tone_options else 0
