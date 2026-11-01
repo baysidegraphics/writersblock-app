@@ -413,7 +413,7 @@ def show_report(st, *, report_document, title):
     st.download_button("Download Publisher Assessment (.docx)", data=assessment_docx(title, report_document),
                        file_name=f"{safe_name}_publisher_assessment.docx",
                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                       use_container_width=True)
+                       type="primary", use_container_width=True)
 
 
 
@@ -574,12 +574,9 @@ def render_stage5(st, *, supabase, backend, project_id, user_id, title,
                                 format_func=lambda i: f"Assessment {history[i][0].get('version_number')} — {history[i][1].get('created_at', '')[:16]}",
                                 key=f"wbs_stage5_report_{source['id']}")
         show_report(st, report_document=history[selected][1], title=title)
-        st.markdown("---")
-        rerun = st.checkbox("Run another assessment of the same saved manuscript (additional API usage)",
-                            key=f"wbs_stage5_another_{source['id']}")
+        # An existing saved assessment is displayed without any new API request.
+        # Stage 5 deliberately offers no repeat-assessment action for the same revision.
     else:
-        rerun = True
-    if rerun:
         calls = planned_api_calls(text)
         st.warning(f"A new assessment calls the AI approximately **{calls} time{'s' if calls != 1 else ''}** and incurs token usage. Reopening a saved report makes no AI calls.")
         accepted = st.checkbox("I understand this is an optional paid-API assessment and not a sales guarantee.",

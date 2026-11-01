@@ -11845,11 +11845,11 @@ elif st.session_state.project_stage == "Isolation Guardrail":
             )
         )
         if not _wbs_final_integrity_current:
-            st.warning("Return to Stage 4 and run Project Integrity before final saving.")
+            st.warning("Return to Stage 4 and run Project Integrity before downloading the final manuscript.")
+        st.caption("Your final manuscript was already saved and approved in Stage 4; no additional save is needed.")
         if st.session_state.get("demo_mode"):
-            if st.button("Save Final Manuscript 🔒", key="trial_final_manuscript_save_step5"):
-                full_version_only_notice("Saved Versions")
-            if st.button("Download / Print Manuscript (.docx) 🔒", key="trial_download_final_converted_output", use_container_width=True):
+            if st.button("Download / Print Manuscript (.docx) 🔒", type="primary",
+                         key="trial_download_final_converted_output", use_container_width=True):
                 full_version_only_notice("Manuscript Printout")
         else:
             if selected_final_format == PICTURE_BOOK_FORMAT:
@@ -11864,48 +11864,14 @@ elif st.session_state.project_stage == "Isolation Guardrail":
                 )
             project_stem = safe_download_stem(get_project_title_for_display(), "writersblock_project")
             format_stem = safe_download_stem(get_automatic_output_label(selected_final_format), "final_output")
-            save_column, print_column = st.columns(2, gap="small")
-            with save_column:
-                # Final is a separate manuscript checkpoint; V-6 saved project
-                # session is never silently overwritten or incremented.
-                _wbs_final_saved_proof = st.session_state.get("_wbs_final_saved_proof")
-                _wbs_this_final_proof = (
-                    str(get_active_project_id() or ""),
-                    str(st.session_state.get("_wbs_active_saved_session_row_id") or ""),
-                    source_signature,
-                )
-                if st.button(
-                    "💾 Save Final Manuscript",
-                    key="wbs_stage5_save_final_manuscript",
-                    type="primary",
-                    use_container_width=True,
-                    disabled=(not _wbs_final_integrity_current or
-                              not wbs_stage4_final_access_ready() or
-                              _wbs_final_saved_proof == _wbs_this_final_proof),
-                ):
-                    try:
-                        result = save_manuscript_checkpoint(
-                            status="FINAL", stage_label="Manuscript Output",
-                            source_stage="final_output",
-                        )
-                    except Exception as exc:
-                        st.error(f"Final manuscript save failed: {exc}")
-                    else:
-                        if result.get("status") == "saved":
-                            st.session_state["_wbs_final_saved_proof"] = _wbs_this_final_proof
-                            st.success("Final manuscript saved. The original project V-number was preserved.")
-                        else:
-                            st.error("Final manuscript was not saved. Your manuscript has not been changed.")
-                if _wbs_final_saved_proof == _wbs_this_final_proof:
-                    st.success("Final manuscript saved.")
-            with print_column:
-                st.download_button(
-                    label="🖨️ Download / Print Manuscript (.docx)",
-                    data=docx_bytes,
-                    file_name=f"{project_stem}_{format_stem}_final.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True,
-                )
+            st.download_button(
+                label="🖨️ Download / Print Manuscript (.docx)",
+                data=docx_bytes,
+                file_name=f"{project_stem}_{format_stem}_final.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                type="primary",
+                use_container_width=True,
+            )
 
         st.stop()
 
