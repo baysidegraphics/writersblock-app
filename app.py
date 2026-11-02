@@ -1282,6 +1282,8 @@ def load_saved_project_session_to_state(saved_session_row):
     st.session_state.pop("_wbs_stage1_continue_approval", None)
     st.session_state.pop("_wbs_stage2_choose_new", None)
     st.session_state.pop("_wbs_stage2_pending_path", None)
+    st.session_state.pop("_wbs_stage2_regen_unsaved", None)
+    st.session_state.pop("_wbs_stage2_regen_preview", None)
     if not saved_session_row:
         st.warning("No saved project session found.")
         return False
@@ -7227,6 +7229,167 @@ def ai_output_is_usable(output):
     return not any(phrase in lowered for phrase in blocked_phrases)
 
 
+# WBS_STAGE2_PREMISE_COMPLETE_REGEN_20261101
+# Plot regeneration is preview-only until the author manually saves. This
+# NEVER inserts a new version unless Save Version As is explicitly clicked.
+def wbs_stage2_complete_plot_source_packet():
+    """Pass the actual complete author text to the model, not cached plots."""
+    original = str(st.session_state.get("story_seed") or "").strip()
+    if not original:
+        return ""
+    fields = get_active_format_template_values()
+    conflict = str(fields.get("central_conflict") or "").strip()
+    subplot = str(fields.get("subplot_direction") or "").strip()
+    return "\n\n".join((
+        "THIS IS A REQUEST FOR THREE FULL PLOT PLANS, NOT THREE NEW STORIES.",
+        "ORIGINAL AUTHOR'S STORY PREMISE — COMPLETE, BINDING:\n" + original,
+        "AUTHOR'S CENTRAL CONFLICT — BINDING:\n" + (conflict or "Not separately supplied"),
+        "AUTHOR'S SUBPLOT — BINDING:\n" + (subplot or "Not separately supplied"),
+        "OTHER FORMAT-SPECIFIC DEVELOPMENT SETTINGS:\n" + get_active_format_development_context(),
+        "AUTHOR'S FINAL SOURCE PASSAGE — DO NOT OMIT OR REPLACE ITS EVENTS:\n" + original[-2400:],
+        "RULES FOR EACH OF OPTION A, OPTION B AND OPTION C: All author-specified "
+        "events, character identities, causes, consequences, subplot, climax, "
+        "intervention or rescue, aftermath, restoration, memory changes, and "
+        "final outcome MUST be represented explicitly. The original ending "
+        "is binding, not a suggested alternative. Beginning and ending must "
+        "both survive. Vary ONLY pacing, emphasis, and order of revelation. "
+        "Never replace the story with an inspired-by version. Expand each "
+        "option into concrete Opening/Origin, Central Conflict, Subplot, "
+        "Escalation and Twists, Climax, and Aftermath and Ending. "
+        "Before delivering each option, compare it to every sentence of the "
+        "author's premise, including its final passage. Restore any omitted "
+        "events. Output only the three detailed writer-facing plots."
+    ))
+
+
+def wbs_stage2_regenerated_plots_usable(slates):
+    """Fail closed on empty, trivial, or incomplete three-path responses."""
+    if not isinstance(slates, dict) or not sandbox_output_is_usable(slates):
+        return False
+    if slates.get("is_fallback"):
+        return False
+    for option in ("Option A", "Option B", "Option C"):
+        text = str(slates.get(option) or "").strip()
+        if len(re.findall(r"\b\w+\b", text)) < 125:
+            return False
+        text_lower = text.lower()
+        if not any(word in text_lower for word in ("ending", "aftermath", "resolution", "finally")):
+            return False
+    return True
+
+
+def wbs_stage2_verify_regen_source():
+    """Require the exact saved project/revision and unmodified Concept fields."""
+    project_id = str(get_active_project_id() or "")
+    row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
+    user_id = str(get_current_user_id() or "")
+    fmt = str(st.session_state.get("active_format_id") or "")
+    if not (project_id and row_id and user_id and fmt == "novel_prose_novella"):
+        raise ValueError("Load the exact saved Novel/Novella revision first.")
+    current_unsaved = st.session_state.get("_wbs_stage2_regen_unsaved")
+    source_identity = (project_id, row_id, fmt,
+                       get_text_signature(wbs_stage2_complete_plot_source_packet()))
+    has_staged_plots = current_unsaved == source_identity
+    if wbs_work_has_changed() is not False and not has_staged_plots:
+        raise ValueError("Save or reload Concept Development changes before regenerating plots.")
+    rows = (supabase.table("writersblock_project_drafts")
+            .select("id,project_id,user_id,draft_type,draft_content")
+            .eq("id", row_id).eq("project_id", project_id)
+            .eq("user_id", user_id).eq("draft_type", "project_session")
+            .limit(1).execute()).data or []
+    if len(rows) != 1:
+        raise ValueError("The exact saved revision could not be verified; nothing was changed.")
+    try:
+        saved = json.loads(rows[0].get("draft_content") or "{}")
+    except (TypeError, ValueError):
+        raise ValueError("The saved revision is invalid; nothing was changed.")
+    if (not isinstance(saved, dict)
+            or str(saved.get("active_format_id") or "") != fmt
+            or str(saved.get("current_project_id") or project_id) != project_id
+            or str(saved.get("story_seed") or "").strip()
+                != str(st.session_state.get("story_seed") or "").strip()):
+        raise ValueError("Saved project, format, or story premise differs from the open revision.")
+    if not str(saved.get("story_seed") or "").strip():
+        raise ValueError("The saved revision has no Story Premise.")
+    if saved.get("sandbox_slates") != st.session_state.get("sandbox_slates") and not has_staged_plots:
+        raise ValueError("Plot paths no longer match the saved revision. Reload it first.")
+    return source_identity
+
+
+def wbs_stage2_render_regenerate_novel_plots():
+    """Stage 2 only: generate three unsaved plot choices in the existing page."""
+    if st.session_state.get("active_format_id") != "novel_prose_novella":
+        return
+    try:
+        identity = wbs_stage2_verify_regen_source()
+    except Exception:
+        identity = None
+
+    # Only Stage 2 Novel/Novella action typography; no Stage 1 styling changes.
+    # Streamlit nests its button text in multiple spans/divs depending on version.
+    st.markdown(
+        """<style>
+        .st-key-wbs_stage2_regen_preview_button button,
+        .st-key-wbs_stage2_regen_preview_button button *,
+        .st-key-wbs_stage2_save_current button,
+        .st-key-wbs_stage2_save_current button * {
+            font-size: 1.2rem !important;
+            font-weight: 700 !important;
+            line-height: 1.35 !important;
+        }
+        .st-key-wbs_stage2_regen_preview_button button {
+            min-height: 3rem !important;
+        }
+        </style>""",
+        unsafe_allow_html=True,
+    )
+
+    if st.button(
+        "Generate your choice of plot structure based on the concept development.",
+        key="wbs_stage2_regen_preview_button",
+        disabled=identity is None,
+        type="primary", use_container_width=True,
+    ):
+        if create_bridge_adapter is None:
+            st.error("The writing engine is unavailable: " + str(WBS_MODEL_IMPORT_ERROR))
+            st.stop()
+        source_packet = wbs_stage2_complete_plot_source_packet()
+        adapter = create_bridge_adapter(backend=st.session_state.backend)
+        with st.spinner("Generating three plot structures from your concept..."):
+            result = adapter.execute(
+                "Generate sandbox paths", st.session_state,
+                prepared_context={
+                    "series_aware_story_seed": source_packet,
+                    "scripting_format_context": get_scripting_format_context(),
+                    "format_development_context": source_packet,
+                    "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
+                },
+                action_payload={
+                    "story_seed": source_packet,
+                    "tone_style": st.session_state.get("tone_style", ""),
+                    "author_style": st.session_state.get("author_style", ""),
+                },
+            )
+        if not result.success or not wbs_stage2_regenerated_plots_usable(result.output):
+            st.error("Plot generation failed or returned incomplete plots. Nothing was saved. "
+                     + str(result.error or "Please retry."))
+        else:
+            # UNSAVED working-copy changes only. No database writes or new V-n.
+            # Do not change the premise, its format fields, or any manuscript text.
+            st.session_state.sandbox_slates = {
+                key: result.output[key] for key in ("Option A", "Option B", "Option C")
+            }
+            st.session_state.chosen_option = None
+            st.session_state.chosen_option_text = None
+            st.session_state["_wbs_stage2_regen_unsaved"] = identity
+            st.session_state["_wbs_stage2_novel_visible"] = identity
+            st.session_state["_wbs_stage2_choose_new"] = True
+            st.session_state.pop("_wbs_stage2_pending_path", None)
+            st.session_state.pop("_wbs_stage2_regen_preview", None)
+            st.rerun()
+
+
+
 def sandbox_output_is_usable(sandbox_output):
     return bool(
         sandbox_output
@@ -7957,6 +8120,41 @@ with st.sidebar.container(border=True):
                     _raw_outline)
                 if _first_beat:
                     _working_text = _first_beat.group(1).strip()
+        elif st.session_state.get("active_format_id") == "novel_prose_novella":
+            # Follow the approved Short Story method: take the prose actually
+            # displayed in the current scene, then call the SAME count_words().
+            # Only Novel/Novella selection differs; no Short Story code changes.
+            _novel_location = str(st.session_state.get("_wbs_stage3_rewrite_location") or "Scene Beat 1")
+            _novel_selected = re.search(r"^Scene Beat\s+(\d+)$", _novel_location, re.I)
+            if _novel_selected:
+                _novel_scene_number = int(_novel_selected.group(1))
+                _novel_blocks = st.session_state.get("scene_blocks") or {}
+                if (isinstance(_novel_blocks, dict)
+                        and str(st.session_state.get("current_draft_output") or "").strip()):
+                    _working_text = str(_novel_blocks.get(_novel_scene_number)
+                                        or _novel_blocks.get(str(_novel_scene_number)) or "").strip()
+                if not _working_text:
+                    # Extract exactly this beat's reader-facing SCENE field,
+                    # never the full four-beat outline or the 559-word premise.
+                    _novel_outline = str(st.session_state.get("plot_outline") or "")
+                    _beat_start = re.search(rf"(?im)^\s*\[BEAT\s+{_novel_scene_number}\]\s*$", _novel_outline)
+                    if _beat_start:
+                        _after_beat = _novel_outline[_beat_start.end():]
+                        _next_beat = re.search(r"(?im)^\s*\[BEAT\s+\d+\]", _after_beat)
+                        _beat_section = _after_beat[:_next_beat.start() if _next_beat else len(_after_beat)]
+                        _scene_start = re.search(
+                            r"(?i)\[(?:SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*)\]\s*:\s*",
+                            _beat_section)
+                        if _scene_start:
+                            _scene_remainder = _beat_section[_scene_start.end():]
+                            _next_field = re.search(
+                                r"(?im)^\s*\[(?:SCENE TITLE|CORE OBJECTIVE|SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*|THE\s+CONFLICT|STYLE\s*&\s*SYNTAX DIRECTIVE)\]\s*:|^\s*===\s*$",
+                                _scene_remainder)
+                            _working_text = _scene_remainder[:_next_field.start() if _next_field else len(_scene_remainder)].strip().strip("=").strip()
+            else:
+                # A writer explicitly selecting Full Storyline sees the full
+                # drafted manuscript count, not a fabricated chapter target.
+                _working_text = str(st.session_state.get("current_draft_output") or "").strip()
         else:
             _working_text = str(st.session_state.get("_wbs_stage3_clean_editor") or "").strip()
             if not _working_text:
@@ -7964,12 +8162,17 @@ with st.sidebar.container(border=True):
                 _working_text = " ".join(re.findall(
                     r"(?ims)^\s*\[SCENE DETAILS[^\]]*\]\s*:\s*(.*?)(?=^\s*\[[A-Z][^\n]*\]|^\s*===|\Z)",
                     _raw_outline))
-    if not _working_text and st.session_state.get("current_draft_output"):
-        _working_text = str(st.session_state.get("current_draft_output") or "")
-    if not _working_text and st.session_state.get("chosen_option_text"):
-        _working_text = str(st.session_state.get("chosen_option_text") or "")
-    if not _working_text:
-        _working_text = str(st.session_state.get("wbs_project_original_concept") or st.session_state.get("story_seed") or "")
+    # A Novel/Novella Scene Scripting panel counts only its selected scene.
+    # On other pages/formats the established Short Story fallback is unchanged.
+    _novel_scene_count_mode = (_stage_name in ("plot architect", "plot architecture")
+                               and st.session_state.get("active_format_id") == "novel_prose_novella")
+    if not _novel_scene_count_mode:
+        if not _working_text and st.session_state.get("current_draft_output"):
+            _working_text = str(st.session_state.get("current_draft_output") or "")
+        if not _working_text and st.session_state.get("chosen_option_text"):
+            _working_text = str(st.session_state.get("chosen_option_text") or "")
+        if not _working_text:
+            _working_text = str(st.session_state.get("wbs_project_original_concept") or st.session_state.get("story_seed") or "")
     st.write(f"Current Version: V-{_active_version_number}" if _active_version_number else "Current Version: Unsaved")
     st.write(f"Current Working Words: {count_words(_working_text):,}")
 
@@ -9804,14 +10007,31 @@ if st.session_state.project_stage == "Intake":
 elif st.session_state.project_stage == "Sandbox":
     st.header("🗺️ Step 2: Plot Architecture")
     render_project_title_banner("step_2_scripting")
-    st.markdown("##### Shape the first working script paths from your concept.")
-    st.caption(f"Dialogue Style: {get_dialogue_style_display()} — inherited from Concept Development. Project type controls dialogue formatting.")
-    st.markdown("---")
+    if st.session_state.get("active_format_id") != "novel_prose_novella":
+        st.markdown("##### Shape the first working script paths from your concept.")
+        st.caption(f"Dialogue Style: {get_dialogue_style_display()} — inherited from Concept Development. Project type controls dialogue formatting.")
+        st.markdown("---")
     if st.session_state.get("project_saved_notice"):
         st.session_state.project_saved_notice = False
+    _wbs_novel_plot_mode = (st.session_state.get("active_format_id") == "novel_prose_novella")
+    wbs_stage2_render_regenerate_novel_plots()
     sandbox_slates = st.session_state.get("sandbox_slates", {})
-    if not sandbox_slates:
-        st.warning("No story paths are available yet. Return to Concept Development and generate story paths first.")
+    _wbs_plot_display_identity = (
+        str(get_active_project_id() or ""),
+        str(st.session_state.get("_wbs_active_saved_session_row_id") or ""),
+        str(st.session_state.get("active_format_id") or ""),
+        get_text_signature(wbs_stage2_complete_plot_source_packet()) if _wbs_novel_plot_mode else "",
+    )
+    _wbs_show_novel_plots = (st.session_state.get("_wbs_stage2_novel_visible")
+                             == _wbs_plot_display_identity)
+    if _wbs_novel_plot_mode and not _wbs_show_novel_plots:
+        # The saved A/B/C data is never deleted; only the Stage 2 display starts blank.
+        for _wbs_i, _wbs_col in enumerate(st.columns(3, gap="medium"), 1):
+            with _wbs_col:
+                st.subheader(f"Plot {_wbs_i}")
+    elif not sandbox_slates:
+        if not _wbs_novel_plot_mode:
+            st.warning("No story paths are available yet. Return to Concept Development and generate story paths first.")
     else:
         if sandbox_slates.get("is_fallback", False):
             st.warning("AI connection issue detected. Temporary local story paths are being shown.")
@@ -9828,7 +10048,8 @@ elif st.session_state.project_stage == "Sandbox":
                       and bool(_wbs_text.strip())
                       and _wbs_text == str(sandbox_slates.get(_wbs_choice) or ""))
         _wbs_review = bool(_wbs_valid and st.session_state.get("_wbs_active_saved_session_row_id")
-                           and not st.session_state.get("_wbs_stage2_choose_new"))
+                           and not st.session_state.get("_wbs_stage2_choose_new")
+                           and not _wbs_novel_plot_mode)
         if _wbs_review:
             st.success(f"Saved selection: {_wbs_choice}")
             st.markdown(f"### {_wbs_choice}")
@@ -9845,17 +10066,23 @@ elif st.session_state.project_stage == "Sandbox":
                     st.session_state.pop("_wbs_stage2_pending_path", None)
                     st.rerun()
         else:
-            if st.session_state.get("_wbs_active_saved_session_row_id") and not _wbs_valid:
-                st.warning("Original selection was not saved in this revision. All three paths are shown; no original choice is assumed.")
-            if st.session_state.get("_wbs_stage2_choose_new"):
-                st.info("Choose another path. The original saved revision will remain unchanged.")
+            if not _wbs_novel_plot_mode:
+                if (st.session_state.get("_wbs_active_saved_session_row_id") and not _wbs_valid
+                        and not st.session_state.get("_wbs_stage2_regen_unsaved")):
+                    st.warning("Original selection was not saved in this revision. All three paths are shown; no original choice is assumed.")
+                if st.session_state.get("_wbs_stage2_choose_new"):
+                    st.info("Choose a plot. Nothing changes in the database until you click Save Current Version or Save Version As.")
             _wbs_cols = st.columns(3)
-            for _wbs_col, (_wbs_opt, _wbs_name, _wbs_subtitle) in zip(_wbs_cols, _wbs_stage2_options):
+            for _wbs_i, (_wbs_col, (_wbs_opt, _wbs_name, _wbs_subtitle)) in enumerate(zip(_wbs_cols, _wbs_stage2_options), 1):
                 with _wbs_col:
-                    st.subheader(f"{_wbs_opt}: {_wbs_name}")
-                    st.markdown(f"*{_wbs_subtitle}*")
+                    if _wbs_novel_plot_mode:
+                        st.subheader(f"Plot {_wbs_i}")
+                    else:
+                        st.subheader(f"{_wbs_opt}: {_wbs_name}")
+                        st.markdown(f"*{_wbs_subtitle}*")
                     st.info(sandbox_slates.get(_wbs_opt, ""))
-                    if st.button(f"Select Path {_wbs_opt[-1]}", key=f"wbs_stage2_select_{_wbs_opt[-1]}",
+                    if st.button((f"Select Plot {_wbs_i}" if _wbs_novel_plot_mode else f"Select Path {_wbs_opt[-1]}"),
+                                 key=f"wbs_stage2_select_{_wbs_opt[-1]}",
                                  type="primary" if st.session_state.get("_wbs_stage2_pending_path") == _wbs_opt else "secondary",
                                  use_container_width=True):
                         st.session_state["_wbs_stage2_pending_path"] = _wbs_opt
@@ -9894,19 +10121,35 @@ elif st.session_state.project_stage == "Sandbox":
                 except Exception:
                     pass
             _wbs_is_plot_change = bool(_wbs_saved_path in ("Option A", "Option B", "Option C"))
-            if _wbs_pending and _wbs_is_plot_change and _wbs_pending != _wbs_saved_path:
-                st.warning(f"This revision already saved {_wbs_saved_path}. Changing to {_wbs_pending} requires a new revision to preserve the original.")
+            if (not _wbs_novel_plot_mode and _wbs_pending and _wbs_is_plot_change
+                    and _wbs_pending != _wbs_saved_path):
+                st.info(f"This revision currently has {_wbs_saved_path}. Save Current Version replaces "
+                        "its selected path only when you click Save; Save Version As creates "
+                        "a separate revision only when requested.")
             elif _wbs_pending and not _wbs_saved_path_check_ok:
                 st.warning("Saved revision could not be verified. Saving to the current revision is disabled.")
             if _wbs_pending:
                 st.markdown('<div style="text-align:center;color:#ffffff;font-weight:700;margin:10px 0 12px 0">Save To Revision</div>', unsafe_allow_html=True)
-            _wbs_left, _wbs_right = st.columns(2, gap="small")
-            with _wbs_left:
-                _wbs_save_current = st.button(f"Save to Current Revision (V-{_wbs_current_revision})" if _wbs_current_revision else "Save to Current Revision",
-                    key="wbs_stage2_save_current", type="primary" if _wbs_pending else "secondary", disabled=not bool(_wbs_pending and _wbs_row_id and _wbs_current_revision and _wbs_saved_path_check_ok and not _wbs_is_plot_change), use_container_width=True)
-            with _wbs_right:
-                _wbs_save_new = st.button(f"Save as New Revision (V-{_wbs_next_rev})", key="wbs_stage2_save_new",
-                    type="primary" if _wbs_pending else "secondary", disabled=not bool(_wbs_pending), use_container_width=True)
+            if _wbs_novel_plot_mode:
+                # Stage 2 Novel/Novella: one manual Save Current Version action.
+                # New versions are only created through separate explicit Save Version As.
+                _wbs_save_current = st.button(
+                    f"Save Current Version (V-{_wbs_current_revision})" if _wbs_current_revision else "Save Current Version",
+                    key="wbs_stage2_save_current",
+                    type="primary" if _wbs_pending else "secondary",
+                    disabled=not bool(_wbs_pending and _wbs_row_id and _wbs_current_revision and _wbs_saved_path_check_ok),
+                    use_container_width=True,
+                )
+                _wbs_save_new = False
+            else:
+                # Preserve the existing Stage 2 layout for other formats.
+                _wbs_left, _wbs_right = st.columns(2, gap="small")
+                with _wbs_left:
+                    _wbs_save_current = st.button(f"Save Current Version (V-{_wbs_current_revision})" if _wbs_current_revision else "Save Current Version",
+                        key="wbs_stage2_save_current", type="primary" if _wbs_pending else "secondary", disabled=not bool(_wbs_pending and _wbs_row_id and _wbs_current_revision and _wbs_saved_path_check_ok), use_container_width=True)
+                with _wbs_right:
+                    _wbs_save_new = st.button(f"Save Version As (V-{_wbs_next_rev})", key="wbs_stage2_save_new",
+                        type="primary" if _wbs_pending else "secondary", disabled=not bool(_wbs_pending), use_container_width=True)
             if _wbs_save_current or _wbs_save_new:
                 _wbs_selected_text = str(sandbox_slates.get(_wbs_pending) or "")
                 if not _wbs_selected_text.strip():
@@ -9926,12 +10169,14 @@ elif st.session_state.project_stage == "Sandbox":
                         _wbs_original = json.loads(_wbs_saved_rows[0]["draft_content"] or "{}")
                         if not isinstance(_wbs_original, dict):
                             raise ValueError("Invalid saved revision")
-                        if str(_wbs_original.get("chosen_option") or "").strip():
-                            st.error("This revision already contains a selected path. Use Save as New Revision to preserve it.")
-                            st.stop()
-                        if any(_wbs_original.get(k) for k in ("plot_outline", "current_draft_output", "rewritten_manuscript", "final_output_text")):
-                            st.error("This revision contains downstream work. Save as New Revision to protect it.")
-                            st.stop()
+                        # Explicit SAVE CURRENT means update this exact revision,
+                        # never insert a new one. Preserve downstream manuscript
+                        # and scene work rather than deleting it in a plot change.
+                        if str(_wbs_original.get("active_format_id") or "") != str(st.session_state.get("active_format_id") or ""):
+                            raise ValueError("Saved writing format differs from active format")
+                        if str(_wbs_original.get("story_seed") or "").strip() != str(st.session_state.get("story_seed") or "").strip():
+                            raise ValueError("Saved premise differs from the open revision; reload before saving")
+                        _wbs_original["sandbox_slates"] = dict(sandbox_slates)
                         _wbs_original["chosen_option"] = _wbs_title
                         _wbs_original["chosen_option_text"] = _wbs_selected_text
                         _wbs_write = (supabase.table("writersblock_project_drafts")
@@ -9985,11 +10230,18 @@ elif st.session_state.project_stage == "Sandbox":
                     set_loaded_concept_version_baseline(_wbs_verified)
                     st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(_wbs_verified)
                     st.session_state["_wbs_last_saved_project_id"] = str(get_active_project_id())
+                st.session_state.pop("_wbs_stage2_regen_unsaved", None)
+                st.session_state.pop("_wbs_stage2_regen_preview", None)
                 st.session_state.pop("_wbs_stage2_pending_path", None)
                 st.session_state.pop("_wbs_stage2_choose_new", None)
                 st.session_state["_wbs_unlocked_saved_stage"] = max(
                     int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 3)
                 st.rerun()
+            if (_wbs_novel_plot_mode and _wbs_valid and not _wbs_pending
+                    and st.session_state.get("_wbs_active_saved_session_row_id")):
+                if st.button("Continue to Stage 3", key="wbs_stage2_novel_saved_continue",
+                             type="primary", use_container_width=True):
+                    wbs_request_stage_change("Plot Architect")
 
 # WBS FIXES-4 — Novel/Novella helpers. Other writing formats are not modified.
 def wbs_novel_blocks(source):
@@ -10443,6 +10695,22 @@ if st.session_state.project_stage == "Plot Architect":
                 "never in scene prose. The author may shorten or lengthen scenes later."
                 if _wbs_short_story_plot else ""
             )
+            _wbs_novel_reveal_policy = (
+                "NOVEL/NOVELLA AUTHOR-ONLY SECRET AND DISCLOSURE CONTROL:\n"
+                "The full Story Premise is an author-only plan containing future reveals and "
+                "information unknown to the viewpoint character and reader. Follow its event "
+                "sequence faithfully WITHOUT revealing hidden identities, extraordinary origins, "
+                "motivations, memories, explanations, or future events before their planned reveal. "
+                "Early scenes show ONLY the externally observable behavior, ordinary dialogue, "
+                "and thoughts the current POV character could actually know. Do not identify "
+                "a concealed alien/possessor/other hidden agent in early scene narration, "
+                "inner thoughts or exposition merely because the author mentioned it in the "
+                "premise. Don't add explanatory flashbacks until the story establishes that "
+                "the reader should learn them. If the author explicitly requests an early "
+                "disclosure or dramatic irony, follow that instruction instead. Preserve all "
+                "secret facts for the appropriate later beat; do not delete or contradict them."
+                if st.session_state.get("active_format_id") == "novel_prose_novella" else ""
+            )
             _wbs_plot_result = _wbs_plot_bridge.execute(
                 "Generate plot outline",
                 st.session_state,
@@ -10457,7 +10725,10 @@ if st.session_state.project_stage == "Plot Architect":
                 action_payload={
                     "initial_scene_length_guidance": _wbs_plot_length_guidance,
                     "chosen_option": st.session_state.chosen_option,
-                    "chosen_option_text": get_plot_dialogue_context(),
+                    "chosen_option_text": (
+                        get_plot_dialogue_context() +
+                        ("\n\n" + _wbs_novel_reveal_policy if _wbs_novel_reveal_policy else "")
+                    ),
                     "tone_style": st.session_state.tone_style,
                     "author_style": st.session_state.author_style,
                 },
@@ -11103,6 +11374,14 @@ if st.session_state.project_stage == "Plot Architect":
                         f"Writer's direction: {rewrite_direction or 'Improve this scene.'}\n\n"
                         f"EXISTING MANUSCRIPT SCENE:\n{_draft_scene}"
                     )
+                if st.session_state.get("active_format_id") == "novel_prose_novella":
+                    _instruction += (
+                        "\nNOVEL/NOVELLA REVEAL CONTROL: The author's full story premise is "
+                        "planning knowledge; preserve hidden identities and secrets for the "
+                        "approved reveal point. Do not explain an unrevealed presence through "
+                        "narration, inner thoughts or flashback. Follow the selected scene's "
+                        "POV and established reader knowledge."
+                    )
                 # Short-story scene length applies to the reader-facing SCENE,
                 # not the metadata-heavy outline. Preserve all backend tags.
                 _scene_word_rewrite = bool(
@@ -11479,7 +11758,7 @@ elif st.session_state.project_stage in ["Drafting", "Drafting Engine"]:
         else:
             st.session_state.current_processing_beat = total_beats + 1
 
-        recommended_scene_word_count = 2000 if _wbs_novel_draft else 1200
+        recommended_scene_word_count = None if _wbs_novel_draft else 1200
         audiobook_scene_instruction = ""
 
         if is_picture_book_project():
@@ -11605,14 +11884,30 @@ Keep this scene close to its assigned target so the completed manuscript remains
                 key=f"chapter_title_{st.session_state.current_processing_beat}"
             )
 
-            target_word_count = st.number_input(
-                "Target Word Count Per Chapter:" if _wbs_novel_draft else "Target Word Count Per Scene Block:",
-                min_value=50,
-                max_value=6000 if _wbs_novel_draft else 2500,
-                value=recommended_scene_word_count,
-                step=25,
-                key=f"target_word_count_{st.session_state.current_processing_beat}"
-            )
+            if _wbs_novel_draft:
+                # Overall manuscript scale is NOT permission to set chapter size.
+                _novel_choose_chapter_limit = st.checkbox(
+                    "Set a chapter word target (optional)", value=False,
+                    key=get_active_format_widget_key(f"novel_chapter_target_enabled_{st.session_state.current_processing_beat}"),
+                )
+                if _novel_choose_chapter_limit:
+                    target_word_count = st.number_input(
+                        "Your target words for this chapter:",
+                        min_value=50, max_value=6000, value=1000, step=25,
+                        key=get_active_format_widget_key(f"novel_author_target_words_{st.session_state.current_processing_beat}"),
+                    )
+                else:
+                    target_word_count = None
+                    st.caption("No chapter length selected. The overall manuscript scale does not set a chapter target.")
+            else:
+                target_word_count = st.number_input(
+                    "Target Word Count Per Scene Block:",
+                    min_value=50,
+                    max_value=2500,
+                    value=recommended_scene_word_count,
+                    step=25,
+                    key=f"target_word_count_{st.session_state.current_processing_beat}"
+                )
 
             pov_choice = st.selectbox(
                 "Point of View:",
@@ -11842,11 +12137,28 @@ STORY OUTLINE:
                     per_source_chars=8000,
                 )
 
+                _novel_chapter_length_instruction = (
+                    f"Author-selected chapter target: approximately {target_word_count} words."
+                    if target_word_count is not None else
+                    "No chapter word target has been selected by the writer. Do not assume a "
+                    "2,000-word chapter length or derive one from the manuscript scale."
+                )
+                _novel_draft_secret_rule = (
+                    "NOVEL/NOVELLA DISCLOSURE RULE: The full original Concept is "
+                    "confidential author reference, not reader knowledge. Reveal a hidden "
+                    "identity, origin, possessing presence, unusual memory, or secret motivation "
+                    "ONLY when the current approved beat explicitly reaches that disclosure. "
+                    "Otherwise write only observable conduct and knowledge available to the "
+                    "POV character. Never explain an unrevealed alien identity through "
+                    "omniscient narration, inner monologue or flashback merely because it is "
+                    "known in the author's premise. Keep all facts intact for the later reveal."
+                    if _wbs_novel_draft else ""
+                )
                 drafting_instruction_packet = f"""
 {audiobook_scene_instruction}
 CHAPTER / SCENE SETTINGS:
 Chapter / Scene Title: {chapter_title}
-Target Word Count: Approximately {recommended_scene_word_count if is_picture_book_project() else target_word_count} words
+Target Word Count: {_novel_chapter_length_instruction if _wbs_novel_draft else f'Approximately {recommended_scene_word_count if is_picture_book_project() else target_word_count} words'}
 Picture Book Word Budget (if applicable): {f'Overall target {picture_book_target()} words; beat {current_scene_number} suggested allocation {picture_book_allocations()[current_scene_number-1]} words. Try to stay near these targets; do not truncate or omit story content to enforce a single scene limit.' if is_picture_book_project() else 'Not applicable'}
 Point of View: {pov_choice}
 Tense (set in Development Setup; maintain consistently): {get_development_writing_tense()}
@@ -11863,6 +12175,8 @@ PROJECT-WIDE CREATIVE CONTINUITY:
 
 CURRENT OUTLINE BEAT:
 {current_beat_data}
+
+{_novel_draft_secret_rule}
 
 IMPORTANT OUTPUT RULE:
 Write ONLY this single scene block. Do not repeat earlier scenes. Do not summarize the full manuscript. Do not include manuscript output, prior scene text, headings, or any material outside this current scene block. End with a LORE UPDATE only if needed.
