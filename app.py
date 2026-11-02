@@ -8134,8 +8134,8 @@ with st.sidebar.container(border=True):
     if not _working_text:
         _working_text = str(st.session_state.get("wbs_project_original_concept") or st.session_state.get("story_seed") or "")
     st.write(f"Current Version: V-{_active_version_number}" if _active_version_number else "Current Version: Unsaved")
-    # Novel/Novella Project Status: only actual scripted scene blocks count.
-    # Never substitute the premise, plot outline, saved draft, or other planning text.
+    # Novel/Novella Project Status: sum only written scene text.
+    # Never count the premise, selected Plot A/B/C, metadata, or an old draft.
     _working_word_total = count_words(_working_text)
     if st.session_state.get("active_format_id") == "novel_prose_novella":
         _scripted_blocks = st.session_state.get("scene_blocks") or {}
@@ -8143,6 +8143,30 @@ with st.sidebar.container(border=True):
                                    if str(scene_id).isdigit() and int(scene_id) > 0
                                    and isinstance(text, str))
                                if isinstance(_scripted_blocks, dict) else 0)
+        if not _working_word_total:
+            # Before the first scene is saved as a block, Stage 3 displays
+            # Scene 1 from its [SCENE DETAILS] field. Match Short Story's
+            # first-scene fallback, NOT the complete four-beat outline.
+            _scene_one = re.search(
+                r"(?ims)^\s*\[BEAT\s+1\].*?^\s*\[(?:SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*)\]\s*:\s*(.*?)(?=^\s*\[[A-Z][^\n]*\]\s*:|^\s*\[BEAT\s+\d+\]|^\s*===|\Z)",
+                str(st.session_state.get("plot_outline") or ""),
+            )
+            if _scene_one:
+                # Use the same reader-facing cleanup as the Stage 3 display,
+                # without altering the actual stored beat/story text.
+                _first_scene_prose = _scene_one.group(1).strip()
+                _first_scene_prose = re.sub(
+                    r'(?is)(?:^|(?<=[.!?])\s+)["“]?\s*(?:Her|His|Their|The character\'s|The protagonist\'s)\s+'
+                    r'conflict\s+is\s+(?:purely|primarily|largely)\s+(?:internal|external)'
+                    r'.*?(?:[.!?](?=\s|$)|$)["”]?', ' ', _first_scene_prose)
+                _first_scene_prose = re.sub(
+                    r"(?is)(?:^|(?<=[.!?])\s+)(?:The scene (?:emphasizes|focuses on|is carried|will be|relies on|should|uses|highlights|establishes)|"
+                    r"Narration (?:carries|highlights|focuses|will|should|describes)|"
+                    r"The narration (?:carries|highlights|focuses|will|should|describes)|"
+                    r"This (?:beat|scene) (?:emphasizes|focuses|should|uses|is designed)|"
+                    r"(?:Use|Maintain|Employ|Apply|Analyze and apply) (?:active syntax|descriptive|style syntax|narration|dialogue)).*?(?:[.!?](?=\s|$)|$)",
+                    ' ', _first_scene_prose)
+                _working_word_total = count_words(re.sub(r"[ \t]{2,}", " ", _first_scene_prose).strip())
     st.write(f"Current Working Words: {_working_word_total:,}")
 
 st.sidebar.markdown("---")
@@ -9716,8 +9740,9 @@ if st.session_state.project_stage == "Intake":
             and sandbox_output_is_usable(st.session_state.get("sandbox_slates"))
         )
         _wbs_paths_button_label = (
-            "Continue to Scripting — Existing Paths"
-            if _wbs_has_saved_paths
+            "Continue to Plot Architecture"
+            if (_wbs_has_saved_paths and st.session_state.get("active_format_id") == "novel_prose_novella")
+            else "Continue to Scripting — Existing Paths" if _wbs_has_saved_paths
             else str(concept_ui.get("button_label") or "Develop Project Paths 🚀")
         )
         with _wbs_stage1_develop_col:
@@ -9991,9 +10016,38 @@ elif st.session_state.project_stage == "Sandbox":
         str(st.session_state.get("active_format_id") or ""),
         get_text_signature(wbs_stage2_complete_plot_source_packet()) if _wbs_novel_plot_mode else "",
     )
-    _wbs_show_novel_plots = (st.session_state.get("_wbs_stage2_novel_visible")
-                             == _wbs_plot_display_identity)
-    if _wbs_novel_plot_mode and not _wbs_show_novel_plots:
+    # Novel/Novella: a saved plot is visible whenever this exact loaded
+    # revision contains it. The temporary just-generated flag is for previews
+    # only and must NEVER be required to review existing saved work.
+    _wbs_saved_novel_paths = (
+        _wbs_novel_plot_mode
+        and bool(st.session_state.get("_wbs_active_saved_session_row_id"))
+        and sandbox_output_is_usable(sandbox_slates)
+        and not st.session_state.get("_wbs_stage2_regen_unsaved")
+    )
+    _wbs_saved_novel_choice = (
+        _wbs_novel_plot_mode
+        and bool(st.session_state.get("_wbs_active_saved_session_row_id"))
+        and str(st.session_state.get("chosen_option") or "").split(":", 1)[0].strip()
+            in ("Option A", "Option B", "Option C")
+        and bool(str(st.session_state.get("chosen_option_text") or "").strip())
+        and not st.session_state.get("_wbs_stage2_regen_unsaved")
+    )
+    _wbs_show_novel_plots = (
+        st.session_state.get("_wbs_stage2_novel_visible") == _wbs_plot_display_identity
+        or _wbs_saved_novel_paths
+    )
+    if _wbs_novel_plot_mode and not _wbs_show_novel_plots and _wbs_saved_novel_choice:
+        # Historical saves may preserve the exact selected plot even when A/B/C
+        # options are absent. Display that saved text; never fabricate replacements.
+        _wbs_existing_choice = str(st.session_state.get("chosen_option") or "").split(":", 1)[0].strip()
+        st.success(f"Saved selection: {_wbs_existing_choice}")
+        st.subheader(_wbs_existing_choice.replace("Option ", "Plot "))
+        st.info(str(st.session_state.get("chosen_option_text") or ""))
+        if st.button("Continue to Scene Scripting", key="wbs_stage2_saved_choice_only_continue",
+                     type="primary", use_container_width=True):
+            wbs_request_stage_change("Plot Architect")
+    elif _wbs_novel_plot_mode and not _wbs_show_novel_plots:
         # The saved A/B/C data is never deleted; only the Stage 2 display starts blank.
         for _wbs_i, _wbs_col in enumerate(st.columns(3, gap="medium"), 1):
             with _wbs_col:
@@ -10015,17 +10069,18 @@ elif st.session_state.project_stage == "Sandbox":
         _wbs_text = str(st.session_state.get("chosen_option_text") or "")
         _wbs_valid = (_wbs_choice in ("Option A", "Option B", "Option C")
                       and bool(_wbs_text.strip())
-                      and _wbs_text == str(sandbox_slates.get(_wbs_choice) or ""))
+                      and (_wbs_text == str(sandbox_slates.get(_wbs_choice) or "")
+                           or (_wbs_novel_plot_mode and _wbs_saved_novel_choice)))
         _wbs_review = bool(_wbs_valid and st.session_state.get("_wbs_active_saved_session_row_id")
-                           and not st.session_state.get("_wbs_stage2_choose_new")
-                           and not _wbs_novel_plot_mode)
+                           and not st.session_state.get("_wbs_stage2_choose_new"))
         if _wbs_review:
             st.success(f"Saved selection: {_wbs_choice}")
             st.markdown(f"### {_wbs_choice}")
             st.info(_wbs_text)
             _wbs_next, _wbs_new = st.columns(2, gap="small")
             with _wbs_next:
-                if st.button("Continue to Stage 3", key="wbs_stage2_saved_continue", type="primary", use_container_width=True):
+                if st.button("Continue to Scene Scripting" if _wbs_novel_plot_mode else "Continue to Stage 3",
+                             key="wbs_stage2_saved_continue", type="primary", use_container_width=True):
                     # Saved outline is displayed by Stage 3 unchanged; missing
                     # outline follows the existing explicit development path.
                     wbs_request_stage_change("Plot Architect")
