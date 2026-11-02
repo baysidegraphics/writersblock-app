@@ -8120,41 +8120,6 @@ with st.sidebar.container(border=True):
                     _raw_outline)
                 if _first_beat:
                     _working_text = _first_beat.group(1).strip()
-        elif st.session_state.get("active_format_id") == "novel_prose_novella":
-            # Follow the approved Short Story method: take the prose actually
-            # displayed in the current scene, then call the SAME count_words().
-            # Only Novel/Novella selection differs; no Short Story code changes.
-            _novel_location = str(st.session_state.get("_wbs_stage3_rewrite_location") or "Scene Beat 1")
-            _novel_selected = re.search(r"^Scene Beat\s+(\d+)$", _novel_location, re.I)
-            if _novel_selected:
-                _novel_scene_number = int(_novel_selected.group(1))
-                _novel_blocks = st.session_state.get("scene_blocks") or {}
-                if (isinstance(_novel_blocks, dict)
-                        and str(st.session_state.get("current_draft_output") or "").strip()):
-                    _working_text = str(_novel_blocks.get(_novel_scene_number)
-                                        or _novel_blocks.get(str(_novel_scene_number)) or "").strip()
-                if not _working_text:
-                    # Extract exactly this beat's reader-facing SCENE field,
-                    # never the full four-beat outline or the 559-word premise.
-                    _novel_outline = str(st.session_state.get("plot_outline") or "")
-                    _beat_start = re.search(rf"(?im)^\s*\[BEAT\s+{_novel_scene_number}\]\s*$", _novel_outline)
-                    if _beat_start:
-                        _after_beat = _novel_outline[_beat_start.end():]
-                        _next_beat = re.search(r"(?im)^\s*\[BEAT\s+\d+\]", _after_beat)
-                        _beat_section = _after_beat[:_next_beat.start() if _next_beat else len(_after_beat)]
-                        _scene_start = re.search(
-                            r"(?i)\[(?:SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*)\]\s*:\s*",
-                            _beat_section)
-                        if _scene_start:
-                            _scene_remainder = _beat_section[_scene_start.end():]
-                            _next_field = re.search(
-                                r"(?im)^\s*\[(?:SCENE TITLE|CORE OBJECTIVE|SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*|THE\s+CONFLICT|STYLE\s*&\s*SYNTAX DIRECTIVE)\]\s*:|^\s*===\s*$",
-                                _scene_remainder)
-                            _working_text = _scene_remainder[:_next_field.start() if _next_field else len(_scene_remainder)].strip().strip("=").strip()
-            else:
-                # A writer explicitly selecting Full Storyline sees the full
-                # drafted manuscript count, not a fabricated chapter target.
-                _working_text = str(st.session_state.get("current_draft_output") or "").strip()
         else:
             _working_text = str(st.session_state.get("_wbs_stage3_clean_editor") or "").strip()
             if not _working_text:
@@ -8162,19 +8127,23 @@ with st.sidebar.container(border=True):
                 _working_text = " ".join(re.findall(
                     r"(?ims)^\s*\[SCENE DETAILS[^\]]*\]\s*:\s*(.*?)(?=^\s*\[[A-Z][^\n]*\]|^\s*===|\Z)",
                     _raw_outline))
-    # A Novel/Novella Scene Scripting panel counts only its selected scene.
-    # On other pages/formats the established Short Story fallback is unchanged.
-    _novel_scene_count_mode = (_stage_name in ("plot architect", "plot architecture")
-                               and st.session_state.get("active_format_id") == "novel_prose_novella")
-    if not _novel_scene_count_mode:
-        if not _working_text and st.session_state.get("current_draft_output"):
-            _working_text = str(st.session_state.get("current_draft_output") or "")
-        if not _working_text and st.session_state.get("chosen_option_text"):
-            _working_text = str(st.session_state.get("chosen_option_text") or "")
-        if not _working_text:
-            _working_text = str(st.session_state.get("wbs_project_original_concept") or st.session_state.get("story_seed") or "")
+    if not _working_text and st.session_state.get("current_draft_output"):
+        _working_text = str(st.session_state.get("current_draft_output") or "")
+    if not _working_text and st.session_state.get("chosen_option_text"):
+        _working_text = str(st.session_state.get("chosen_option_text") or "")
+    if not _working_text:
+        _working_text = str(st.session_state.get("wbs_project_original_concept") or st.session_state.get("story_seed") or "")
     st.write(f"Current Version: V-{_active_version_number}" if _active_version_number else "Current Version: Unsaved")
-    st.write(f"Current Working Words: {count_words(_working_text):,}")
+    # Novel/Novella Project Status: only actual scripted scene blocks count.
+    # Never substitute the premise, plot outline, saved draft, or other planning text.
+    _working_word_total = count_words(_working_text)
+    if st.session_state.get("active_format_id") == "novel_prose_novella":
+        _scripted_blocks = st.session_state.get("scene_blocks") or {}
+        _working_word_total = (sum(count_words(text) for scene_id, text in _scripted_blocks.items()
+                                   if str(scene_id).isdigit() and int(scene_id) > 0
+                                   and isinstance(text, str))
+                               if isinstance(_scripted_blocks, dict) else 0)
+    st.write(f"Current Working Words: {_working_word_total:,}")
 
 st.sidebar.markdown("---")
 
@@ -10695,22 +10664,6 @@ if st.session_state.project_stage == "Plot Architect":
                 "never in scene prose. The author may shorten or lengthen scenes later."
                 if _wbs_short_story_plot else ""
             )
-            _wbs_novel_reveal_policy = (
-                "NOVEL/NOVELLA AUTHOR-ONLY SECRET AND DISCLOSURE CONTROL:\n"
-                "The full Story Premise is an author-only plan containing future reveals and "
-                "information unknown to the viewpoint character and reader. Follow its event "
-                "sequence faithfully WITHOUT revealing hidden identities, extraordinary origins, "
-                "motivations, memories, explanations, or future events before their planned reveal. "
-                "Early scenes show ONLY the externally observable behavior, ordinary dialogue, "
-                "and thoughts the current POV character could actually know. Do not identify "
-                "a concealed alien/possessor/other hidden agent in early scene narration, "
-                "inner thoughts or exposition merely because the author mentioned it in the "
-                "premise. Don't add explanatory flashbacks until the story establishes that "
-                "the reader should learn them. If the author explicitly requests an early "
-                "disclosure or dramatic irony, follow that instruction instead. Preserve all "
-                "secret facts for the appropriate later beat; do not delete or contradict them."
-                if st.session_state.get("active_format_id") == "novel_prose_novella" else ""
-            )
             _wbs_plot_result = _wbs_plot_bridge.execute(
                 "Generate plot outline",
                 st.session_state,
@@ -10725,10 +10678,7 @@ if st.session_state.project_stage == "Plot Architect":
                 action_payload={
                     "initial_scene_length_guidance": _wbs_plot_length_guidance,
                     "chosen_option": st.session_state.chosen_option,
-                    "chosen_option_text": (
-                        get_plot_dialogue_context() +
-                        ("\n\n" + _wbs_novel_reveal_policy if _wbs_novel_reveal_policy else "")
-                    ),
+                    "chosen_option_text": get_plot_dialogue_context(),
                     "tone_style": st.session_state.tone_style,
                     "author_style": st.session_state.author_style,
                 },
@@ -11374,14 +11324,6 @@ if st.session_state.project_stage == "Plot Architect":
                         f"Writer's direction: {rewrite_direction or 'Improve this scene.'}\n\n"
                         f"EXISTING MANUSCRIPT SCENE:\n{_draft_scene}"
                     )
-                if st.session_state.get("active_format_id") == "novel_prose_novella":
-                    _instruction += (
-                        "\nNOVEL/NOVELLA REVEAL CONTROL: The author's full story premise is "
-                        "planning knowledge; preserve hidden identities and secrets for the "
-                        "approved reveal point. Do not explain an unrevealed presence through "
-                        "narration, inner thoughts or flashback. Follow the selected scene's "
-                        "POV and established reader knowledge."
-                    )
                 # Short-story scene length applies to the reader-facing SCENE,
                 # not the metadata-heavy outline. Preserve all backend tags.
                 _scene_word_rewrite = bool(
@@ -11758,7 +11700,7 @@ elif st.session_state.project_stage in ["Drafting", "Drafting Engine"]:
         else:
             st.session_state.current_processing_beat = total_beats + 1
 
-        recommended_scene_word_count = None if _wbs_novel_draft else 1200
+        recommended_scene_word_count = 2000 if _wbs_novel_draft else 1200
         audiobook_scene_instruction = ""
 
         if is_picture_book_project():
@@ -11884,30 +11826,14 @@ Keep this scene close to its assigned target so the completed manuscript remains
                 key=f"chapter_title_{st.session_state.current_processing_beat}"
             )
 
-            if _wbs_novel_draft:
-                # Overall manuscript scale is NOT permission to set chapter size.
-                _novel_choose_chapter_limit = st.checkbox(
-                    "Set a chapter word target (optional)", value=False,
-                    key=get_active_format_widget_key(f"novel_chapter_target_enabled_{st.session_state.current_processing_beat}"),
-                )
-                if _novel_choose_chapter_limit:
-                    target_word_count = st.number_input(
-                        "Your target words for this chapter:",
-                        min_value=50, max_value=6000, value=1000, step=25,
-                        key=get_active_format_widget_key(f"novel_author_target_words_{st.session_state.current_processing_beat}"),
-                    )
-                else:
-                    target_word_count = None
-                    st.caption("No chapter length selected. The overall manuscript scale does not set a chapter target.")
-            else:
-                target_word_count = st.number_input(
-                    "Target Word Count Per Scene Block:",
-                    min_value=50,
-                    max_value=2500,
-                    value=recommended_scene_word_count,
-                    step=25,
-                    key=f"target_word_count_{st.session_state.current_processing_beat}"
-                )
+            target_word_count = st.number_input(
+                "Target Word Count Per Chapter:" if _wbs_novel_draft else "Target Word Count Per Scene Block:",
+                min_value=50,
+                max_value=6000 if _wbs_novel_draft else 2500,
+                value=recommended_scene_word_count,
+                step=25,
+                key=f"target_word_count_{st.session_state.current_processing_beat}"
+            )
 
             pov_choice = st.selectbox(
                 "Point of View:",
@@ -12137,28 +12063,11 @@ STORY OUTLINE:
                     per_source_chars=8000,
                 )
 
-                _novel_chapter_length_instruction = (
-                    f"Author-selected chapter target: approximately {target_word_count} words."
-                    if target_word_count is not None else
-                    "No chapter word target has been selected by the writer. Do not assume a "
-                    "2,000-word chapter length or derive one from the manuscript scale."
-                )
-                _novel_draft_secret_rule = (
-                    "NOVEL/NOVELLA DISCLOSURE RULE: The full original Concept is "
-                    "confidential author reference, not reader knowledge. Reveal a hidden "
-                    "identity, origin, possessing presence, unusual memory, or secret motivation "
-                    "ONLY when the current approved beat explicitly reaches that disclosure. "
-                    "Otherwise write only observable conduct and knowledge available to the "
-                    "POV character. Never explain an unrevealed alien identity through "
-                    "omniscient narration, inner monologue or flashback merely because it is "
-                    "known in the author's premise. Keep all facts intact for the later reveal."
-                    if _wbs_novel_draft else ""
-                )
                 drafting_instruction_packet = f"""
 {audiobook_scene_instruction}
 CHAPTER / SCENE SETTINGS:
 Chapter / Scene Title: {chapter_title}
-Target Word Count: {_novel_chapter_length_instruction if _wbs_novel_draft else f'Approximately {recommended_scene_word_count if is_picture_book_project() else target_word_count} words'}
+Target Word Count: Approximately {recommended_scene_word_count if is_picture_book_project() else target_word_count} words
 Picture Book Word Budget (if applicable): {f'Overall target {picture_book_target()} words; beat {current_scene_number} suggested allocation {picture_book_allocations()[current_scene_number-1]} words. Try to stay near these targets; do not truncate or omit story content to enforce a single scene limit.' if is_picture_book_project() else 'Not applicable'}
 Point of View: {pov_choice}
 Tense (set in Development Setup; maintain consistently): {get_development_writing_tense()}
@@ -12175,8 +12084,6 @@ PROJECT-WIDE CREATIVE CONTINUITY:
 
 CURRENT OUTLINE BEAT:
 {current_beat_data}
-
-{_novel_draft_secret_rule}
 
 IMPORTANT OUTPUT RULE:
 Write ONLY this single scene block. Do not repeat earlier scenes. Do not summarize the full manuscript. Do not include manuscript output, prior scene text, headings, or any material outside this current scene block. End with a LORE UPDATE only if needed.
