@@ -8134,39 +8134,89 @@ with st.sidebar.container(border=True):
     if not _working_text:
         _working_text = str(st.session_state.get("wbs_project_original_concept") or st.session_state.get("story_seed") or "")
     st.write(f"Current Version: V-{_active_version_number}" if _active_version_number else "Current Version: Unsaved")
-    # Novel/Novella Project Status: sum only written scene text.
-    # Never count the premise, selected Plot A/B/C, metadata, or an old draft.
+    # NOVEL/NOVELLA ONLY — accumulate ONLY actual scene-script prose.
+    # The sidebar executes before the center panel on every Streamlit rerun.
+    # Resolve directly from the loaded revision's scene_blocks and plot_outline,
+    # using the same beat-boundary formats supported by Scene Scripting below.
+    # Never fall back to the concept, plot choices, or an unrelated manuscript.
     _working_word_total = count_words(_working_text)
     if st.session_state.get("active_format_id") == "novel_prose_novella":
-        _scripted_blocks = st.session_state.get("scene_blocks") or {}
-        _working_word_total = (sum(count_words(text) for scene_id, text in _scripted_blocks.items()
-                                   if str(scene_id).isdigit() and int(scene_id) > 0
-                                   and isinstance(text, str))
-                               if isinstance(_scripted_blocks, dict) else 0)
-        if not _working_word_total:
-            # Before the first scene is saved as a block, Stage 3 displays
-            # Scene 1 from its [SCENE DETAILS] field. Match Short Story's
-            # first-scene fallback, NOT the complete four-beat outline.
-            _scene_one = re.search(
-                r"(?ims)^\s*\[BEAT\s+1\].*?^\s*\[(?:SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*)\]\s*:\s*(.*?)(?=^\s*\[[A-Z][^\n]*\]\s*:|^\s*\[BEAT\s+\d+\]|^\s*===|\Z)",
-                str(st.session_state.get("plot_outline") or ""),
-            )
-            if _scene_one:
-                # Use the same reader-facing cleanup as the Stage 3 display,
-                # without altering the actual stored beat/story text.
-                _first_scene_prose = _scene_one.group(1).strip()
-                _first_scene_prose = re.sub(
+        _recorded_scenes = {}
+        _raw_scene_blocks = st.session_state.get("scene_blocks") or {}
+        if isinstance(_raw_scene_blocks, dict):
+            for _key, _value in _raw_scene_blocks.items():
+                try:
+                    _number = int(_key)
+                except (TypeError, ValueError):
+                    continue
+                if _number > 0 and isinstance(_value, str) and _value.strip():
+                    _recorded_scenes[_number] = _value.strip()
+
+        # Before Scene 1 is explicitly saved as a scene_block, the Stage 3
+        # story panel displays its prose from the first beat in plot_outline.
+        # Support every beat encoding accepted by the existing Scene Scripting
+        # parser: bracketed [BEAT 1], legacy ===, and plain BEAT 1 headings.
+        if 1 not in _recorded_scenes:
+            _outline_text = str(st.session_state.get("plot_outline") or "").strip()
+            _first_section = ""
+            _bracket_beats = list(re.finditer(
+                r"(?im)^\s*\[BEAT\s+(\d+)\]", _outline_text))
+            if _bracket_beats:
+                for _i, _hit in enumerate(_bracket_beats):
+                    if int(_hit.group(1)) == 1:
+                        _end = (_bracket_beats[_i + 1].start()
+                                if _i + 1 < len(_bracket_beats) else len(_outline_text))
+                        _first_section = _outline_text[_hit.end():_end]
+                        break
+            elif len([b for b in _outline_text.split("===") if b.strip()]) > 1:
+                _first_section = next((b for b in _outline_text.split("===")
+                                       if re.search(r"\[(?:SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*)\]", b, re.I)), "")
+            else:
+                _plain_beats = list(re.finditer(
+                    r"(?im)^\s*BEAT\s+(\d+)\s*:?\s*$", _outline_text))
+                if _plain_beats:
+                    for _i, _hit in enumerate(_plain_beats):
+                        if int(_hit.group(1)) == 1:
+                            _end = (_plain_beats[_i + 1].start()
+                                    if _i + 1 < len(_plain_beats) else len(_outline_text))
+                            _first_section = _outline_text[_hit.end():_end]
+                            break
+                else:
+                    # The downstream drafting stage accepts one untagged beat;
+                    # use it ONLY when it contains a recognizable scene field.
+                    _first_section = _outline_text
+
+            # Exact scene field read by the Stage 3 left-panel display; do not
+            # include the scene title, objective, conflict or style directives.
+            _scene_field = re.search(
+                r"(?is)\[(?:SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*)\]\s*:\s*",
+                _first_section)
+            if _scene_field:
+                _tail = _first_section[_scene_field.end():]
+                _next_tag = re.search(
+                    r"(?is)\[(?:BEAT\s*\d+|SCENE TITLE|CORE OBJECTIVE|"
+                    r"SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*|"
+                    r"THE\s+CONFLICT|STYLE\s*&\s*SYNTAX DIRECTIVE)\]",
+                    _tail)
+                _first_scene = _tail[:_next_tag.start() if _next_tag else len(_tail)]
+                # Match Stage 3's reader-facing prose cleaner; no saved text edits.
+                _first_scene = re.sub(
                     r'(?is)(?:^|(?<=[.!?])\s+)["“]?\s*(?:Her|His|Their|The character\'s|The protagonist\'s)\s+'
                     r'conflict\s+is\s+(?:purely|primarily|largely)\s+(?:internal|external)'
-                    r'.*?(?:[.!?](?=\s|$)|$)["”]?', ' ', _first_scene_prose)
-                _first_scene_prose = re.sub(
+                    r'.*?(?:[.!?](?=\s|$)|$)["”]?', ' ', _first_scene)
+                _first_scene = re.sub(
                     r"(?is)(?:^|(?<=[.!?])\s+)(?:The scene (?:emphasizes|focuses on|is carried|will be|relies on|should|uses|highlights|establishes)|"
                     r"Narration (?:carries|highlights|focuses|will|should|describes)|"
                     r"The narration (?:carries|highlights|focuses|will|should|describes)|"
                     r"This (?:beat|scene) (?:emphasizes|focuses|should|uses|is designed)|"
                     r"(?:Use|Maintain|Employ|Apply|Analyze and apply) (?:active syntax|descriptive|style syntax|narration|dialogue)).*?(?:[.!?](?=\s|$)|$)",
-                    ' ', _first_scene_prose)
-                _working_word_total = count_words(re.sub(r"[ \t]{2,}", " ", _first_scene_prose).strip())
+                    ' ', _first_scene)
+                _first_scene = re.sub(r"[ \t]{2,}", " ", _first_scene).strip().strip("=").strip()
+                if _first_scene:
+                    _recorded_scenes[1] = _first_scene
+
+        _working_word_total = sum(count_words(_recorded_scenes[n])
+                                  for n in sorted(_recorded_scenes))
     st.write(f"Current Working Words: {_working_word_total:,}")
 
 st.sidebar.markdown("---")
