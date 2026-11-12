@@ -1,0 +1,74 @@
+{
+  "publisher_assessment": {
+    "start": 8889,
+    "end": 8905,
+    "sha256": "5fd5ead01d7edde0df4e1d3be2708e22e6216bba307e964020fbbda92214c9f0",
+    "line_reference": "pre-extraction test app; runtime source now generated from equivalent baseline AST",
+    "source_path": "tests/fixtures/legacy_workflows/publisher_assessment.py",
+    "runtime_path": "formats/<active_format_id>/publisher_assessment.py"
+  },
+  "concept_development": {
+    "start": 8908,
+    "end": 9988,
+    "sha256": "0a00342ab330ce89b980076e222c4d143f1039f2e7c06d188bce92a7282dc317",
+    "line_reference": "pre-extraction test app; runtime source now generated from equivalent baseline AST",
+    "source_path": "tests/fixtures/legacy_workflows/concept_development.py",
+    "runtime_path": "formats/<active_format_id>/concept_development.py"
+  },
+  "plot_architecture": {
+    "start": 9991,
+    "end": 10257,
+    "sha256": "69ea020a4751c0efeab26a3c0de979d874ac154ecbc620bc7c8b3ec57318cbe5",
+    "line_reference": "pre-extraction test app; runtime source now generated from equivalent baseline AST",
+    "source_path": "tests/fixtures/legacy_workflows/plot_architecture.py",
+    "runtime_path": "formats/<active_format_id>/plot_architecture.py"
+  },
+  "scene_scripting": {
+    "start": 10622,
+    "end": 11599,
+    "sha256": "f44aca3fd7f0e1ddd914184447aa08d1aa3e87ca9b537e93250e08de3443d8f5",
+    "line_reference": "pre-extraction test app; runtime source now generated from equivalent baseline AST",
+    "source_path": "tests/fixtures/legacy_workflows/scene_scripting.py",
+    "runtime_path": "formats/<active_format_id>/scene_scripting.py"
+  },
+  "drafting": {
+    "start": 11605,
+    "end": 12265,
+    "sha256": "985a1e09515c38f5e2eb31b4799eca543e813b686a6aab620fd8faa45a5b2784",
+    "line_reference": "pre-extraction test app; runtime source now generated from equivalent baseline AST",
+    "source_path": "tests/fixtures/legacy_workflows/drafting.py",
+    "runtime_path": "formats/<active_format_id>/drafting.py"
+  },
+  "final_manuscript": {
+    "start": 12275,
+    "end": 12338,
+    "sha256": "881d41162e33cbda21331761b81627b009d9e746db43bcf4a8de7b83535b6871",
+    "line_reference": "pre-extraction test app; runtime source now generated from equivalent baseline AST",
+    "source_path": "tests/fixtures/legacy_workflows/final_manuscript.py",
+    "runtime_path": "formats/<active_format_id>/final_manuscript.py"
+  },
+  "editorial_review": {
+    "start": 12270,
+    "end": 13675,
+    "sha256": "f7783c6bc09113fc343cdf6b154ce63086a026c4f723c8b6d2afc7b051936ef9",
+    "line_reference": "pre-extraction test app; runtime source now generated from equivalent baseline AST",
+    "source_path": "tests/fixtures/legacy_workflows/editorial_review.py",
+    "runtime_path": "formats/<active_format_id>/editorial_review.py"
+  },
+  "script_polish": {
+    "start": 13680,
+    "end": 13779,
+    "sha256": "4d27f9e6ad79f2a7a1c3bae20b102e89a1f53cef55709cfac4812392bddb3ad3",
+    "line_reference": "pre-extraction test app; runtime source now generated from equivalent baseline AST",
+    "source_path": "tests/fixtures/legacy_workflows/script_polish.py",
+    "runtime_path": "formats/<active_format_id>/script_polish.py"
+  },
+  "script_rewrite": {
+    "start": 13784,
+    "end": 14286,
+    "sha256": "fb3f8cec7c6578c1fc96acfb6c250d8974991aa740cdf4e5f283cbc95938fe56",
+    "line_reference": "pre-extraction test app; runtime source now generated from equivalent baseline AST",
+    "source_path": "tests/fixtures/legacy_workflows/script_rewrite.py",
+    "runtime_path": "formats/<active_format_id>/script_rewrite.py"
+  }
+}

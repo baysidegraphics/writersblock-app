@@ -21,6 +21,8 @@ FORMAT_LEGACY = {
     "full_novel_blueprint": "Full Novel Blueprint",
     "podcast_script": "Podcast Script",
     "standard_manuscript": "Standard Manuscript",
+    "biography_memoir": "Biography / Autobiography / Memoir",
+    "childrens_interactive_educational": "Children's Interactive Educational Books",
 }
 
 LEGACY_FORMAT_IDS = {name: key for key, name in FORMAT_LEGACY.items()}

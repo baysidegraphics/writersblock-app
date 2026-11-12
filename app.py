@@ -47,8 +47,26 @@ from docx.enum.section import WD_SECTION
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from gemini_backend import GeminiWriterBackend
-from supabase import create_client
+from core.authentication import session_controller, AuthenticationError
+from core.auth_ui import sync_access_state, render_auth_access
 from quill import render_quill_for_current_stage
+from core.workflow_runtime import active_scene_functions
+
+def wbs_ss_blocks(source):
+    return active_scene_functions(st.session_state).completed_blocks(source)
+
+def wbs_novel_blocks(source):
+    return active_scene_functions(st.session_state).completed_blocks(source)
+
+def wbs_ss_storyline(source):
+    return active_scene_functions(st.session_state).manuscript(source)
+
+def wbs_novel_manuscript(source):
+    return active_scene_functions(st.session_state).manuscript(source)
+
+def wbs_ss_outline_parts(source):
+    return active_scene_functions(st.session_state).outline_parts(source)
+
 from template_registry import (
     FORMAT_OPTIONS as WBS_FORMAT_OPTIONS,
     get_template as get_wbs_format_template,
@@ -85,11 +103,25 @@ WRITER_EDITION_FOUNDING_50_LABEL = "$69 one-time"
 WRITER_EDITION_PRICE_LABEL = WRITER_EDITION_REGULAR_LABEL
 TRIAL_DAYS = 7
 FOUNDING_50_ACTIVE = True
-PURCHASE_URL = "https://buy.stripe.com/bJeeVeckVeui86Vdwn5Vu0a"  # Paste the direct Stripe Payment Link here when created.
+PURCHASE_URL = ""  # Private staging: real checkout disabled.
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+from core.persistence import OwnedClient
+from core.saved_scene_state import observe_saved_rows
+from sidebar.summary import refresh_scene_total_views
+_wbs_scene_total_views = []
+
+def _observe_saved_project_rows(table, operation, rows, owner):
+    if observe_saved_rows(st.session_state, table, operation, rows, owner):
+        refresh_scene_total_views(globals())
+
+try:
+    _wbs_auth = session_controller(st.session_state, SUPABASE_URL, SUPABASE_KEY)
+except AuthenticationError as _wbs_auth_configuration_error:
+    st.error(str(_wbs_auth_configuration_error))
+    st.stop()
+supabase = _wbs_auth.owned_client(_observe_saved_project_rows, checkpoint_state=st.session_state)
 
 # ==========================================
 # AFFITOR AFFILIATE LEAD ATTRIBUTION
@@ -97,7 +129,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # The public WritersBlock website passes the first-party Affitor click ID into
 # the Streamlit app as ?affitor_click_id=... . Keep it in session state across
 # Streamlit reruns, then bind it to the stable WritersBlock user ID after signup.
-AFFITOR_LEAD_ENDPOINT = "https://api.affitor.com/api/v1/track/lead"
+AFFITOR_LEAD_ENDPOINT = "https://example.invalid/staging-affiliate-disabled"
 
 
 def _clean_affitor_click_id(value):
@@ -209,16 +241,9 @@ def track_affitor_lead(user_row, email):
 # Capture once on entry; Streamlit session state preserves it during reruns.
 capture_affitor_click_id()
 def get_current_user_id():
-    licensed_user_row = st.session_state.get("licensed_user_row") or {}
-    demo_user_row = st.session_state.get("demo_user_row") or {}
-
-    if isinstance(licensed_user_row, dict) and licensed_user_row.get("id"):
-        return licensed_user_row.get("id")
-
-    if isinstance(demo_user_row, dict) and demo_user_row.get("id"):
-        return demo_user_row.get("id")
-
-    return None
+    # Existing ownership ids remain stable, but originate only from the
+    # authenticated, RLS-protected account mapping, never editable UI flags.
+    return _wbs_auth.owner_id
 
 
 def save_project_to_supabase(project_title, project_type="story"):
@@ -318,6 +343,9 @@ def wbs_validate_setup_for_save(snapshot):
     values = values if isinstance(values, dict) else {}
     expected = wbs_expected_saved_development_fields(fmt, values)
     missing = [label for key, label in expected if key not in values]
+    if fmt in {"biography_memoir", "childrens_interactive_educational"}:
+        from core.registry import get_format
+        missing.extend(get_format(fmt).validate_snapshot(snapshot))
     return missing
 
 
@@ -476,6 +504,8 @@ def get_project_session_snapshot():
         "picture_book_layout_source_signature",
         "picture_book_layout_preview_id",
         "picture_book_page_size",
+        "children_publication_layout",
+        "publication_layout",
         "current_project_id",
     ]
 
@@ -647,7 +677,7 @@ WBS_WRITER_CHANGE_KEYS = (
     "tone_style", "author_style", "project_scope", "series_key", "series_name",
     "series_book_number", "series_continuity_mode", "series_reference_ids",
     "series_canon_notes", "audiobook_length", "audiobook_target_word_count",
-    "picture_book_word_target", "picture_book_page_size", "story_seed", "wbs_project_original_concept",
+    "picture_book_word_target", "picture_book_page_size", "children_publication_layout", "publication_layout", "story_seed", "wbs_project_original_concept",
     "starting_source_mode", "version_source_mode", "imported_source_name",
     "quill_starting_direction", "imported_source_text", "saved_version_source_text",
     "audiobook_production_script", "audiobook_production_cue_level",
@@ -827,6 +857,8 @@ def save_current_project_session_to_supabase(version_name=None, save_as_new_vers
             st.error("Exact active revision cannot be verified. Reload the saved project; nothing was changed.")
             return None
         try:
+            from core.save_conflicts import expected_checkpoint, verify_checkpoint
+            expected_content = expected_checkpoint(st.session_state, project_id, row_id)
             rows = (supabase.table("writersblock_project_drafts")
                     .select("id, project_id, user_id, version_number, draft_content")
                     .eq("id", row_id).eq("project_id", project_id)
@@ -834,6 +866,7 @@ def save_current_project_session_to_supabase(version_name=None, save_as_new_vers
                     .limit(1).execute()).data or []
             if len(rows) != 1:
                 raise ValueError("The selected revision was not found")
+            verify_checkpoint(expected_content, rows[0]['draft_content'])
             previous = json.loads(rows[0].get("draft_content") or "{}")
             if not isinstance(previous, dict):
                 raise ValueError("Saved revision is invalid")
@@ -847,21 +880,24 @@ def save_current_project_session_to_supabase(version_name=None, save_as_new_vers
             # persisted review metadata if it isn't in the live snapshot.
             snapshot["project_version_name"] = previous.get("project_version_name") or "Original"
             snapshot["concept_change_areas"] = previous.get("concept_change_areas") or []
+            _structure_now = ((snapshot.get("format_template_values") or {}).get(snapshot["active_format_id"]) or {}).get("manuscript_structure")
+            _structure_before = ((previous.get("format_template_values") or {}).get(snapshot["active_format_id"]) or {}).get("manuscript_structure")
+            _structure_invalidates_report = (snapshot["active_format_id"] != "short_story" and bool(_structure_now)
+                and (_structure_now != _structure_before or snapshot.get("current_draft_output") != previous.get("current_draft_output")))
             for review_key in ("project_integrity_report", "project_integrity_source_signature",
                                "project_integrity_status"):
-                if not snapshot.get(review_key) and previous.get(review_key):
+                if not _structure_invalidates_report and not snapshot.get(review_key) and previous.get(review_key):
                     snapshot[review_key] = previous[review_key]
-            updated = (supabase.table("writersblock_project_drafts")
-                       .update({"draft_content": json.dumps(snapshot)})
-                       .eq("id", row_id).eq("project_id", project_id)
-                       .eq("user_id", user_id).eq("draft_type", "project_session")
-                       .execute())
+            updated = supabase.save_project_checkpoint(
+                project_id, row_id, rows[0]['draft_content'], json.dumps(snapshot))
             if not getattr(updated, "data", None):
                 raise RuntimeError("Save not confirmed by database")
         except Exception as exc:
             st.error(f"Current revision was not saved: {exc}")
             return None
         st.session_state.last_saved_project_at = snapshot.get("saved_at")
+        from core.save_conflicts import remember_checkpoint
+        remember_checkpoint(st.session_state, project_id, updated.data[0])
         st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
         st.session_state["_wbs_last_saved_project_id"] = str(project_id)
         st.session_state["_wbs_active_saved_session_row_id"] = row_id
@@ -900,6 +936,8 @@ def save_current_project_session_to_supabase(version_name=None, save_as_new_vers
         save_series_metadata_for_project(project_id)
 
     st.session_state.project_version_name = requested_version_name
+    from core.save_conflicts import remember_checkpoint
+    remember_checkpoint(st.session_state, project_id, result.data[0])
     st.session_state.concept_change_areas = list(changed_areas)
     st.session_state.last_saved_project_at = snapshot.get("saved_at")
     set_loaded_concept_version_baseline(snapshot)
@@ -1426,6 +1464,8 @@ def load_saved_project_session_to_state(saved_session_row):
             st.session_state[key] = value
     st.session_state.last_saved_project_at = snapshot.get("saved_at")
     st.session_state["_wbs_active_saved_session_row_id"] = str(saved_session_row.get("id") or "")
+    from core.save_conflicts import remember_checkpoint
+    remember_checkpoint(st.session_state, load_project_id, saved_session_row)
     st.session_state["wbs_stage4_scene_approvals"] = snapshot.get("wbs_stage4_scene_approvals") or {}
     st.session_state.pop("_wbs_stage4_review_identity", None)
     st.session_state.pop("_wbs_stage4_approved_scenes", None)
@@ -1463,6 +1503,8 @@ def load_saved_project_session_to_state(saved_session_row):
         st.session_state["saved_quill_concept"] = snapshot["saved_quill_concept"]
     else:
         st.session_state.pop("saved_quill_concept", None)
+    st.session_state['children_publication_layout']=snapshot.get('children_publication_layout')
+    st.session_state['publication_layout']=snapshot.get('publication_layout')
     st.session_state.active_format_id = restored_format_id
     st.session_state.format_type = WBS_LEGACY_FORMAT_BY_TEMPLATE_ID[restored_format_id]
     st.session_state.active_format_template = get_wbs_format_template(restored_format_id)
@@ -1544,6 +1586,8 @@ def load_saved_project_session_to_state(saved_session_row):
     baseline_snapshot["version_source_mode"] = st.session_state.version_source_mode
     set_loaded_concept_version_baseline(baseline_snapshot)
 
+    from core.saved_scene_state import remember_saved_snapshot
+    remember_saved_snapshot(st.session_state, verified, load_project_id, saved_session_row.get("id"))
     return True
 
 
@@ -2397,15 +2441,17 @@ st.markdown(
 # ==========================================
 # Load local environment variables BEFORE constructing GeminiWriterBackend so
 # GEMINI_API_KEY from the Integration-Test .env is available at backend startup.
-load_dotenv()
+from core.runtime_startup import load_local_environment, customer_backend
+load_local_environment()
+try:
+    customer_backend(st.session_state, st.secrets)
+except ValueError:
+    st.error("Writing service configuration is invalid. Contact the application owner.")
+    st.stop()
 
-if "backend" not in st.session_state:
-    st.session_state.backend = GeminiWriterBackend()
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-
-supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+# SUPABASE_URL = os.getenv("SUPABASE_URL")
+# SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+# supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 # ==========================================
 # SYSTEM STATE INITIALIZATION
 # ==========================================
@@ -2509,6 +2555,11 @@ WBS_TEMPLATE_ID_BY_LEGACY_FORMAT = {
     "Standard Manuscript": "standard_manuscript",
 }
 
+# Additive registration for the two independent workspaces.
+for _new_format_id in ("biography_memoir", "childrens_interactive_educational"):
+    WBS_LEGACY_FORMAT_BY_TEMPLATE_ID[_new_format_id] = FORMAT_LEGACY[_new_format_id]
+    WBS_TEMPLATE_ID_BY_LEGACY_FORMAT[FORMAT_LEGACY[_new_format_id]] = _new_format_id
+
 WBS_FORMAT_IDS = [format_id for format_id, _label in WBS_FORMAT_OPTIONS]
 
 if "active_format_id" not in st.session_state:
@@ -2591,6 +2642,7 @@ def get_development_writing_tense():
                   if isinstance(f, dict) and "tense" in
                   (str(f.get("key") or "") + " " + str(f.get("label") or "")).lower()}
     for key, value in values.items():
+        if st.session_state.get('active_format_id')=='childrens_picture_book' and key in {'page_turn_source','page_turn_legacy_structure'}:continue
         if "tense" in str(key).lower() or key in tense_keys:
             text = str(value or "").strip()
             if text and ("present" in text.lower() or "past" in text.lower()):
@@ -2628,7 +2680,7 @@ def format_field_should_render(field, values):
 def get_active_format_development_context():
     template = st.session_state.get("active_format_template") or {}
     values = get_active_format_template_values()
-    if not values:
+    if not values and st.session_state.get('active_format_id')!='novel_prose_novella':
         return ""
 
     labels = {
@@ -2640,7 +2692,15 @@ def get_active_format_development_context():
         "ACTIVE WRITING FORMAT DEVELOPMENT REQUIREMENTS",
         f"Writing Format: {template.get('display_name') or st.session_state.get('quill_format_name') or ''}",
     ]
+    if st.session_state.get('active_format_id') != 'short_story':
+        from core.manuscript_structure import profile
+        lines.append('Format organization: '+profile(st.session_state['active_format_id'])['description'])
+    if st.session_state.get('active_format_id')=='novel_prose_novella':
+        from formats.novel_prose_novella.work_type import guidance
+        lines.append(guidance(st.session_state))
     for key, value in values.items():
+        if st.session_state.get('active_format_id')=='novel_prose_novella' and key=='book_scale':
+            continue  # Retained legacy metadata; Work Type is authoritative.
         if value is None or str(value).strip() == "":
             continue
         lines.append(f"{labels.get(str(key), str(key))}: {value}")
@@ -2715,203 +2775,17 @@ def refresh_quill_template_context():
 
 
 def render_active_format_development_fields():
-    template = st.session_state.get("active_format_template") or {}
-    fields = [f for f in (template.get("concept_fields") or []) if isinstance(f, dict)]
-    if not fields:
-        return
-
-    # These are already supplied by common WritersBlock controls elsewhere on Step 1.
-    shared_keys = {
-        "project_title", "dialogue_style",
-        "story_premise", "premise", "logline", "story_idea", "objective",
-        "core_premise",
-    }
-    values = get_active_format_template_values()
-    render_fields = [
-        f for f in fields
-        if str(f.get("key")) not in shared_keys and format_field_should_render(f, values)
-    ]
-    if not render_fields:
-        return
-
-    setup_name = str(template.get("display_name") or st.session_state.get("quill_format_name") or "Format").strip()
-    st.markdown(f"### {setup_name} Development Setup")
-    st.caption(str(template.get("description") or ""))
-
-    # Keep the form compact: two controlled columns inside the middle panel.
-    for i in range(0, len(render_fields), 2):
-        row = render_fields[i:i + 2]
-        cols = st.columns(2, gap="medium")
-        for col, field in zip(cols, row):
-            key = str(field.get("key") or "").strip()
-            if not key:
-                continue
-            label = str(field.get("label") or key)
-            help_text = str(field.get("help") or "") or None
-            widget_key = get_active_format_widget_key(key)
-            existing = values.get(key, "")
-
-            with col:
-                if field.get("type") == "select":
-                    options = list(field.get("options") or [])
-                    # Novel/Novella: allow economical short test manuscripts while
-                    # preserving every existing production-length choice.
-                    if (st.session_state.get("active_format_id") == "novel_prose_novella"
-                            and any(re.search(r"(?:20,?000|20\s*k)\s*[-–—to]+\s*(?:40,?000|40\s*k)", str(opt), re.I)
-                                    for opt in options)
-                            and any(term in (key + " " + label).lower()
-                                    for term in ("length", "word", "size", "scale"))):
-                        if "Less than 20,000 words" not in options:
-                            options.insert(0, "Less than 20,000 words")
-                    # Shared Concept Development author/influence selection across formats.
-                    if ("author" in key.lower() or "author" in label.lower()
-                            or key == "production_influence"
-                            or "writing influence" in label.lower()):
-                        if "Arthur C. Clarke" not in options:
-                            custom_index = next((i for i, item in enumerate(options)
-                                                 if "custom" in str(item).lower() or "other" == str(item).strip().lower()), len(options))
-                            options.insert(custom_index, "Arthur C. Clarke")
-                    if (("genre" in key.lower() or "genre" in label.lower())
-                            and "Spiritual" not in options):
-                        options.append("Spiritual")
-                    if key == "production_influence":
-                        custom_option = "Custom Influence / Other"
-                        if custom_option not in options:
-                            options.append(custom_option)
-                    # Picture-book ages: flexible, inclusive age-range selection.
-                    age_field = (
-                        str(st.session_state.get("active_format_id")) == "childrens_picture_book"
-                        and ("age" in key.lower() or "age" in label.lower())
-                    )
-                    if age_field:
-                        options = list(dict.fromkeys(options + [
-                            "0-2", "2-5", "3-8", "5-9", "6-10", "8-12",
-                            "Custom age range",
-                        ]))
-                    if not options:
-                        continue
-                    # Re-open custom ranges as a custom selection, not the first preset.
-                    chosen_age = existing
-                    if age_field and existing not in options and str(existing).strip():
-                        chosen_age = "Custom age range"
-                    index = options.index(chosen_age) if chosen_age in options else 0
-                    value = st.selectbox(
-                        label, options, index=index, key=widget_key, help=help_text
-                    )
-                    if age_field and value == "Custom age range":
-                        from_age, to_age = st.columns(2)
-                        found = re.search(r"(\d+)\s*[-–]\s*(\d+)", str(existing or ""))
-                        start_age = int(found.group(1)) if found else 3
-                        end_age = int(found.group(2)) if found else 8
-                        with from_age:
-                            lower_age = st.number_input("From age", 0, 18, start_age,
-                                key=f"{widget_key}_from")
-                        with to_age:
-                            upper_age = st.number_input("To age", 0, 18, end_age,
-                                key=f"{widget_key}_to")
-                        if lower_age > upper_age:
-                            st.warning("The ending age must be at least the starting age.")
-                            value = str(existing or "")
-                        else:
-                            value = f"{lower_age}-{upper_age}"
-                elif field.get("type") == "date":
-                    try:
-                        existing_date = datetime.strptime(str(existing), "%Y-%m-%d").date() if existing else datetime.now().date()
-                    except Exception:
-                        existing_date = datetime.now().date()
-                    selected_date = st.date_input(
-                        label, value=existing_date, key=widget_key, help=help_text
-                    )
-                    value = selected_date.isoformat() if selected_date else ""
-                elif field.get("type") == "textarea":
-                    value = st.text_area(
-                        label, value=str(existing or ""), height=95, key=widget_key, help=help_text
-                    )
-                else:
-                    value = st.text_input(
-                        label, value=str(existing or ""), key=widget_key, help=help_text
-                    )
-                set_active_format_template_value(key, value)
-
-                # Production Influence is mutually exclusive: either choose a preset
-                # OR choose Custom Influence / Other and enter a custom reference.
-                if key == "production_influence":
-                    custom_key = "production_influence_custom"
-                    custom_option = "Custom Influence / Other"
-                    if value == custom_option:
-                        custom_widget_key = get_active_format_widget_key(custom_key)
-                        custom_existing = values.get(custom_key, "")
-                        custom_value = st.text_input(
-                            "Custom Influence",
-                            value=str(custom_existing or ""),
-                            key=custom_widget_key,
-                            help=(
-                                "Enter an author, director, playwright, filmmaker, or creative style "
-                                "not listed above."
-                            ),
-                            placeholder="Enter the influence you want WritersBlock to use",
-                        )
-                        set_active_format_template_value(custom_key, custom_value)
-                        st.session_state.author_style = str(custom_value or "").strip()
-                    else:
-                        # A preset choice always wins and removes any stale custom value.
-                        set_active_format_template_value(custom_key, "")
-                        st.session_state.author_style = str(value or "").strip()
-                elif key == "visual_style":
-                    st.session_state.author_style = str(value or "")
-                elif key == "narration_type":
-                    st.session_state.author_style = f"Narration Type: {value}" if value else ""
-
-    refresh_quill_template_context()
-    if is_picture_book_project():
-        render_picture_book_budget("development", editable=True)
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('render_active_format_development_fields', globals())
 
 
 
-def wbs_concept_contains_editorial_commentary(text):
-    """Reject planning notes mistakenly presented as a writer-facing concept."""
-    text = str(text or "")
-    editorial_patterns = (
-        r"\b(?:this|the) (?:story|flash story|narrative|premise|concept|episode|screenplay|script|plot)\s+(?:explores|examines|focuses on|centers on|revolves around|will|should|aims to|is about|follows|depicts|portrays)\b",
-        r"\b(?:the )?(?:central|core|main) (?:idea|theme|premise|tension|conflict) (?:is|explores|examines|centers|focuses)\b",
-        r"\b(?:the )?(?:narrative|story|plot|episode|script) should\b",
-        r"\b(?:from a|in a) (?:first|third)[ -]person perspective\b",
-        r"\b(?:the writer|the author|the reader|the audience) (?:should|will|can|must)\b",
-        r"\b(?:the ending|the climax|the resolution) (?:should|will|can)\b",
-        r"\b(?:this concept|this premise|this suggestion)\b",
-        r"\b(?:target audience|genre|dialogue style|production influence):\s",
-    )
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in editorial_patterns)
+from formats.common.concept import wbs_concept_contains_editorial_commentary
 
 
 def render_format_template_save_reminder():
-    """One master Save Project, then non-destructive new versions (all formats)."""
-    st.markdown("---")
-    with st.container(border=True):
-        if st.session_state.get("demo_mode"):
-            st.caption("Project saving is available in the full Writer Edition.")
-            if st.button("💾 Save Project 🔒", key="template_save_project_trial", use_container_width=True):
-                full_version_only_notice("Saved Projects")
-            return
-        has_master = wbs_has_saved_master()
-        if has_master is None:
-            st.warning("Cannot verify this project's save history. Saving is disabled until the connection is restored.")
-        elif has_master:
-            render_save_as_named_version_control(
-                f"concept_{st.session_state.get('active_format_id', 'format')}"
-            )
-        elif st.button(
-            "💾 Save Project — Create Master",
-            key=f"template_save_project_{st.session_state.get('active_format_id', 'format')}",
-            use_container_width=True, type="secondary",
-        ):
-            if not get_project_title():
-                st.warning("Name the new project before saving.")
-                return
-            result = save_current_project_session_to_supabase()
-            if result and not getattr(result, "unchanged", False):
-                st.success("Master project saved. Future changes are new versions.")
-                st.rerun()
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('render_format_template_save_reminder', globals())
 
 
 if "project_version_name" not in st.session_state:
@@ -3070,20 +2944,13 @@ if "picture_book_layout_preview_id" not in st.session_state:
 if "picture_book_page_size" not in st.session_state:
     st.session_state.picture_book_page_size = "8.5 x 8.5 Square"
 
-def count_words(text):
-    return len(re.findall(r"\b\w+\b", str(text or "")))
+from core.text import count_words
 
 
-def get_text_signature(text):
-    normalized = re.sub(r"\s+", " ", str(text or "").strip())
-    if not normalized:
-        return ""
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+from core.text import get_text_signature
 
 
-def safe_download_stem(value, fallback="writersblock_output"):
-    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value or "").strip()).strip("_")
-    return stem.lower() or fallback
+from core.text import safe_download_stem
 
 
 PICTURE_BOOK_FORMAT = "Children's Picture Book (32-Page Layout)"
@@ -3096,20 +2963,7 @@ PICTURE_BOOK_LAYOUT_TEMPLATES = [
     "Spot Illustration — Open Text Area",
 ]
 
-PICTURE_BOOK_PAGE_SIZES = {
-    "8.5 x 8.5 Square": {
-        "page_width": 8.5,
-        "page_height": 8.5,
-        "spread_aspect": "2 / 1",
-        "trim_reference": "8.5 x 8.5 square planning layout",
-    },
-    "10 x 8 Landscape": {
-        "page_width": 10.0,
-        "page_height": 8.0,
-        "spread_aspect": "5 / 2",
-        "trim_reference": "10 x 8 landscape planning layout",
-    },
-}
+PICTURE_BOOK_PAGE_SIZES = {'8.5 x 8.5 Square': {'page_width': 8.5, 'page_height': 8.5, 'spread_aspect': '17.0 / 8.5', 'trim_reference': '8.5 x 8.5 Square planning layout'}, '10 x 8 Landscape': {'page_width': 10, 'page_height': 8, 'spread_aspect': '20 / 8', 'trim_reference': '10 x 8 Landscape planning layout'}, '7 x 7 Square': {'page_width': 7, 'page_height': 7, 'spread_aspect': '14 / 7', 'trim_reference': '7 x 7 Square planning layout'}, '8 x 8 Square': {'page_width': 8, 'page_height': 8, 'spread_aspect': '16 / 8', 'trim_reference': '8 x 8 Square planning layout'}, '8.25 x 8.25 Square': {'page_width': 8.25, 'page_height': 8.25, 'spread_aspect': '16.5 / 8.25', 'trim_reference': '8.25 x 8.25 Square planning layout'}, '8 x 10 Portrait': {'page_width': 8, 'page_height': 10, 'spread_aspect': '16 / 10', 'trim_reference': '8 x 10 Portrait planning layout'}, '8.5 x 11 Letter': {'page_width': 8.5, 'page_height': 11, 'spread_aspect': '17.0 / 11', 'trim_reference': '8.5 x 11 Letter planning layout'}, '6 x 9 Portrait': {'page_width': 6, 'page_height': 9, 'spread_aspect': '12 / 9', 'trim_reference': '6 x 9 Portrait planning layout'}, '7 x 10 Portrait': {'page_width': 7, 'page_height': 10, 'spread_aspect': '14 / 10', 'trim_reference': '7 x 10 Portrait planning layout'}, '11 x 8.5 Landscape': {'page_width': 11, 'page_height': 8.5, 'spread_aspect': '22 / 8.5', 'trim_reference': '11 x 8.5 Landscape planning layout'}, 'A4 Portrait (210 x 297 mm)': {'page_width': 8.267716535433072, 'page_height': 11.692913385826772, 'spread_aspect': '16.535433070866144 / 11.692913385826772', 'trim_reference': 'A4 Portrait (210 x 297 mm) planning layout'}}
 
 DEFAULT_PICTURE_BOOK_PAGE_SIZE = "8.5 x 8.5 Square"
 
@@ -3182,142 +3036,13 @@ def picture_book_allocations():
     a = [int(total * w) for w in PICTURE_BOOK_BEAT_WEIGHTS[:3]]
     return a + [total - sum(a)]
 
-def render_picture_book_budget(location="", editable=False):
-    if not is_picture_book_project():
-        return
-    st.markdown("#### 📚 Picture Book — Manuscript Word Budget")
-    default, maximum, age_label = picture_book_age_budget_rules()
-    target = picture_book_target()
-    st.caption(f"Target age {age_label} · suggested {default:,} words · age-group maximum {maximum:,} words")
-    if editable:
-        # The widget uses an age-specific key so switching ages never changes
-        # an already instantiated Streamlit widget's session-state entry.
-        age_signature = str(age_label)
-        widget_key = "_wbs_pb_target_input_" + re.sub(r"[^0-9A-Za-z]+", "_", age_signature)
-        age_changed = st.session_state.get("_wbs_picture_book_budget_age") != age_signature
-        if age_changed:
-            st.session_state["_wbs_picture_book_budget_age"] = age_signature
-            st.session_state["picture_book_word_target"] = default
-            # Reset this age's input BEFORE instantiating it, if previously visited.
-            st.session_state[widget_key] = default
-        elif widget_key not in st.session_state:
-            st.session_state[widget_key] = target
-        target = st.number_input(
-            "Total manuscript word target", min_value=100, max_value=maximum,
-            step=25, key=widget_key,
-            help="Age-group maximum is enforced. Only finished story text counts; planning text is excluded.",
-        )
-        # The canonical, non-widget value can safely be used by later stages.
-        st.session_state["picture_book_word_target"] = int(target)
-    blocks = st.session_state.get("scene_blocks") or {}
-    if blocks:
-        counts = [count_words(blocks.get(i, blocks.get(str(i), ""))) for i in range(1, 5)]
-        used = sum(counts)
-    else:
-        used = count_words(st.session_state.get("current_draft_output") or "")
-        counts = [0, 0, 0, 0]
-    remaining = target - used
-    st.write(f"**Total manuscript:** {used:,} / {target:,} words · " +
-             (f"{remaining:,} remaining" if remaining >= 0 else f"{abs(remaining):,} OVER target"))
-    st.progress(min(1., used/max(target, 1)))
-    allocations = picture_book_allocations()
-    if blocks:
-        for i, (allocated, actual) in enumerate(zip(allocations, counts), 1):
-            st.caption(f"Beat {i}: {actual} / {allocated} allocated · {allocated-actual:+} remaining")
-    else:
-        st.caption("Four-beat plan: " + " | ".join(f"Beat {i}: {n} words" for i, n in enumerate(allocations, 1)))
-    # The selected target is a planning guide; only the age-group maximum
-    # warrants an overlength warning. Do not block an approved manuscript.
-    if used > maximum:
-        st.warning(f"Manuscript is {used - maximum:,} words above the selected age-group maximum of {maximum:,} words.")
+def render_picture_book_budget(location='', editable=False):
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('render_picture_book_budget', globals(), location, editable)
 
 def render_picture_book_template_preview(template_name, page_size_name=None):
-    """Show a proportional two-page spread preview for the selected trim size."""
-    page_size_name = str(
-        page_size_name
-        or st.session_state.get("picture_book_page_size")
-        or DEFAULT_PICTURE_BOOK_PAGE_SIZE
-    )
-    size_spec = get_picture_book_page_size_spec(page_size_name)
-
-    container_style = (
-        "width:100%;max-width:760px;"
-        f"aspect-ratio:{size_spec['spread_aspect']};"
-        "margin:0.35rem 0 1rem 0;"
-        "border:2px solid #666;border-radius:8px;overflow:hidden;position:relative;"
-        "background:#f5f5f5;box-sizing:border-box;color:#111;"
-        "font-family:Arial,sans-serif;font-weight:700;letter-spacing:0.02em;"
-    )
-    illustration_style = (
-        "display:flex;align-items:center;justify-content:center;"
-        "background:#e5e5e5;color:#333;box-sizing:border-box;"
-    )
-    story_style = (
-        "display:flex;align-items:center;justify-content:center;"
-        "background:#ffffff;color:#111;box-sizing:border-box;"
-        "padding:12px;text-align:center;"
-    )
-    gutter_html = (
-        "<div style='position:absolute;left:50%;top:0;bottom:0;width:2px;"
-        "background:#888;z-index:6;'></div>"
-    )
-
-    # Light outlines make the two individual pages obvious.
-    page_outline_html = (
-        "<div style='position:absolute;left:0;top:0;width:50%;height:100%;"
-        "border-right:1px solid #aaa;box-sizing:border-box;z-index:7;pointer-events:none;'></div>"
-        "<div style='position:absolute;right:0;top:0;width:50%;height:100%;"
-        "border-left:1px solid #aaa;box-sizing:border-box;z-index:7;pointer-events:none;'></div>"
-    )
-
-    if template_name == "Full Illustration — Text Top":
-        body_html = (
-            f"<div style='{illustration_style}position:absolute;inset:0;'>ILLUSTRATION</div>"
-            f"<div style='{story_style}position:absolute;left:4%;right:4%;top:7%;height:25%;"
-            "border:1px solid #777;z-index:5;'>STORY TEXT</div>"
-        )
-    elif template_name == "Full Illustration — Text Bottom":
-        body_html = (
-            f"<div style='{illustration_style}position:absolute;inset:0;'>ILLUSTRATION</div>"
-            f"<div style='{story_style}position:absolute;left:4%;right:4%;bottom:7%;height:25%;"
-            "border:1px solid #777;z-index:5;'>STORY TEXT</div>"
-        )
-    elif template_name == "Text Left — Illustration Right":
-        body_html = (
-            f"<div style='{story_style}position:absolute;left:0;top:0;bottom:0;width:50%;'>STORY TEXT</div>"
-            f"<div style='{illustration_style}position:absolute;right:0;top:0;bottom:0;width:50%;'>ILLUSTRATION</div>"
-        )
-    elif template_name == "Illustration Left — Text Right":
-        body_html = (
-            f"<div style='{illustration_style}position:absolute;left:0;top:0;bottom:0;width:50%;'>ILLUSTRATION</div>"
-            f"<div style='{story_style}position:absolute;right:0;top:0;bottom:0;width:50%;'>STORY TEXT</div>"
-        )
-    elif template_name == "Two-Page Illustration — Text Overlay":
-        body_html = (
-            f"<div style='{illustration_style}position:absolute;inset:0;'>ILLUSTRATION ACROSS BOTH PAGES</div>"
-            f"<div style='{story_style}position:absolute;left:10%;bottom:9%;width:38%;height:28%;"
-            "border:1px solid #777;z-index:5;'>STORY TEXT</div>"
-        )
-    else:
-        body_html = (
-            f"<div style='{story_style}position:absolute;left:0;top:0;bottom:0;width:64%;padding:22px;'>"
-            "STORY TEXT</div>"
-            f"<div style='{illustration_style}position:absolute;right:8%;top:24%;width:24%;height:52%;"
-            "border:1px solid #777;border-radius:50%;'>SPOT<br>ILLUSTRATION</div>"
-        )
-
-    preview_html = (
-        f"<div style='{container_style}'>{body_html}{page_outline_html}{gutter_html}</div>"
-        "<div style='font-size:0.78rem;opacity:0.72;margin-top:-0.65rem;margin-bottom:0.25rem;'>"
-        f"Preview: two {size_spec['page_width']:g}&quot; × {size_spec['page_height']:g}&quot; pages "
-        f"({page_size_name})."
-        "</div>"
-        "<div style='font-size:0.78rem;opacity:0.70;margin-bottom:0.8rem;'>"
-        "Layout preview only — edit the story text and illustration direction below."
-        "</div>"
-    )
-
-    st.markdown(preview_html, unsafe_allow_html=True)
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('render_picture_book_template_preview', globals(), template_name, page_size_name)
 
 
 def normalize_picture_book_spreads(layout_data):
@@ -3757,7 +3482,8 @@ PROJECT_INTEGRITY_REVIEW_FORMATS = {
 
 def project_integrity_review_applies(format_type=None):
     selected = str(format_type or st.session_state.get("format_type") or "").strip()
-    return selected in PROJECT_INTEGRITY_REVIEW_FORMATS
+    from wbs_format_guard import FORMAT_LEGACY
+    return selected in PROJECT_INTEGRITY_REVIEW_FORMATS or selected in {FORMAT_LEGACY[f] for f in ('biography_memoir','childrens_interactive_educational')}
 
 
 def render_project_integrity_report_html(report_text, located_issues=None):
@@ -3835,40 +3561,7 @@ _WBS_IR_ALL_SECTIONS = (
 )
 
 
-def wbs_ir_parse_actionable_finding(text):
-    """Parse the five required report fields; return None for vague findings."""
-    raw = re.sub(r"^\s*(?:[-•*]|\d+[.)])\s*", "", str(text or "").strip())
-    fields = re.split(
-        r"\s*\|\s*(?=(?:ISSUE|WHY|LOCATION|EVIDENCE|SUGGESTED FIX)\s*:)" , raw,
-        flags=re.IGNORECASE,
-    )
-    values = {}
-    for field in fields:
-        match = re.fullmatch(r"(ISSUE|WHY|LOCATION|EVIDENCE|SUGGESTED FIX)\s*:\s*(.+)", field.strip(), re.I | re.S)
-        if match:
-            values[match.group(1).upper()] = match.group(2).strip()
-    if len(values) != 5 or not all(values.values()):
-        return None
-    evidence_match = re.fullmatch(r'["“](.+?)["”]', values["EVIDENCE"])
-    if not evidence_match:
-        return None
-    values["QUOTE"] = evidence_match.group(1).strip()
-    # Vague or formulaic filler is NOT a rule, explanation, or correction.
-    vague = (
-        "check the stated", "review the stated", "relevant text only if",
-        "check whether", "consider whether", "might violate",
-        "could potentially", "refer to the", "review for compliance",
-        "check compliance", "verify the requirement", "if it fails",
-    )
-    for key in ("ISSUE", "WHY", "SUGGESTED FIX"):
-        value = values[key].casefold()
-        if len(value.split()) < 5 or any(phrase in value for phrase in vague):
-            return None
-    # An identifying quotation alone is insufficient: the reviewer needs to
-    # explain a concrete mistake. An evocative quotation is not itself wrong.
-    if values["WHY"].casefold() == values["ISSUE"].casefold():
-        return None
-    return values
+from core.integrity import wbs_ir_parse_actionable_finding
 
 
 def wbs_ir_screen_generated_report(report_text, manuscript_text, scene_blocks=None):
@@ -4006,7 +3699,13 @@ def run_project_integrity_final_review(manuscript_text):
     _ir_titles = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
     _novel_ir_blocks = (wbs_novel_blocks(st.session_state.get("scene_blocks") or {})
                         if st.session_state.get("active_format_id") == "novel_prose_novella" else {})
-    if (_novel_ir_blocks and set(_novel_ir_blocks) == set(range(1, max(_novel_ir_blocks) + 1))
+    from core.manuscript_structure import profile,configured,integrity_context
+    _structure_spec = profile(st.session_state['active_format_id'])
+    if st.session_state['active_format_id']!='short_story':
+        from core.integrity_review import numbered_context
+        _ir_annotated=numbered_context(st.session_state)
+        _ir_scene_guidance='Use the supplied format-specific boundaries and exact quotations. Never assume four scenes or novel chapters.'
+    elif (_novel_ir_blocks and set(_novel_ir_blocks) == set(range(1, max(_novel_ir_blocks) + 1))
             and manuscript_text == wbs_novel_manuscript(_novel_ir_blocks).strip()):
         _ir_annotated = "\n\n".join(
             f"[CHAPTER {n}]\n" + _novel_ir_blocks[n] + f"\n[END CHAPTER {n}]"
@@ -4317,27 +4016,13 @@ def wbs_ir_review_action(issue, section):
 
 
 def wbs_ss_set_integrity_return_context(scene_number):
-    """Enable the one-click return only for this project's exact saved revision.
-
-    This is temporary navigation state, never a saved manuscript field. It does
-    not change stage IDs, review content, or the user's V-number.
-    """
-    st.session_state["_wbs_ss_integrity_return_context"] = {
-        "project_id": str(get_active_project_id() or ""),
-        "saved_row_id": str(st.session_state.get("_wbs_active_saved_session_row_id") or ""),
-        "format_id": str(st.session_state.get("active_format_id") or ""),
-        "scene_number": int(scene_number),
-    }
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_ss_set_integrity_return_context', globals(), scene_number)
 
 
 def wbs_ss_is_integrity_return_context():
-    """Reject a return shortcut left over from another project or revision."""
-    ctx = st.session_state.get("_wbs_ss_integrity_return_context")
-    return (isinstance(ctx, dict)
-            and bool(ctx.get("project_id") and ctx.get("saved_row_id"))
-            and ctx.get("project_id") == str(get_active_project_id() or "")
-            and ctx.get("saved_row_id") == str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
-            and ctx.get("format_id") == str(st.session_state.get("active_format_id") or ""))
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_ss_is_integrity_return_context', globals())
 
 
 def wbs_ir_go_to_scene(number):
@@ -4354,6 +4039,7 @@ def wbs_ir_go_to_scene(number):
 
 FINAL_OUTPUT_FORMAT_OPTIONS = [
     "Novel / Prose",
+    "Standard Manuscript",
     "Short Story",
     "Novella",
     "Screenplay Outline",
@@ -4364,6 +4050,10 @@ FINAL_OUTPUT_FORMAT_OPTIONS = [
     "YouTube Shorts",
     "Podcast Script",
 ]
+
+FINAL_OUTPUT_FORMAT_OPTIONS.extend([
+    FORMAT_LEGACY["biography_memoir"], FORMAT_LEGACY["childrens_interactive_educational"],
+])
 
 FINAL_OUTPUT_DISPLAY_LABELS = {
     "Novel / Prose": "Novel / Prose",
@@ -5751,251 +5441,29 @@ def render_save_open_project_to_series():
 
 
 def wbs_stage4_title_input_key():
-    """Title-editor state stays with one project and one saved revision."""
-    project = re.sub(r"[^A-Za-z0-9_-]", "_", str(get_active_project_id() or "new"))
-    revision = re.sub(r"[^A-Za-z0-9_-]", "_", str(st.session_state.get("_wbs_active_saved_session_row_id") or "none"))
-    return f"wbs_stage4_new_title_v1_{project}_{revision}"
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_stage4_title_input_key', globals())
 
 
 def wbs_stage4_save_renamed_title_as_new_v1(new_title):
-    """Create a NEW project V-1 from the selected saved revision; never rename V-6.
-
-    The new project has a different ID. Existing saved sessions, manuscripts,
-    scene blocks, titles and versions are left completely untouched.
-    """
-    old_project = str(get_active_project_id() or "")
-    old_row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
-    user = str(get_current_user_id() or "")
-    old_title = str(get_project_title() or "")
-    fmt = str(st.session_state.get("active_format_id") or "")
-    if not all((old_project, old_row_id, user, old_title, fmt)):
-        raise ValueError("Load an existing saved project revision before renaming it.")
-    if str(new_title).casefold() == old_title.casefold():
-        return False  # same name; title approval may still be saved
-
-    parent_rows = (supabase.table("writersblock_projects")
-                   .select("id,project_title,project_type")
-                   .eq("id", old_project).eq("user_id", user).limit(1).execute()).data or []
-    old_rows = (supabase.table("writersblock_project_drafts")
-                .select("id,project_id,draft_content")
-                .eq("id", old_row_id).eq("project_id", old_project)
-                .eq("user_id", user).eq("draft_type", "project_session")
-                .limit(1).execute()).data or []
-    if len(parent_rows) != 1 or len(old_rows) != 1 or parent_rows[0].get("project_title") != old_title:
-        raise ValueError("Cannot verify the current project and saved revision; no title was changed.")
-    snapshot = json.loads(old_rows[0].get("draft_content") or "{}")
-    if (not isinstance(snapshot, dict)
-            or str(snapshot.get("current_project_id") or old_project) != old_project
-            or snapshot.get("project_title") != old_title
-            or snapshot.get("active_format_id") != fmt):
-        raise ValueError("The saved revision's project identity or format does not match.")
-    # Copy only the saved version. Never accidentally duplicate unsaved edits.
-    current_story = str(st.session_state.get("current_draft_output") or "")
-    saved_story = str(snapshot.get("current_draft_output") or "")
-    if saved_story != current_story:
-        raise ValueError("Save manuscript corrections first, then rename this saved project.")
-    if wbs_ss_blocks(snapshot.get("scene_blocks") or {}) != wbs_ss_blocks(st.session_state.get("scene_blocks") or {}):
-        raise ValueError("Save the scene changes first, then rename this saved project.")
-    # Do not make a duplicate title with ambiguous project ownership.
-    existing = (supabase.table("writersblock_projects").select("id")
-                .eq("user_id", user).eq("project_title", new_title).limit(1).execute()).data or []
-    if existing:
-        raise ValueError("A project with that title already exists. Choose a different title.")
-
-    cloned = dict(snapshot)
-    cloned["project_title"] = new_title
-    cloned["project_version_name"] = "Original"
-    cloned["concept_change_areas"] = []
-    cloned["saved_at"] = datetime.now(timezone.utc).isoformat()
-    cloned.pop("wbs_stage4_final_acceptance", None)
-    cloned.pop("wbs_stage4_scene_approvals", None)
-    new_id = None
-    try:
-        new_project = (supabase.table("writersblock_projects").insert({
-            "user_id": user, "project_title": new_title,
-            "project_type": parent_rows[0].get("project_type") or snapshot.get("format_type") or "story",
-            "project_status": "active",
-        }).execute())
-        created = getattr(new_project, "data", None) or []
-        if len(created) != 1 or not created[0].get("id"):
-            raise RuntimeError("The renamed project's new master record was not confirmed.")
-        new_id = str(created[0]["id"])
-        cloned["current_project_id"] = new_id
-        draft = (supabase.table("writersblock_project_drafts").insert({
-            "project_id": new_id, "user_id": user,
-            "draft_title": "Saved Project Session — Original",
-            "draft_type": "project_session",
-            "draft_content": json.dumps(cloned, ensure_ascii=False),
-            "version_number": 1,
-        }).execute())
-        saved_rows = getattr(draft, "data", None) or []
-        if len(saved_rows) != 1 or not saved_rows[0].get("id"):
-            raise RuntimeError("The renamed project's new V-1 record was not confirmed.")
-        new_row_id = str(saved_rows[0]["id"])
-    except Exception:
-        # Only discard the freshly created, empty project (never touch the original).
-        if new_id:
-            try:
-                (supabase.table("writersblock_projects").delete()
-                 .eq("id", new_id).eq("user_id", user).execute())
-            except Exception:
-                pass
-        raise
-
-    # Update state only after both database inserts have succeeded.
-    st.session_state["project_title"] = new_title
-    st.session_state["current_project_id"] = new_id
-    st.session_state["project_version_name"] = "Original"
-    st.session_state["wbs_stage4_final_acceptance"] = {}
-    st.session_state["wbs_stage4_scene_approvals"] = {}
-    st.session_state["_wbs_loaded_project_id"] = new_id
-    st.session_state["_wbs_locked_project_id"] = new_id
-    st.session_state["wbs_locked_format_id"] = fmt
-    st.session_state["_wbs_loaded_project_title"] = new_title
-    st.session_state["_wbs_loaded_saved_session_id"] = new_row_id
-    st.session_state["_wbs_active_saved_session_row_id"] = new_row_id
-    st.session_state["_wbs_last_saved_project_id"] = new_id
-    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(cloned)
-    st.session_state["_wbs_saved_session_to_select"] = new_row_id
-    st.session_state["last_saved_project_at"] = cloned["saved_at"]
-    st.session_state.pop("_wbs_stage4_approved_scenes", None)
-    st.session_state.pop("_wbs_stage4_review_identity", None)
-    return True
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_stage4_save_renamed_title_as_new_v1', globals(), new_title)
 
 
-def wbs_stage4_final_status(record, title, manuscript, report, report_source_signature,
-                            scene_approval_complete, project_id=None, revision_id=None):
-    """Pure, fail-closed proof that each *explicit* acceptance is still current."""
-    record = record if isinstance(record, dict) else {}
-    if (record.get("project_id") != str(project_id or "")
-            or record.get("revision_id") != str(revision_id or "")):
-        record = {}
-    signature = get_text_signature(str(manuscript or ""))
-    report = str(report or "")
-    report_current = bool(report.strip() and report_source_signature == signature)
-    return {
-        "title": bool(title and record.get("title") == title),
-        "manuscript": bool(scene_approval_complete
-                           and record.get("manuscript_signature") == signature),
-        "integrity": bool(report_current
-                          and record.get("integrity_source_signature") == signature
-                          and record.get("integrity_report_signature") == get_text_signature(report)),
-    }
+def wbs_stage4_final_status(record, title, manuscript, report, report_source_signature, scene_approval_complete, project_id=None, revision_id=None):
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_stage4_final_status', globals(), record, title, manuscript, report, report_source_signature, scene_approval_complete, project_id, revision_id)
 
 
 def wbs_stage4_save_final_acceptance(component):
-    """Record one approval on the selected existing revision, NEVER an INSERT.
-
-    The approval record is independent of the saved story, format-specific
-    configuration and Project Integrity AI generation.
-    """
-    if component not in ("title", "manuscript", "integrity"):
-        raise ValueError("Unknown acceptance control")
-    row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
-    project_id = str(get_active_project_id() or "")
-    user_id = str(get_current_user_id() or "")
-    active_format = str(st.session_state.get("active_format_id") or "")
-    if not all((row_id, project_id, user_id, active_format)):
-        raise ValueError("Load a saved project revision before accepting.")
-    master_title = str(get_project_title_from_project_id(project_id) or "").strip()
-    if not master_title or master_title != get_project_title():
-        raise ValueError("The saved project title changed. Reload before accepting.")
-    manuscript = str(st.session_state.get("current_draft_output") or "")
-    blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
-    if component != "title" and (set(blocks) != {1, 2, 3, 4} or wbs_ss_storyline(blocks) != manuscript):
-        raise ValueError("All four saved scenes must match the manuscript.")
-    source_signature = get_text_signature(manuscript)
-    report = str(st.session_state.get("project_integrity_report") or "")
-    report_signature = str(st.session_state.get("project_integrity_source_signature") or "")
-    rows = (supabase.table("writersblock_project_drafts")
-            .select("id, draft_content")
-            .eq("id", row_id).eq("project_id", project_id)
-            .eq("user_id", user_id).eq("draft_type", "project_session")
-            .limit(1).execute()).data or []
-    if len(rows) != 1:
-        raise ValueError("The selected saved revision could not be verified.")
-    snapshot = json.loads(rows[0].get("draft_content") or "{}")
-    if (not isinstance(snapshot, dict)
-            or str(snapshot.get("current_project_id") or project_id) != project_id
-            or str(snapshot.get("active_format_id") or "") != active_format
-            or str(snapshot.get("project_title") or "") != master_title):
-        raise ValueError("Saved project identity, title or format does not match.")
-    if component != "title" and (wbs_ss_blocks(snapshot.get("scene_blocks") or {}) != blocks
-            or str(snapshot.get("current_draft_output") or "") != manuscript):
-        raise ValueError("Saved manuscript has changed. Reload before accepting.")
-    if component == "manuscript":
-        approved = wbs_stage4_valid_approvals(
-            snapshot.get("wbs_stage4_scene_approvals"), blocks, manuscript)
-        if approved != {1, 2, 3, 4}:
-            raise ValueError("Accept the current four-scene manuscript first.")
-    if component == "integrity":
-        if (not report.strip() or report_signature != source_signature
-                or snapshot.get("project_integrity_report") != report
-                or snapshot.get("project_integrity_source_signature") != source_signature):
-            raise ValueError("Run and save Integrity for the current manuscript before accepting it.")
-    record = snapshot.get("wbs_stage4_final_acceptance")
-    record = dict(record) if isinstance(record, dict) else {}
-    if record.get("project_id") != project_id or record.get("revision_id") != row_id:
-        record = {}
-    record["project_id"] = project_id
-    record["revision_id"] = row_id
-    # The saved master title was verified against the current DB revision
-    # above. Confirm that EXISTING title together with either explicit final
-    # acceptance. A rename is optional and must never be needed to unlock
-    # Stage 5 for a project whose title is already saved.
-    record["title"] = master_title
-    if component == "manuscript":
-        record["manuscript_signature"] = source_signature
-    else:
-        record["integrity_source_signature"] = source_signature
-        record["integrity_report_signature"] = get_text_signature(report)
-    snapshot["wbs_stage4_final_acceptance"] = record
-    changed = (supabase.table("writersblock_project_drafts")
-               .update({"draft_content": json.dumps(snapshot, ensure_ascii=False)})
-               .eq("id", row_id).eq("project_id", project_id)
-               .eq("user_id", user_id).eq("draft_type", "project_session")
-               .execute())
-    if not getattr(changed, "data", None):
-        raise ValueError("Acceptance was not confirmed by the database.")
-    st.session_state["wbs_stage4_final_acceptance"] = record
-    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
-    st.session_state["_wbs_last_saved_project_id"] = project_id
-    return True
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_stage4_save_final_acceptance', globals(), component)
 
 
 
 def wbs_stage4_confirm_and_save_from_checkbox(component, widget_key):
-    """Save a checked Stage 4 approval immediately, scoped to current V-n.
-
-    The checkbox itself is an explicit writer acceptance; the UI's two red
-    buttons remain available for manual re-confirmation. Never generate a
-    manuscript, call the AI or insert a new project/revision here.
-    """
-    if not st.session_state.get(widget_key):
-        return
-    try:
-        manuscript = str(st.session_state.get("current_draft_output") or "")
-        report = str(st.session_state.get("project_integrity_report") or "")
-        if (not manuscript.strip() or not report.strip()
-                or st.session_state.get("project_integrity_source_signature")
-                    != get_text_signature(manuscript)):
-            raise ValueError("Run Integrity for the current saved manuscript first.")
-        if st.session_state.get("demo_mode"):
-            raise ValueError("Saving approvals requires the full edition.")
-        if component == "manuscript":
-            approved = wbs_stage4_accept_and_save()
-            st.session_state["_wbs_stage4_approved_scenes"] = sorted(approved)
-        wbs_stage4_save_final_acceptance(component)
-        st.session_state.pop("_wbs_stage4_checkbox_error", None)
-        st.session_state["_wbs_stage4_checkbox_notice"] = (
-            "Final manuscript acceptance saved to this revision." if component == "manuscript"
-            else "Integrity Report acceptance saved to this revision."
-        )
-    except Exception as exc:
-        # Checkbox callbacks run before the controls render, so a failed save
-        # may safely clear the checkmark. Do not show a false approval.
-        st.session_state[widget_key] = False
-        st.session_state["_wbs_stage4_checkbox_error"] = str(exc)
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_stage4_confirm_and_save_from_checkbox', globals(), component, widget_key)
 
 
 def render_project_title_banner(stage_key):
@@ -7317,76 +6785,8 @@ def wbs_stage2_verify_regen_source():
 
 
 def wbs_stage2_render_regenerate_novel_plots():
-    """Stage 2 only: generate three unsaved plot choices in the existing page."""
-    if st.session_state.get("active_format_id") != "novel_prose_novella":
-        return
-    try:
-        identity = wbs_stage2_verify_regen_source()
-    except Exception:
-        identity = None
-
-    # Only Stage 2 Novel/Novella action typography; no Stage 1 styling changes.
-    # Streamlit nests its button text in multiple spans/divs depending on version.
-    st.markdown(
-        """<style>
-        .st-key-wbs_stage2_regen_preview_button button,
-        .st-key-wbs_stage2_regen_preview_button button *,
-        .st-key-wbs_stage2_save_current button,
-        .st-key-wbs_stage2_save_current button * {
-            font-size: 1.2rem !important;
-            font-weight: 700 !important;
-            line-height: 1.35 !important;
-        }
-        .st-key-wbs_stage2_regen_preview_button button {
-            min-height: 3rem !important;
-        }
-        </style>""",
-        unsafe_allow_html=True,
-    )
-
-    if st.button(
-        "Generate your choice of plot structure based on the concept development.",
-        key="wbs_stage2_regen_preview_button",
-        disabled=identity is None,
-        type="primary", use_container_width=True,
-    ):
-        if create_bridge_adapter is None:
-            st.error("The writing engine is unavailable: " + str(WBS_MODEL_IMPORT_ERROR))
-            st.stop()
-        source_packet = wbs_stage2_complete_plot_source_packet()
-        adapter = create_bridge_adapter(backend=st.session_state.backend)
-        with st.spinner("Generating three plot structures from your concept..."):
-            result = adapter.execute(
-                "Generate sandbox paths", st.session_state,
-                prepared_context={
-                    "series_aware_story_seed": source_packet,
-                    "scripting_format_context": get_scripting_format_context(),
-                    "format_development_context": source_packet,
-                    "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
-                },
-                action_payload={
-                    "story_seed": source_packet,
-                    "tone_style": st.session_state.get("tone_style", ""),
-                    "author_style": st.session_state.get("author_style", ""),
-                },
-            )
-        if not result.success or not wbs_stage2_regenerated_plots_usable(result.output):
-            st.error("Plot generation failed or returned incomplete plots. Nothing was saved. "
-                     + str(result.error or "Please retry."))
-        else:
-            # UNSAVED working-copy changes only. No database writes or new V-n.
-            # Do not change the premise, its format fields, or any manuscript text.
-            st.session_state.sandbox_slates = {
-                key: result.output[key] for key in ("Option A", "Option B", "Option C")
-            }
-            st.session_state.chosen_option = None
-            st.session_state.chosen_option_text = None
-            st.session_state["_wbs_stage2_regen_unsaved"] = identity
-            st.session_state["_wbs_stage2_novel_visible"] = identity
-            st.session_state["_wbs_stage2_choose_new"] = True
-            st.session_state.pop("_wbs_stage2_pending_path", None)
-            st.session_state.pop("_wbs_stage2_regen_preview", None)
-            st.rerun()
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_stage2_render_regenerate_novel_plots', globals())
 
 
 
@@ -7476,86 +6876,17 @@ def wbs_can_generate_first_paths_for_saved_concept():
 
 
 def get_user_by_email(email: str):
-    clean_email = (email or "").strip().lower()
-    if not clean_email:
+    row = _wbs_auth.refresh_account()
+    if str(email or "").strip().lower() != _wbs_auth.email:
         return None
-
-    result = (
-        supabase.table("writersblock_users")
-        .select("*")
-        .eq("email", clean_email)
-        .limit(1)
-        .execute()
-    )
-    if result.data and len(result.data) > 0:
-        return result.data[0]
-    return None
+    return row
 
 
 def start_or_resume_trial(email: str):
-    clean_email = (email or "").strip().lower()
-    if not clean_email or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", clean_email):
-        return None, "Enter a valid email address."
-
-    existing = get_user_by_email(clean_email)
-    if is_evaluation_account(existing):
-        return None, "This email is reserved for a private evaluation; use Licensed User Email when activated."
-    now = datetime.now(timezone.utc)
-
-    if existing:
-        expires_at = existing.get("demo_expires_at")
-        if expires_at:
-            try:
-                expires_dt = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
-            except Exception:
-                expires_dt = None
-
-            if expires_dt and now > expires_dt:
-                return None, "This email has already used its 7-Day Limited Free Trial."
-
-            if expires_dt:
-                if not existing.get("demo_active", True):
-                    supabase.table("writersblock_users").update({
-                        "demo_active": True
-                    }).eq("id", existing.get("id")).execute()
-                    existing["demo_active"] = True
-                return existing, ""
-
-        expires_dt = now + timedelta(days=TRIAL_DAYS)
-        update_result = (
-            supabase.table("writersblock_users")
-            .update({
-                "demo_active": True,
-                "demo_expires_at": expires_dt.isoformat(),
-            })
-            .eq("id", existing.get("id"))
-            .execute()
-        )
-        row = update_result.data[0] if update_result.data else existing
-        row["demo_active"] = True
-        row["demo_expires_at"] = expires_dt.isoformat()
-        return row, ""
-
-    expires_dt = now + timedelta(days=TRIAL_DAYS)
     try:
-        insert_result = (
-            supabase.table("writersblock_users")
-            .insert({
-                "email": clean_email,
-                "email_verified": False,
-                "is_active": False,
-                "demo_active": True,
-                "demo_expires_at": expires_dt.isoformat(),
-            })
-            .execute()
-        )
-    except Exception as exc:
-        return None, f"Trial registration could not be created: {exc}"
-
-    if insert_result.data:
-        return insert_result.data[0], ""
-
-    return None, "Trial registration could not be created."
+        return _wbs_auth.start_trial(email), ""
+    except AuthenticationError as error:
+        return None, str(error)
 
 
 def get_licensed_user_by_email(email: str):
@@ -7672,6 +7003,7 @@ def is_demo_access_valid(user_row: dict):
     return True, ""
 
 # Revalidate evaluation access before the rest of the app processes this rerun.
+sync_access_state(st.session_state, _wbs_auth, is_license_access_valid, is_demo_access_valid)
 enforce_evaluation_session()
 
 # ==========================================
@@ -7856,6 +7188,7 @@ with st.sidebar.expander(
                 st.error(trial_msg)
 
         if st.button("Switch User / Logout", key="switch_user_logout", use_container_width=True):
+            _wbs_auth.sign_out()
             st.session_state.clear()
             st.session_state.demo_mode = False
             st.session_state.licensed_mode = False
@@ -7868,65 +7201,7 @@ with st.sidebar.expander(
             st.rerun()
 
     else:
-        access_mode = st.radio(
-            "Access Type",
-            ["7-Day Limited Free Trial", "Licensed User Email"],
-            key="access_mode",
-        )
-
-        if access_mode == "7-Day Limited Free Trial":
-            trial_email_input = st.text_input(
-                "Email for 7-Day Limited Free Trial",
-                key="trial_email_input",
-                placeholder="you@example.com",
-            )
-            st.caption(
-                "Trial includes the complete writing path from Concept Development through "
-                "Manuscript Review. Manuscript Printout, Saved Projects, and Saved Versions are full-version features."
-            )
-
-            if st.button("Start / Resume 7-Day Trial", key="activate_demo_access", use_container_width=True):
-                email = trial_email_input.strip().lower()
-                user_row, msg = start_or_resume_trial(email)
-
-                if user_row:
-                    track_affitor_lead(user_row, email)
-                    st.session_state.demo_access_code = ""
-                    st.session_state.demo_email = email
-                    st.session_state.demo_user_row = user_row
-                    st.session_state.demo_mode = True
-                    st.session_state.licensed_mode = False
-                    st.session_state.licensed_user_row = None
-                    st.session_state.licensed_email = ""
-                    st.session_state.access_success_message = "7-Day Limited Free Trial activated."
-                    st.rerun()
-                else:
-                    st.error(msg)
-
-        else:
-            licensed_email_input = st.text_input(
-                "Email Used for Writer Edition Purchase",
-                key="licensed_email_input",
-            )
-
-            if st.button("Activate License", key="activate_license_access", use_container_width=True):
-                email = licensed_email_input.strip().lower()
-                user_row = get_licensed_user_by_email(email)
-                ok, msg = is_license_access_valid(user_row)
-
-                if ok:
-                    track_affitor_lead(user_row, email)
-                    st.session_state.licensed_user_row = user_row
-                    st.session_state.licensed_mode = True
-                    st.session_state.demo_mode = False
-                    st.session_state.demo_access_code = ""
-                    st.session_state.demo_email = ""
-                    st.session_state.demo_user_row = None
-                    st.session_state.licensed_email = email
-                    st.session_state.access_success_message = "Writer Edition license activated."
-                    st.rerun()
-                else:
-                    st.error(msg)
+        render_auth_access(st, _wbs_auth, globals())
 
 st.sidebar.markdown("---")
 
@@ -8049,6 +7324,8 @@ if st.sidebar.button("⚠️ Start New Project", key="global_reset", use_contain
     st.session_state.picture_book_layout_source_signature = ""
     st.session_state.picture_book_layout_preview_id = 0
     st.session_state.picture_book_page_size = DEFAULT_PICTURE_BOOK_PAGE_SIZE
+    st.session_state.pop('children_publication_layout',None)
+    st.session_state.pop('publication_layout',None)
     st.session_state.rewrite_preview_id = 0
     st.session_state.rewrite_target_length = "Keep Current Length"
     st.rerun()
@@ -8102,122 +7379,10 @@ with st.sidebar.container(border=True):
         _v_match = re.search(r" — V-(\d+) — ", _matching_saved_items[0].get("label") or "")
         if _v_match:
             _active_version_number = int(_v_match.group(1))
-    _working_text = ""
-    _stage_name = str(st.session_state.get("project_stage") or "").lower()
-    if _stage_name in ("plot architect", "plot architecture"):
-        if st.session_state.get("active_format_id") == "short_story":
-            # Stage 3 words reflect the ACTUAL scenes in the editor, not the
-            # four-scene planning outline or an unrelated legacy manuscript.
-            _status_blocks = st.session_state.get("scene_blocks") or {}
-            _working_text = "\n\n".join(
-                str(_status_blocks.get(n) or _status_blocks.get(str(n)) or "").strip()
-                for n in range(1, 5)
-            ).strip()
-            if not _working_text:
-                _raw_outline = str(st.session_state.get("plot_outline") or "")
-                _first_beat = re.search(
-                    r"(?ims)^\s*\[BEAT\s+1\].*?^\s*\[SCENE DETAILS[^\]]*\]\s*:\s*(.*?)(?=^\s*\[[A-Z][^\n]*\]|^\s*===|\Z)",
-                    _raw_outline)
-                if _first_beat:
-                    _working_text = _first_beat.group(1).strip()
-        else:
-            _working_text = str(st.session_state.get("_wbs_stage3_clean_editor") or "").strip()
-            if not _working_text:
-                _raw_outline = str(st.session_state.get("plot_outline") or "")
-                _working_text = " ".join(re.findall(
-                    r"(?ims)^\s*\[SCENE DETAILS[^\]]*\]\s*:\s*(.*?)(?=^\s*\[[A-Z][^\n]*\]|^\s*===|\Z)",
-                    _raw_outline))
-    if not _working_text and st.session_state.get("current_draft_output"):
-        _working_text = str(st.session_state.get("current_draft_output") or "")
-    if not _working_text and st.session_state.get("chosen_option_text"):
-        _working_text = str(st.session_state.get("chosen_option_text") or "")
-    if not _working_text:
-        _working_text = str(st.session_state.get("wbs_project_original_concept") or st.session_state.get("story_seed") or "")
     st.write(f"Current Version: V-{_active_version_number}" if _active_version_number else "Current Version: Unsaved")
-    # NOVEL/NOVELLA ONLY — accumulate ONLY actual scene-script prose.
-    # The sidebar executes before the center panel on every Streamlit rerun.
-    # Resolve directly from the loaded revision's scene_blocks and plot_outline,
-    # using the same beat-boundary formats supported by Scene Scripting below.
-    # Never fall back to the concept, plot choices, or an unrelated manuscript.
-    _working_word_total = count_words(_working_text)
-    if st.session_state.get("active_format_id") == "novel_prose_novella":
-        _recorded_scenes = {}
-        _raw_scene_blocks = st.session_state.get("scene_blocks") or {}
-        if isinstance(_raw_scene_blocks, dict):
-            for _key, _value in _raw_scene_blocks.items():
-                try:
-                    _number = int(_key)
-                except (TypeError, ValueError):
-                    continue
-                if _number > 0 and isinstance(_value, str) and _value.strip():
-                    _recorded_scenes[_number] = _value.strip()
+    from sidebar.summary import render_saved_scene_total
+    render_saved_scene_total(st, globals())
 
-        # Before Scene 1 is explicitly saved as a scene_block, the Stage 3
-        # story panel displays its prose from the first beat in plot_outline.
-        # Support every beat encoding accepted by the existing Scene Scripting
-        # parser: bracketed [BEAT 1], legacy ===, and plain BEAT 1 headings.
-        if 1 not in _recorded_scenes:
-            _outline_text = str(st.session_state.get("plot_outline") or "").strip()
-            _first_section = ""
-            _bracket_beats = list(re.finditer(
-                r"(?im)^\s*\[BEAT\s+(\d+)\]", _outline_text))
-            if _bracket_beats:
-                for _i, _hit in enumerate(_bracket_beats):
-                    if int(_hit.group(1)) == 1:
-                        _end = (_bracket_beats[_i + 1].start()
-                                if _i + 1 < len(_bracket_beats) else len(_outline_text))
-                        _first_section = _outline_text[_hit.end():_end]
-                        break
-            elif len([b for b in _outline_text.split("===") if b.strip()]) > 1:
-                _first_section = next((b for b in _outline_text.split("===")
-                                       if re.search(r"\[(?:SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*)\]", b, re.I)), "")
-            else:
-                _plain_beats = list(re.finditer(
-                    r"(?im)^\s*BEAT\s+(\d+)\s*:?\s*$", _outline_text))
-                if _plain_beats:
-                    for _i, _hit in enumerate(_plain_beats):
-                        if int(_hit.group(1)) == 1:
-                            _end = (_plain_beats[_i + 1].start()
-                                    if _i + 1 < len(_plain_beats) else len(_outline_text))
-                            _first_section = _outline_text[_hit.end():_end]
-                            break
-                else:
-                    # The downstream drafting stage accepts one untagged beat;
-                    # use it ONLY when it contains a recognizable scene field.
-                    _first_section = _outline_text
-
-            # Exact scene field read by the Stage 3 left-panel display; do not
-            # include the scene title, objective, conflict or style directives.
-            _scene_field = re.search(
-                r"(?is)\[(?:SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*)\]\s*:\s*",
-                _first_section)
-            if _scene_field:
-                _tail = _first_section[_scene_field.end():]
-                _next_tag = re.search(
-                    r"(?is)\[(?:BEAT\s*\d+|SCENE TITLE|CORE OBJECTIVE|"
-                    r"SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*|"
-                    r"THE\s+CONFLICT|STYLE\s*&\s*SYNTAX DIRECTIVE)\]",
-                    _tail)
-                _first_scene = _tail[:_next_tag.start() if _next_tag else len(_tail)]
-                # Match Stage 3's reader-facing prose cleaner; no saved text edits.
-                _first_scene = re.sub(
-                    r'(?is)(?:^|(?<=[.!?])\s+)["“]?\s*(?:Her|His|Their|The character\'s|The protagonist\'s)\s+'
-                    r'conflict\s+is\s+(?:purely|primarily|largely)\s+(?:internal|external)'
-                    r'.*?(?:[.!?](?=\s|$)|$)["”]?', ' ', _first_scene)
-                _first_scene = re.sub(
-                    r"(?is)(?:^|(?<=[.!?])\s+)(?:The scene (?:emphasizes|focuses on|is carried|will be|relies on|should|uses|highlights|establishes)|"
-                    r"Narration (?:carries|highlights|focuses|will|should|describes)|"
-                    r"The narration (?:carries|highlights|focuses|will|should|describes)|"
-                    r"This (?:beat|scene) (?:emphasizes|focuses|should|uses|is designed)|"
-                    r"(?:Use|Maintain|Employ|Apply|Analyze and apply) (?:active syntax|descriptive|style syntax|narration|dialogue)).*?(?:[.!?](?=\s|$)|$)",
-                    ' ', _first_scene)
-                _first_scene = re.sub(r"[ \t]{2,}", " ", _first_scene).strip().strip("=").strip()
-                if _first_scene:
-                    _recorded_scenes[1] = _first_scene
-
-        _working_word_total = sum(count_words(_recorded_scenes[n])
-                                  for n in sorted(_recorded_scenes))
-    st.write(f"Current Working Words: {_working_word_total:,}")
 
 st.sidebar.markdown("---")
 
@@ -8456,16 +7621,9 @@ st.sidebar.markdown(
 )
 
 # WBS GLOBAL SAVE-BEFORE-STAGE-CHANGE 2026-10-24
-_WBS_STAGE_TITLES = {
-    "Intake": "1. Concept Development", "Sandbox": "2. Plot Architecture",
-    "Plot Architect": "3. Scene Scripting", "Drafting Engine": "4. Creative Draft",
-    "Revision Engine": "6. Script Polish", "Rewrite Engine": "7. Script Rewrite",
-}
+from core.stages import _WBS_STAGE_TITLES
 
-def wbs_stage_title(stage, export_view=False):
-    if stage == "Isolation Guardrail":
-        return "8. Final Output" if export_view else "5. Script Lock"
-    return _WBS_STAGE_TITLES.get(stage, str(stage))
+from core.stages import wbs_stage_title
 
 def wbs_verify_navigation_project_identity():
     """Read-only reconciliation of a stale active ID for a loaded checkpoint.
@@ -8534,37 +7692,14 @@ def wbs_verify_navigation_project_identity():
 
 
 def wbs_stage4_final_access_ready():
-    """Stage 5 gate available even before Stage 3 helper definitions are reached.
-
-    Protect every format that uses four exact saved scenes. Legacy non-scene
-    formats keep their existing Final Manuscript path.
-    """
-    raw = st.session_state.get("scene_blocks") or {}
-    blocks = {}
-    if isinstance(raw, dict):
-        for key, text in raw.items():
-            try:
-                number = int(key)
-            except (ValueError, TypeError):
-                continue
-            if number in (1, 2, 3, 4) and isinstance(text, str) and text.strip():
-                blocks[number] = text
-    manuscript = str(st.session_state.get("current_draft_output") or "")
-    exact_four = (set(blocks) == {1, 2, 3, 4}
-                  and manuscript == "\n\n".join(blocks[n] for n in range(1, 5)))
-    requires_review = (st.session_state.get("active_format_id") == "short_story"
-                       or exact_four)
-    if not requires_review:
-        return True
-    if not exact_four:
-        return False
-    approval = st.session_state.get("wbs_stage4_scene_approvals") or {}
-    if not isinstance(approval, dict):
-        return False
-    return (approval.get("source_signature") == get_text_signature(manuscript)
-            and approval.get("scene_signatures") == {
-                str(n): get_text_signature(blocks[n]) for n in range(1, 5)}
-            and set(approval.get("approved") or []) == {1, 2, 3, 4})
+    from core.integrity_review import ready
+    if not ready(st.session_state,required=project_integrity_review_applies()):return False
+    from core.manuscript_structure import profile,configured,approved,pending_edits
+    if profile(st.session_state['active_format_id'])['structured_editor'] and pending_edits(st.session_state):return False
+    if profile(st.session_state['active_format_id'])['structured_editor'] and configured(st.session_state):
+        return approved(st.session_state)
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_stage4_final_access_ready', globals())
 
 
 def wbs_editorial_ready_for_assessment():
@@ -8573,6 +7708,15 @@ def wbs_editorial_ready_for_assessment():
     A four-scene manuscript needs all three explicit approvals. Non-scene
     formats retain the existing editorial Integrity requirements.
     """
+    from core.integrity_review import ready
+    if not ready(st.session_state,required=project_integrity_review_applies()):return False
+    from core.manuscript_structure import profile,configured,approved,pending_edits
+    if profile(st.session_state['active_format_id'])['structured_editor'] and pending_edits(st.session_state):return False
+    if profile(st.session_state['active_format_id'])['structured_editor'] and configured(st.session_state):
+        return approved(st.session_state)
+    if st.session_state.get("active_format_id") in {"biography_memoir", "childrens_interactive_educational"}:
+        from importlib import import_module
+        return import_module("formats." + st.session_state["active_format_id"] + ".state").is_approved(st.session_state)
     manuscript = str(st.session_state.get("current_draft_output") or "")
     project = str(get_active_project_id() or "")
     row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
@@ -8608,8 +7752,8 @@ def wbs_request_stage_change(destination, export_view=None):
     """
     current = st.session_state.get("project_stage", "Intake")
     current_export = bool(st.session_state.get("export_view", False))
-    target_export = current_export if export_view is None else bool(export_view)
-    if current == destination and (destination != "Isolation Guardrail" or current_export == target_export):
+    target_export = (current_export if export_view is None else bool(export_view)) if destination == "Isolation Guardrail" else False
+    if current == destination and current_export == target_export:
         return
     # Stop cross-project leakage before stage 2/3/4 displays cached story text.
     anchor_id = str(st.session_state.get("_wbs_loaded_project_id") or "")
@@ -8638,10 +7782,17 @@ def wbs_request_stage_change(destination, export_view=None):
                      "Drafting Engine": 4, "Isolation Guardrail": 4,
                      "Revision Engine": 4, "Rewrite Engine": 4}
     target_level = 5 if destination == "Isolation Guardrail" and target_export else review_levels.get(destination, 99)
+    if destination == "Publisher Assessment":
+        if not wbs_editorial_ready_for_assessment():
+            st.warning("Approve and save the current editorial revision before Publisher Assessment.")
+            return
+        target_level = 4
     if (destination == "Isolation Guardrail" and target_export
             and not wbs_stage4_final_access_ready()):
         st.warning("Review and accept the complete story in Stage 4 before Final Manuscript.")
         return
+    if destination == "Isolation Guardrail" and target_export and wbs_editorial_ready_for_assessment():
+        target_level = 4  # Optional Stage 5 is not an additional approval gate.
     if target_level > wbs_reached_review_level(st.session_state):
         st.warning("This stage has not been developed yet.")
         return
@@ -8660,8 +7811,7 @@ def wbs_complete_stage_change():
     # Review navigation must not clear or regenerate any developed content.
     # Downstream invalidation belongs to an explicit edit/generation action.
     st.session_state.project_stage = target
-    if target == "Isolation Guardrail":
-        st.session_state.export_view = bool(pending["export_view"])
+    st.session_state.export_view = bool(pending["export_view"]) if target == "Isolation Guardrail" else False
     st.rerun()
 
 def wbs_render_stage_save_gate():
@@ -8674,6 +7824,12 @@ def wbs_reached_review_level(state):
     Does not unlock any undeveloped stage or change manuscript state.
     """
     level = int(state.get("_wbs_unlocked_saved_stage") or 1)
+    if state.get("active_format_id") in {"biography_memoir", "childrens_interactive_educational"}:
+        values = (state.get("format_template_values") or {}).get(state["active_format_id"]) or {}
+        try:
+            level = max(level, min(5, int(values.get("stage_unlocked") or 1)))
+        except (TypeError, ValueError):
+            pass  # Invalid imported milestones cannot unlock a stage.
     current = str(state.get("project_stage") or "Intake")
     level = max(level, {"Intake": 1, "Sandbox": 2, "Plot Architect": 3,
                         "Drafting Engine": 4, "Isolation Guardrail": 4,
@@ -8699,6 +7855,8 @@ def wbs_reached_review_level(state):
     return min(level, 5)
 
 _wbs_unlocked = wbs_reached_review_level(st.session_state)
+from core.stage_navigation import ACTIVE_NAV_STYLE
+st.sidebar.markdown(ACTIVE_NAV_STYLE, unsafe_allow_html=True)
 can_navigate_to_sandbox = _wbs_unlocked >= 2
 can_navigate_to_plot = _wbs_unlocked >= 3
 can_navigate_to_drafting = _wbs_unlocked >= 4
@@ -8714,13 +7872,13 @@ can_use_revision = access_allows("revision")
 can_use_rewrite = access_allows("rewrite")
 
 if st.session_state.project_stage == "Intake":
-    st.sidebar.button("🔵 1. Concept Development (Active)", key="nav_intake_active", use_container_width=True)
+    st.sidebar.button("🔵 1. Concept Development (Active)", key="nav_intake_active", use_container_width=True, type="primary")
 else:
     if st.sidebar.button("⚪ 1. Concept Development", key="nav_intake", use_container_width=True):
         wbs_request_stage_change("Intake")
 
 if st.session_state.project_stage == "Sandbox":
-    st.sidebar.button("🔵 2. Plot Architecture (Active)", key="nav_sandbox_active", use_container_width=True)
+    st.sidebar.button("🔵 2. Plot Architecture (Active)", key="nav_sandbox_active", use_container_width=True, type="primary")
 elif can_navigate_to_sandbox:
     if st.sidebar.button("⚪ 2. Plot Architecture", key="nav_sandbox", use_container_width=True):
         wbs_request_stage_change("Sandbox")
@@ -8728,7 +7886,7 @@ else:
     st.sidebar.button("🔒 2. Plot Architecture (Locked)", key="nav_sandbox_locked", disabled=True, use_container_width=True)
 
 if st.session_state.project_stage == "Plot Architect":
-    st.sidebar.button("🔵 3. Scene Scripting (Active)", key="nav_plot_active", use_container_width=True)
+    st.sidebar.button("🔵 3. Scene Scripting (Active)", key="nav_plot_active", use_container_width=True, type="primary")
 elif can_navigate_to_plot:
     if st.sidebar.button("⚪ 3. Scene Scripting", key="nav_plot", use_container_width=True):
         wbs_request_stage_change("Plot Architect")
@@ -8743,7 +7901,7 @@ if st.session_state.project_stage == "Drafting Engine":
 _is_draft_review = (st.session_state.project_stage in {"Isolation Guardrail", "Revision Engine", "Rewrite Engine"}
                     and not (st.session_state.project_stage == "Isolation Guardrail" and st.session_state.get("export_view", False)))
 if _is_draft_review:
-    st.sidebar.button("🔵 4. Editorial & Publisher Review (Active)", key="nav_guard_active", use_container_width=True)
+    st.sidebar.button("🔵 4. Editorial & Publisher Review (Active)", key="nav_guard_active", use_container_width=True, type="primary")
 elif can_navigate_to_guardrail:
     if st.sidebar.button("⚪ 4. Editorial & Publisher Review", key="nav_guard", use_container_width=True):
         wbs_request_stage_change("Isolation Guardrail", export_view=False)
@@ -8766,7 +7924,7 @@ _wbs_stage5_passport = (
 _wbs_stage5_visited = st.session_state.get("_wbs_stage5_passport") == _wbs_stage5_passport
 if st.session_state.project_stage == "Publisher Assessment":
     st.sidebar.button("🔵 5. Publisher & Market Readiness (Active)",
-                      key="nav_publisher_assessment_active", use_container_width=True)
+                      key="nav_publisher_assessment_active", use_container_width=True, type="primary")
 elif _wbs_stage5_ready:
     if st.sidebar.button("⚪ 5. Publisher & Market Readiness (Optional)",
                          key="nav_publisher_assessment", use_container_width=True):
@@ -8788,7 +7946,7 @@ _wbs_legacy_final_exists = (
     and wbs_stage4_final_access_ready()
 )
 if st.session_state.project_stage == "Isolation Guardrail" and st.session_state.get("export_view", False):
-    st.sidebar.button(f"🔵 6. {stage_8_label} (Active)", key="nav_export_active", use_container_width=True)
+    st.sidebar.button(f"🔵 6. {stage_8_label} (Active)", key="nav_export_active", use_container_width=True, type="primary")
 elif _wbs_stage6_ready or _wbs_legacy_final_exists:
     if st.sidebar.button(f"⚪ 6. {stage_8_label}", key="nav_export", use_container_width=True):
         wbs_request_stage_change("Isolation Guardrail", export_view=True)
@@ -8947,5449 +8105,114 @@ SPARK_BANK = {
 # Stage 5 is a separate, optional publisher assessment module. It reads
 # the exact saved Stage 4 editorial revision; it cannot alter manuscript text.
 if st.session_state.project_stage == "Publisher Assessment":
-    from wbs_publisher_assessment import render_stage5
-    _wbs_publisher_format = str(st.session_state.get("active_format_id") or "")
-    if _wbs_publisher_format not in WBS_FORMAT_IDS:
-        st.error("Saved writing format is unavailable. Reload the original project.")
-    elif not wbs_editorial_ready_for_assessment():
-        st.warning("Complete and save Stage 4 Editorial Review and Integrity before opening Stage 5.")
-    else:
-        render_stage5(
-            st, supabase=supabase,
-            backend=st.session_state.get("backend"),
-            project_id=get_active_project_id(), user_id=get_current_user_id(),
-            title=get_project_title(),
-            revision_id=st.session_state.get("_wbs_active_saved_session_row_id"),
-            format_id=_wbs_publisher_format,
-            format_name=get_wbs_format_display_name(_wbs_publisher_format),
-        )
-    st.stop()
+    from core.workflow_runtime import run_workflow
+    run_workflow('publisher_assessment', globals())
 
 if st.session_state.project_stage == "Intake":
-    st.markdown(
-        """
-        <style>
-        /* Keep Quill inside its actual right column so every middle-panel field
-           is physically constrained and can never run underneath it. */
-        div[data-testid="stColumn"]:has(.wbs-writer-quill-sticky-anchor),
-        div[data-testid="column"]:has(.wbs-writer-quill-sticky-anchor) {
-            position: sticky !important;
-            top: 0.75rem !important;
-            align-self: flex-start !important;
-            max-height: calc(100vh - 1.5rem) !important;
-            overflow-y: auto !important;
-            z-index: 20 !important;
-            background: var(--background-color, transparent);
-        }
-
-        /* Primary Writer navigation and format-selector hierarchy. */
-        [data-testid="stMain"] div[data-testid="stHorizontalBlock"]:first-of-type button p {
-            font-weight: 700 !important;
-            font-size: 1.02rem !important;
-        }
-        .wbs-format-selector-title {
-            font-size: 1.08rem !important;
-            font-weight: 700 !important;
-            line-height: 1.2 !important;
-            margin: 0 0 0.35rem 0 !important;
-        }
-
-        /* Raise the complete Writer workspace to recover vertical real estate. */
-        [data-testid="stMainBlockContainer"] {
-            padding-top: 1.0rem !important;
-        }
-
-        @media (max-width: 1100px) {
-            div[data-testid="stColumn"]:has(.wbs-writer-quill-sticky-anchor),
-            div[data-testid="column"]:has(.wbs-writer-quill-sticky-anchor) {
-                position: static !important;
-                max-height: none !important;
-                overflow: visible !important;
-            }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    writer_main_col, writer_quill_col = st.columns([2.65, 1.15], gap="large")
-
-    with writer_main_col:
-        st.header("🗺️ Step 1: Concept Development")
-
-        current_format_id = str(
-            st.session_state.get("active_format_id") or "novel_prose_novella"
-        )
-        if current_format_id not in WBS_FORMAT_IDS:
-            current_format_id = "novel_prose_novella"
-
-        st.markdown(f"### Writing Format — {get_wbs_format_display_name(current_format_id)}")
-
-        # Initialize the dropdown only when the widget has no saved value.
-        # Streamlit updates its keyed value BEFORE rerunning the script when a writer
-        # selects another format. Resetting it on every rerun silently undoes the click.
-        # Saved-project loading explicitly restores this key from its validated format.
-        if "wbs_format_template_selector" not in st.session_state:
-            st.session_state["wbs_format_template_selector"] = current_format_id
-
-        _format_control_col, _format_spacer_col = st.columns([1.6, 1.25], gap="small")
-        with _format_control_col:
-            if get_active_project_id():
-                st.markdown(f"**{get_wbs_format_display_name(current_format_id)}**")
-                selected_format_id = current_format_id
-            else:
-                selected_format_id = st.selectbox(
-                    "Choose Writing Format",
-                    options=WBS_FORMAT_IDS,
-                    index=WBS_FORMAT_IDS.index(current_format_id),
-                    format_func=get_wbs_format_display_name,
-                    key="wbs_format_template_selector",
-                    label_visibility="collapsed",
-                )
-
-        if selected_format_id != st.session_state.get("active_format_id") and get_active_project_id():
-            st.session_state["wbs_format_template_selector"] = st.session_state.active_format_id
-            st.warning("Saved project formats are protected. Start a new project to use a different writing format.")
-            st.rerun()
-        if selected_format_id != st.session_state.get("active_format_id"):
-            st.session_state.active_format_id = selected_format_id
-            st.session_state.active_format_template = get_wbs_format_template(selected_format_id)
-            st.session_state.quill_format_instructions = get_wbs_quill_instructions(selected_format_id)
-            st.session_state.quill_format_name = get_wbs_format_display_name(selected_format_id)
-            st.session_state.format_type = WBS_LEGACY_FORMAT_BY_TEMPLATE_ID.get(
-                selected_format_id,
-                "Novel / Prose",
-            )
-            st.rerun()
-
-        concept_ui = get_active_concept_ui()
-        st.markdown(f"##### {concept_ui.get('step_subtitle') or 'Build the foundation for your project.'}")
-
-        # Every format names this field PROJECT TITLE, never a saved version.
-        # Format-specific title wording stays in the registry for other consumers.
-        _format_title_prefix = next(
-            (name for format_id, name in WBS_FORMAT_OPTIONS
-             if format_id == st.session_state.get("active_format_id")),
-            "Project",
-        )
-        _project_title_label = f"{_format_title_prefix} / Project Title/Revision"
-
-        if get_active_project_id():
-            st.caption("Loaded saved project — saved Concept Development choices are restored where recorded.")
-            if st.session_state.get("_wbs_saved_concept_missing_fields"):
-                # Older saved projects may not contain every newer template
-                # field. Preserve that audit fact without displaying the same
-                # alarming yellow warning on every Streamlit rerun.
-                with st.expander("Historical Development Setup details", expanded=False):
-                    st.caption(
-                        "Some settings were not included in this saved project's "
-                        "historical records. Those fields show current template "
-                        "defaults, not verified original choices. Loading is read-only."
-                    )
-            if st.session_state.get("_wbs_series_conflict_for_review"):
-                st.caption("Historical series positions differed. Current Book order is managed separately "
-                           "in Series Library; saved stories were not changed.")
-            elif st.session_state.get("_wbs_series_recovered_for_review"):
-                st.info("Series relationship recovered from this project's saved records; "
-                        "no changes were written to the database.")
-
-            # This is a saved project's MASTER title, never an editable concept
-            # field. The writer can change it only with the separate Rename
-            # Project action. Do not feed a stale widget value back into state:
-            # doing so changed "Return To Sender" to the previous project title
-            # while leaving its manuscript/project ID untouched.
-            _active_title_project_id = str(get_active_project_id() or "")
-            _title_anchor = (
-                str(st.session_state.get("_wbs_loaded_project_title") or "").strip()
-                if str(st.session_state.get("_wbs_loaded_project_id") or "")
-                == _active_title_project_id else ""
-            )
-            if _title_anchor and st.session_state.get("project_title") != _title_anchor:
-                st.session_state.project_title = _title_anchor
-            _display_master_title = _title_anchor or get_project_title()
-            # Show the exact active saved revision alongside the master title.
-            # Never change the master project title stored in Supabase.
-            if True:  # Shared project/revision display across all formats.
-                _active_saved_row_id = str(st.session_state.get("_wbs_loaded_saved_session_id") or "")
-                _active_manuscript_row_id = str(st.session_state.get("_wbs_loaded_manuscript_version_id") or "")
-                _active_project_key = str(get_active_project_id() or "")
-                for _saved_entry in get_saved_projects_versions_dropdown_items():
-                    _saved_row = _saved_entry.get("row") or {}
-                    if str(_saved_row.get("project_id") or "") != _active_project_key:
-                        continue
-                    _is_active = (
-                        (_saved_entry.get("type") == "project_session"
-                         and _active_saved_row_id and str(_saved_row.get("id") or "") == _active_saved_row_id)
-                        or (_saved_entry.get("type") == "manuscript_version"
-                            and _active_manuscript_row_id and str(_saved_row.get("id") or "") == _active_manuscript_row_id)
-                    )
-                    if _is_active:
-                        _version_match = re.search(r" — (V-\d+[A-Z]*) — ", str(_saved_entry.get("label") or ""))
-                        if _version_match:
-                            _display_master_title += " — " + _version_match.group(1)
-                        break
-            st.markdown(f"**{_project_title_label}**")
-            st.markdown(
-                '<div style="background:#262730;color:#ffffff;padding:0.65rem 0.8rem;'
-                'border:1px solid #41444f;border-radius:0.45rem;min-height:2.4rem;">'
-                + html.escape(_display_master_title) + '</div>',
-                unsafe_allow_html=True,
-            )
-            # Rename is available only in the Start New Project workflow.
-            render_save_open_project_to_series()
-        else:
-            st.session_state.project_title = st.text_input(
-                _project_title_label,
-                value=st.session_state.get("project_title", ""),
-                placeholder="Example: It's Not Safe",
-                key="project_title_input",
-            ).strip()
-
-        st.markdown("### " + str(concept_ui.get('project_connection_heading') or 'Project Relationship'))
-
-        # Simple series membership. No bulk assignment, book-order UI, or manuscript writes.
-        # The Project Type selection is a proposal for saved projects; it takes
-        # effect ONLY after explicit confirmation (metadata-only). For a new
-        # project the original master-save flow still creates the series link.
-        project_scope_options = ["Standalone Book", "Book in a Series"]
-        current_project_id = str(get_active_project_id() or "")
-        membership = get_series_metadata_by_project() if get_current_user_id() else {}
-        current_member = membership.get(current_project_id) or {}
-        registered_series = str(current_member.get("series_name") or "").strip()
-        saved_scope = "Book in a Series" if registered_series else "Standalone Book"
-        selected_scope_default = (saved_scope if current_project_id else
-                                  str(st.session_state.get("project_scope") or "Standalone Book"))
-        context = f"{current_project_id or 'new'}:{registered_series}"
-        # A project load resets the controls once. A normal Streamlit rerun must
-        # not erase the writer's proposed selection or checkbox state.
-        if st.session_state.get("_wbs_simple_series_context") != context:
-            st.session_state["_wbs_simple_series_context"] = context
-            st.session_state["project_scope_selector"] = selected_scope_default
-            st.session_state["wbs_confirm_series_link"] = False
-            st.session_state["wbs_confirm_series_removal"] = False
-            st.session_state.pop("wbs_simple_series_choice", None)
-            st.session_state.pop("wbs_simple_series_new_name", None)
-
-        project_scope_labels = concept_ui.get("scope_labels") or {}
-        chosen_scope = st.radio(
-                "Project Type:", project_scope_options, horizontal=True,
-                key="project_scope_selector",
-                format_func=lambda v: project_scope_labels.get(v, v),
-            )
-        # For existing projects the recorded membership is authoritative even
-        # when the user previews the other radio button. This protects version
-        # saves, navigation, and Quill continuity from unsaved changes.
-        if current_project_id:
-            st.session_state.project_scope = saved_scope
-            st.session_state.series_name = registered_series
-            st.session_state.series_key = make_series_key(registered_series)
-            if registered_series:
-                st.session_state.series_book_number = int(current_member.get("series_book_number") or 1)
-        else:
-            st.session_state.project_scope = chosen_scope
-
-        if chosen_scope == "Book in a Series":
-            known_series = get_existing_series_names()
-            choice_options = list(known_series) + ["Create New Series"]
-            existing_name = (registered_series if current_project_id else
-                             str(st.session_state.get("series_name") or "").strip())
-            if "wbs_simple_series_choice" not in st.session_state:
-                st.session_state["wbs_simple_series_choice"] = (
-                    existing_name if existing_name in known_series else "Create New Series")
-            with st.columns([1, 1], gap="small")[0]:
-                selected_choice = st.selectbox(
-                    "Select Series:", choice_options, key="wbs_simple_series_choice")
-                if selected_choice == "Create New Series":
-                    selected_series = st.text_input(
-                        "New Series Name:", key="wbs_simple_series_new_name",
-                        max_chars=80).strip()
-                else:
-                    selected_series = selected_choice
-            if not current_project_id:
-                # Initial master project save has always included its series
-                # metadata; retain that behavior, without making a new version.
-                st.session_state.series_name = selected_series
-                st.session_state.series_key = make_series_key(selected_series)
-                st.session_state.series_continuity_mode = "Strict"
-                if selected_series:
-                    st.session_state.series_book_number = get_next_series_book_number(selected_series)
-                    st.caption("This new project will join the selected series when you save its master project.")
-                else:
-                    st.caption("Enter a series name before saving the project.")
-            else:
-                # Saved projects are changed ONLY with the version-aware action
-                # directly below Rename Project, never from an unconfirmed radio.
-                pass
-        elif not current_project_id:
-            st.session_state.series_name = ""
-            st.session_state.series_key = ""
-        else:
-            st.session_state.series_name = ""
-            st.session_state.series_key = ""
-
-        # Automatic series continuity still uses confirmed earlier projects.
-        if st.session_state.project_scope == "Book in a Series" and st.session_state.get("series_name"):
-            st.session_state.series_continuity_mode = "Strict"
-            candidates = get_series_reference_candidates()
-            project_ids = get_unambiguous_series_project_ids(
-                st.session_state.series_key,
-                before_number=st.session_state.get("series_book_number") or 1)
-            st.session_state.series_reference_ids = [
-                c["id"] for c in candidates if str(c.get("project_id")) in project_ids]
-            st.session_state.series_selection_signature = (
-                f"{st.session_state.series_key}:{st.session_state.get('series_book_number') or 1}")
-        else:
-            st.session_state.series_reference_ids = []
-
-        # Render the selected format's independent development fields.
-        # Common WritersBlock controls (title, source/premise, dialogue style) remain shared.
-        render_active_format_development_fields()
-
-        # Keep the author-selected Prose Tone visible alongside Stage 1 setup.
-        # Format-specific tone, source intake, and style controls are supplied by
-        # the active template so the lower half of Concept Development is no
-        # longer a generic story form.
-        tone_options = list(concept_ui.get("tone_options") or [
-            "Professional", "Warm", "Serious", "Humorous", "Suspenseful", "Cinematic"
-        ])
-        # All writing formats: retain every existing tone and allow vivid prose.
-        # Existing saved tone selections remain unchanged on reload.
-        if "Vivid & Descriptive" not in tone_options:
-            tone_options.append("Vivid & Descriptive")
-        tone_label = str(concept_ui.get("tone_label") or "Tone / Aesthetic:")
-        current_tone = str(st.session_state.get("tone_style") or "")
-        # The saved choice takes priority over the template default.  Streamlit
-        # ignores index= when a keyed widget already exists, so each revision
-        # needs its own scoped control and initial value.
-        if current_tone and current_tone not in tone_options:
-            tone_options.append(current_tone)
-        default_tone_index = tone_options.index(current_tone) if current_tone in tone_options else 0
-        _wbs_tone_widget_key = get_active_format_widget_key("concept_prose_tone")
-        if _wbs_tone_widget_key not in st.session_state:
-            st.session_state[_wbs_tone_widget_key] = tone_options[default_tone_index]
-
-        _tone_col, _tone_spacer = st.columns([3.0, 1.2])
-        with _tone_col:
-            st.session_state.tone_style = st.selectbox(
-                tone_label,
-                tone_options,
-                key=_wbs_tone_widget_key,
-            )
-
-        # Story Premise is always visible with Central Conflict and Subplots.
-        # For imported/saved/Quill sources it is read-only until the writer
-        # explicitly chooses the Custom Plot Line source; do not mutate those modes.
-        _wbs_premise_mode = str(
-            st.session_state.get("version_source_mode")
-            or st.session_state.get("starting_source_mode")
-            or "Custom Plot Line"
-        )
-        _wbs_premise_editable = _wbs_premise_mode in ("Custom Plot Line", "Story Idea")
-        _wbs_premise_current = str(
-            st.session_state.get("story_seed")
-            or st.session_state.get("wbs_project_original_concept")
-            or ""
-        )
-        _wbs_premise_widget_key = get_active_format_widget_key("concept_story_premise")
-        # On a saved project's first render, seed from its loaded snapshot.
-        # When non-editable, always mirror the authoritative story text (e.g.
-        # after Quill generates or a saved source is selected), not stale UI.
-        if _wbs_premise_widget_key not in st.session_state or not _wbs_premise_editable:
-            st.session_state[_wbs_premise_widget_key] = _wbs_premise_current
-        st.markdown("#### Story Premise")
-        _wbs_premise_text = st.text_area(
-            "Story Premise:",
-            height=210,
-            key=_wbs_premise_widget_key,
-            disabled=not _wbs_premise_editable,
-            help="The author's story blueprint. Used with Central Conflict and Subplots to develop Plot A, B and C.",
-        )
-        if _wbs_premise_editable:
-            st.session_state.story_seed = _wbs_premise_text
-            _wbs_premise_words = count_words(_wbs_premise_text)
-            st.caption(f"{_wbs_premise_words:,} / 1,000 words")
-            if _wbs_premise_words > 1000:
-                st.warning("This entry exceeds the 1,000-word Concept Development limit.")
-        else:
-            st.caption("Select the Enter Your Own Premise starting source below to edit this field.")
-
-
-        # The project format is selected once from the Format Template dropdown
-        # beneath the WritersBlock header. Do not ask for the same format twice.
-
-        if st.session_state.format_type == "Audio Book":
-            previous_length = st.session_state.get("audiobook_length", "30 Minutes")
-            audiobook_lengths = list(AUDIOBOOK_LENGTH_OPTIONS.keys())
-
-            _audio_length_col, _audio_length_spacer = st.columns([3.0, 1.2])
-            with _audio_length_col:
-                selected_audiobook_length = st.selectbox(
-                    "Approximate Finished Audio Book Length:",
-                    audiobook_lengths,
-                    index=(
-                        audiobook_lengths.index(previous_length)
-                        if previous_length in audiobook_lengths
-                        else audiobook_lengths.index("30 Minutes")
-                    ),
-                    key="audiobook_length_selector",
-                )
-
-            st.session_state.audiobook_length = selected_audiobook_length
-            audiobook_spec = AUDIOBOOK_LENGTH_OPTIONS[selected_audiobook_length]
-
-            existing_target = int(
-                st.session_state.get(
-                    "audiobook_target_word_count",
-                    audiobook_spec["default_words"],
-                )
-            )
-
-            if (
-                selected_audiobook_length != previous_length
-                or existing_target < audiobook_spec["min_words"]
-                or existing_target > audiobook_spec["max_words"]
-            ):
-                existing_target = audiobook_spec["default_words"]
-
-            audiobook_target_words = st.number_input(
-                "Target Total Manuscript Word Count:",
-                min_value=audiobook_spec["min_words"],
-                max_value=audiobook_spec["max_words"],
-                value=existing_target,
-                step=50,
-                key=f"audiobook_target_words_{selected_audiobook_length}",
-            )
-
-            st.session_state.audiobook_target_word_count = int(audiobook_target_words)
-
-            st.info(
-                f"Recommended range for {selected_audiobook_length.lower()}: "
-                f"{audiobook_spec['min_words']:,}–{audiobook_spec['max_words']:,} words. "
-                f"WritersBlock will use the selected {int(audiobook_target_words):,}-word target "
-                f"when building the outline and distributing scene lengths."
-            )
-
-        dialogue_style_options = DIALOGUE_STYLE_OPTIONS
-        current_dialogue_style = get_dialogue_style()
-        _podcast_episode_format = str(
-            get_active_format_template_values().get("episode_format") or ""
-        )
-        _show_dialogue_control = not (
-            st.session_state.get("active_format_id") == "podcast_script"
-            and _podcast_episode_format not in {"Scripted / Narrated", "Hybrid"}
-        )
-
-        if _show_dialogue_control:
-            _dialogue_col, _dialogue_spacer = st.columns([3.0, 1.2])
-            with _dialogue_col:
-                st.session_state.dialogue_style = st.selectbox(
-                    concept_ui.get("dialogue_label") or "Dialogue Style:",
-                    dialogue_style_options,
-                    index=dialogue_style_options.index(current_dialogue_style),
-                    key="dialogue_style_selector",
-                    format_func=get_dialogue_style_display,
-                    help=(
-                        "Percentages are approximate targets for the share of finished words that are spoken dialogue. "
-                        "Story-Driven / Automatic has no fixed percentage. The selected project type still controls "
-                        "how dialogue is formatted."
-                    ),
-                )
-        elif st.session_state.get("active_format_id") == "podcast_script":
-            # Live/conversational/interview formats are guided by talking points and segment structure,
-            # not an artificial dialogue percentage.
-            st.session_state.dialogue_style = "Story-Driven / Automatic"
-
-
-        st.markdown("---")
-        st.markdown(f"### {concept_ui.get('source_heading') or 'Choose a Starting Point'}")
-
-        current_saved_option = "-- Use Current Saved Manuscript / Storyline --"
-        custom_plot_option = str(
-            concept_ui.get("custom_option") or "-- Enter Your Own Story / Premise --"
-        )
-        quill_start_option = "-- Quill-Assisted Starting Point --"
-        replacement_draft_option = "-- Upload / Replace with Different Draft / Manuscript --"
-
-        # All four choices remain available. The selected source becomes the
-        # authoritative input for the new named version.
-        seed_options = [
-            current_saved_option,
-            custom_plot_option,
-            quill_start_option,
-            replacement_draft_option,
-        ]
-
-        current_seed = str(st.session_state.get("story_seed") or "")
-        current_source_mode = str(
-            st.session_state.get("version_source_mode")
-            or st.session_state.get("starting_source_mode")
-            or "Custom Plot Line"
-        )
-
-        if (str(st.session_state.get("saved_quill_concept") or "").strip()
-                and str(st.session_state.get("version_source_mode") or "") == "Quill Assisted"):
-            default_seed_index = seed_options.index(quill_start_option)
-        elif current_source_mode == "Saved Manuscript":
-            default_seed_index = seed_options.index(current_saved_option)
-        elif current_source_mode in {"Replacement Draft / Manuscript", "Existing Draft / Manuscript"}:
-            default_seed_index = seed_options.index(replacement_draft_option)
-        elif current_source_mode == "Quill Assisted":
-            default_seed_index = seed_options.index(quill_start_option)
-        else:
-            default_seed_index = seed_options.index(custom_plot_option)
-
-        saved_version_source_text = str(
-            st.session_state.get("saved_version_source_text") or ""
-        ).strip()
-        if saved_version_source_text:
-            saved_source_name = str(
-                st.session_state.get("saved_version_source_name")
-                or get_current_project_version_name()
-                or "Saved Version"
-            ).strip()
-            st.info(
-                f"Saved Version Source: {saved_source_name} — "
-                f"{count_words(saved_version_source_text):,} words. "
-                "This manuscript is retained and can be selected as the transformation source."
-            )
-
-        selected_seed = st.radio(
-            str(concept_ui.get("source_label") or "Starting Source:"),
-            seed_options,
-            index=default_seed_index,
-            key=f"starting_source_{st.session_state.active_format_id}",
-        )
-
-        if selected_seed == current_saved_option:
-            st.session_state.version_source_mode = "Saved Manuscript"
-            st.session_state.starting_source_mode = "Saved Manuscript"
-
-            saved_source = str(
-                st.session_state.get("saved_version_source_text") or ""
-            ).strip()
-            if saved_source:
-                st.success(
-                    f"Using Current Saved Manuscript / Storyline — "
-                    f"{count_words(saved_source):,} words"
-                )
-                st.caption(
-                    "The loaded manuscript remains the story source. Any Concept Development "
-                    "changes above will be used to transform it into the new version."
-                )
-                # WBS_20261023_EDITABLE_SAVED_SOURCE — writer-approved changes only.
-                # Keep the loaded original intact until a new version is explicitly saved.
-                _src_id = get_text_signature(saved_source)[:12]
-                _edit_key = f"wbs_saved_source_edit_{st.session_state.active_format_id}_{_src_id}"
-                st.markdown("**Editable Saved Manuscript — paste Quill's revised text here:**")
-                _revised_source = st.text_area(
-                    "Editable Saved Manuscript:",
-                    value=saved_source,
-                    height=330,
-                    key=_edit_key,
-                    label_visibility="collapsed",
-                )
-                st.caption("Edit or paste a revision. The original remains unchanged until you save a NEW version.")
-                if st.button("💾 Save Edited Manuscript As New Version", key=f"wbs_save_edited_source_{_src_id}",
-                             type="primary", use_container_width=True,
-                             disabled=bool(st.session_state.get("demo_mode"))):
-                    if not _revised_source.strip():
-                        st.error("The manuscript cannot be empty.")
-                    elif _revised_source == saved_source:
-                        st.info("No text changes to save.")
-                    else:
-                        _prev_source = saved_source
-                        _prev_draft = st.session_state.get("current_draft_output", "")
-                        _prev_name = st.session_state.get("project_version_name", "Original")
-                        _new_name = f"Edited {datetime.now():%m-%d %H%M}"
-                        st.session_state.saved_version_source_text = _revised_source
-                        st.session_state.saved_version_source_word_count = count_words(_revised_source)
-                        st.session_state.saved_version_source_name = _new_name
-                        st.session_state.current_draft_output = _revised_source
-                        st.session_state.project_version_name = _new_name
-                        try:
-                            _save_result = save_current_project_session_to_supabase(
-                                version_name=_new_name, save_as_new_version=True)
-                            if not _save_result:
-                                raise RuntimeError("Database did not confirm the save")
-                        except Exception as _exc:
-                            st.session_state.saved_version_source_text = _prev_source
-                            st.session_state.saved_version_source_word_count = count_words(_prev_source)
-                            st.session_state.current_draft_output = _prev_draft
-                            st.session_state.project_version_name = _prev_name
-                            st.error(f"Save failed; original restored: {_exc}")
-                        else:
-                            st.success("New editable manuscript version saved. The original is preserved.")
-                            st.rerun()
-            else:
-                st.warning(
-                    "No saved manuscript is loaded. Choose another starting source or load a saved version first."
-                )
-
-        elif selected_seed == custom_plot_option:
-            st.session_state.version_source_mode = "Custom Plot Line"
-            st.session_state.starting_source_mode = "Custom Plot Line"
-            st.caption("The Story Premise field is above, alongside the other Stage 1 development information.")
-
-        elif selected_seed == quill_start_option:
-            st.session_state.version_source_mode = "Quill Assisted"
-            st.session_state.starting_source_mode = "Quill Assisted"
-            format_name = str(
-                (st.session_state.get("active_format_template") or {}).get("display_name")
-                or st.session_state.get("quill_format_name")
-                or "Writing Project"
-            )
-            st.caption(
-                f"Quill uses your {format_name} Development Setup above to propose a starting concept. "
-                "You can edit it or request another suggestion before continuing."
-            )
-            # The development setup supplies the writer's theme and takeaway.
-            # Only one editable concept box is shown below.
-            st.session_state.quill_starting_direction = ""
-            quill_key = f"wbs_quill_starting_concept_{st.session_state.active_format_id}"
-            # Apply any revision generated by Quill chat before this widget exists.
-            pending_key = f"_wbs_quill_pending_concept_{st.session_state.active_format_id}"
-            pending_concept = st.session_state.pop(pending_key, None)
-            if pending_concept is not None:
-                st.session_state[quill_key] = str(pending_concept)
-                st.session_state.story_seed = str(pending_concept)
-            if quill_key not in st.session_state:
-                # On return to Concept, recover the saved/working Quill concept.
-                # Do not replace it with a blank widget merely because the page
-                # was reconstructed after navigating from another stage.
-                st.session_state[quill_key] = str(
-                    st.session_state.get("saved_quill_concept")
-                    or st.session_state.get("story_seed")
-                    or ""
-                )
-            elif (not str(st.session_state.get(quill_key) or "").strip()
-                  and str(st.session_state.get("saved_quill_concept") or "").strip()):
-                st.session_state[quill_key] = str(st.session_state["saved_quill_concept"])
-            guided_col, original_col = st.columns(2, gap="small")
-            with guided_col:
-                guided_generation = st.button(
-                    "Create Story From My Development Setup",
-                    key=f"wbs_quill_generate_guided_{st.session_state.active_format_id}",
-                    use_container_width=True,
-                )
-            with original_col:
-                original_generation = st.button(
-                    "Let Quill Suggest a Story",
-                    key=f"wbs_quill_generate_original_{st.session_state.active_format_id}",
-                    use_container_width=True,
-                )
-            if guided_generation or original_generation:
-                require_product_access("sandbox")
-                backend = st.session_state.get("backend")
-                client = getattr(backend, "client", None)
-                model_name = getattr(backend, "model_name", None)
-                if client is None or not model_name:
-                    st.error("Quill's writing service is unavailable. Please try again later.")
-                else:
-                    development_context = get_active_format_development_context()
-                    creative_direction = (
-                        "Build the story around the writer's specified theme, takeaway, and "
-                        "creative instructions in Development Setup. Honor those choices closely."
-                        if guided_generation else
-                        "Invent a fresh, original storyline. Honor the format, age range, genre, "
-                        "and required production constraints, but freely invent characters, conflict, "
-                        "and events rather than relying on a writer-specified theme or takeaway."
-                    )
-                    prompt = (
-                        "You are Quill, writing an original STORY CONCEPT that a writer can edit. "
-                        f"Write 100–180 words for {format_name}. "
-                        "Deliver a vivid, self-contained account of WHAT HAPPENS: name the protagonist, "
-                        "establish the situation, show the inciting event, describe concrete choices and "
-                        "consequences, and end with a plausible change or unresolved question. "
-                        "Write paragraphs of story-facing prose, not a lesson, evaluation, outline, "
-                        "creative brief, or discussion of theme. Keep it at concept/synopsis length, "
-                        "not a finished manuscript. Respect relevant development requirements "
-                        "without calling attention to these requirements. "
-                        "NEVER use meta-commentary such as 'this story explores', 'the central idea', "
-                        "'the narrative should', 'the story will', 'from a first-person perspective', "
-                        "'the writer', or 'the reader'. Do not add a heading. "
-                        "Begin immediately with the character or unfolding event.\n\n"
-                        f"GENERATION DIRECTION: {creative_direction}\n\n"
-                        f"DEVELOPMENT SETUP:\n{development_context}\n"
-                        f"Tone: {st.session_state.get('tone_style', '')}\n"
-                        f"Dialogue: {get_dialogue_style_display()}\n"
-                        f"Format guidance: {st.session_state.get('quill_format_instructions', '')}"
-                    )
-                    try:
-                        with st.spinner("Quill is preparing a starting concept..."):
-                            suggestion = client.models.generate_content(model=model_name, contents=prompt)
-                            concept = str(getattr(suggestion, "text", "") or "").strip()
-                            # Never publish editorial planning text in the suggested-concept field.
-                            # Ask the same model for a prose-only rewrite, preserving plot details.
-                            if concept and wbs_concept_contains_editorial_commentary(concept):
-                                rewrite_prompt = (
-                                    "Rewrite the following draft as a STORY SYNOPSIS, not commentary "
-                                    "about a story. Keep its protagonist, events, conflict, and outcome "
-                                    "intact, but express them only as things that happen in the "
-                                    "fictional world. Use 100–180 words of fluent prose. "
-                                    "Remove references to themes, writing, narrative structure, "
-                                    "the reader, genre, viewpoint, and any phrases beginning "
-                                    "'this story', 'the central idea', or 'the narrative'. "
-                                    "Return the revised synopsis only, without a heading.\n\n"
-                                    f"DRAFT:\n{concept}"
-                                )
-                                rewritten = client.models.generate_content(
-                                    model=model_name, contents=rewrite_prompt
-                                )
-                                concept = str(getattr(rewritten, "text", "") or "").strip()
-                        if not concept or not ai_output_is_usable(concept) or wbs_concept_contains_editorial_commentary(concept):
-                            st.error("Quill could not produce a clean story concept. Please try again.")
-                        else:
-                            st.session_state[quill_key] = concept
-                            st.session_state.story_seed = concept
-                            st.session_state.version_source_mode = "Quill Assisted"
-                            st.session_state.starting_source_mode = "Quill Assisted"
-                            st.rerun()
-                    except Exception as exc:
-                        st.error(f"Quill could not generate a starting concept: {exc}")
-            st.session_state.story_seed = st.text_area(
-                "Saved / Suggested Story Concept — Edit Before Continuing:",
-                key=quill_key,
-                height=180,
-                placeholder="Choose one of the two buttons above, then edit Quill's suggestion here.",
-            )
-            st.caption(f"{count_words(st.session_state.story_seed):,} / 1,000 words")
-            if count_words(st.session_state.story_seed) > 1000:
-                st.warning("Reduce the starting concept to 1,000 words or fewer.")
-
-        elif selected_seed == replacement_draft_option:
-            st.session_state.version_source_mode = "Replacement Draft / Manuscript"
-            st.session_state.starting_source_mode = "Replacement Draft / Manuscript"
-            st.warning("Large documents may result in higher API usage during processing.")
-
-            st.markdown(
-                """
-                <style>
-                [data-testid="stFileUploaderDropzoneInstructions"] {
-                    display: none !important;
-                }
-                </style>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            uploaded_existing_draft = st.file_uploader(
-                "Upload / Replace with Different Draft / Manuscript:",
-                type=["docx", "txt"],
-                key=f"concept_existing_draft_upload_{st.session_state.active_format_id}",
-                help="Use a DOCX or TXT as the authoritative replacement source for this new version.",
-            )
-            st.caption("Maximum 120,000 words • DOCX, TXT")
-
-            if uploaded_existing_draft is not None:
-                try:
-                    extracted_existing_draft = extract_uploaded_manuscript_text(uploaded_existing_draft)
-                except Exception as source_error:
-                    st.error(f"The document could not be read: {source_error}")
-                    extracted_existing_draft = ""
-
-                if extracted_existing_draft.strip():
-                    extracted_word_count = count_words(extracted_existing_draft)
-                    if extracted_word_count > 120000:
-                        st.session_state.imported_source_text = ""
-                        st.session_state.imported_source_name = ""
-                        st.session_state.imported_source_word_count = 0
-                        st.error(
-                            f"Document contains {extracted_word_count:,} words. "
-                            "WritersBlock accepts existing drafts up to 120,000 words."
-                        )
-                    else:
-                        st.session_state.imported_source_text = extracted_existing_draft.strip()
-                        st.session_state.imported_source_name = str(
-                            getattr(uploaded_existing_draft, "name", "Existing Draft") or "Existing Draft"
-                        )
-                        st.session_state.imported_source_word_count = extracted_word_count
-                        st.session_state.story_seed = st.session_state.imported_source_text
-
-            imported_source_text = str(st.session_state.get("imported_source_text") or "").strip()
-            imported_source_name = str(st.session_state.get("imported_source_name") or "").strip()
-            if imported_source_text:
-                st.success(
-                    f"Replacement Source Loaded: {imported_source_name or 'Uploaded Document'} — "
-                    f"{count_words(imported_source_text):,} words"
-                )
-                st.caption(
-                    "This source is read-only in Concept Development. WritersBlock will use it as protected "
-                    "starting material while the selected format and its development rules control the project."
-                )
-                st.text_area(
-                    "Replacement Source — Read Only:",
-                    value=imported_source_text,
-                    height=320,
-                    disabled=True,
-                    key=f"concept_existing_draft_read_only_preview_{st.session_state.active_format_id}",
-                )
-            else:
-                st.info("Upload a DOCX or TXT source to use it as the replacement starting material.")
-
-        # Production influence is now selected at the top of each relevant
-        # Development Setup instead of appearing as a late style-reference field.
-        if st.session_state.get("active_format_id") == "podcast_script":
-            st.session_state.author_style = ""
-
-        # Shared Stage 1 checkpoint across all writing formats.
-        _wbs_short_story_stage1 = True
-        if not _wbs_short_story_stage1:
-            render_format_template_save_reminder()
-        else:
-            st.markdown("---")
-            # Universal Stage 1: save/approve first, then enable the separate
-            # format-specific Develop Paths button to generate and enter Stage 2.
-            _ss_master = wbs_has_saved_master()
-            _ss_changed = wbs_work_has_changed() if _ss_master is True else True
-            _wbs_stage1_save_col, _wbs_stage1_develop_col = st.columns(2, gap="small")
-            with _wbs_stage1_save_col:
-                _wbs_stage1_save_clicked = st.button(
-                "Save And/Or Continue To Next Stage",
-                key="wbs_stage1_save_or_continue",
-                use_container_width=True,
-                type="secondary" if st.session_state.get("_wbs_stage1_continue_approval") == (
-                    str(get_active_project_id() or ""),
-                    str(st.session_state.get("active_format_id") or ""),
-                    str(st.session_state.get("_wbs_last_saved_work_signature") or ""),
-                ) else "primary",
-            )
-            if _wbs_stage1_save_clicked:
-                if _ss_master is not True or _ss_changed is not False:
-                    _ss_result = save_current_project_session_to_supabase()
-                    if not _ss_result:
-                        st.stop()
-                st.session_state["_wbs_stage1_continue_approval"] = (
-                    str(get_active_project_id() or ""),
-                    str(st.session_state.get("active_format_id") or ""),
-                    str(st.session_state.get("_wbs_last_saved_work_signature") or ""),
-                )
-                st.session_state["_wbs_unlocked_saved_stage"] = max(
-                    int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 2
-                )
-                # Stage 1 checkpoint only: unlock the development button below.
-                # The user explicitly chooses when to generate paths and enter Stage 2.
-                st.rerun()
-            _ss_approval = st.session_state.get("_wbs_stage1_continue_approval")
-            _ss_expected = (
-                str(get_active_project_id() or ""),
-                str(st.session_state.get("active_format_id") or ""),
-                str(st.session_state.get("_wbs_last_saved_work_signature") or ""),
-            )
-            _ss_can_continue = (
-                _ss_master is True and _ss_changed is False
-                and _ss_approval == _ss_expected
-            )
-
-        # A loaded saved project may already contain its Scripting options.
-        # Continue READ-ONLY: never regenerate its paths, reset its manuscript,
-        # or create another writersblock_projects row under a new identity.
-        _wbs_is_loaded_project = bool(get_active_project_id())
-        _wbs_has_saved_paths = (
-            _wbs_is_loaded_project
-            and isinstance(st.session_state.get("sandbox_slates"), dict)
-            and sandbox_output_is_usable(st.session_state.get("sandbox_slates"))
-        )
-        _wbs_paths_button_label = (
-            "Continue to Plot Architecture"
-            if (_wbs_has_saved_paths and st.session_state.get("active_format_id") == "novel_prose_novella")
-            else "Continue to Scripting — Existing Paths" if _wbs_has_saved_paths
-            else str(concept_ui.get("button_label") or "Develop Project Paths 🚀")
-        )
-        with _wbs_stage1_develop_col:
-            _wbs_develop_clicked = st.button(
-                _wbs_paths_button_label,
-                key="generate_sandbox_paths",
-                type="primary" if _ss_can_continue else "secondary",
-                use_container_width=True,
-                disabled=(_wbs_short_story_stage1 and not _ss_can_continue),
-            )
-        if _wbs_develop_clicked:
-            if _wbs_has_saved_paths:
-                # Reuse only paths that match the currently saved snapshot.
-                # In particular, after a failed write, keep the generated paths
-                # in memory so the user can save them without another API call.
-                if (wbs_has_saved_master() is not True
-                        or wbs_work_has_changed() is not False):
-                    st.error(
-                        "These scripting paths or concept changes are not yet saved. "
-                        "Use 'Save Project Changes As A New Version' above, then "
-                        "continue to Scripting. No AI regeneration is required."
-                    )
-                    st.stop()
-                wbs_request_stage_change("Sandbox")
-                st.stop()
-            _wbs_create_saved_first_paths = False
-            if _wbs_is_loaded_project:
-                # Saved V-1 concept-only projects must not be trapped before
-                # Scripting. Protect *all* existing versions and other stages.
-                _wbs_create_saved_first_paths, _wbs_first_paths_error = (
-                    wbs_can_generate_first_paths_for_saved_concept()
-                )
-                if not _wbs_create_saved_first_paths:
-                    st.error(_wbs_first_paths_error)
-                    st.stop()
-                _audit = wbs_get_saved_concept_setup_audit()
-                if not _audit.get("ok"):
-                    st.error((_audit.get("message") or "Cannot verify saved setup.") +
-                             " No AI generation was started.")
-                    st.stop()
-                if _audit.get("missing"):
-                    st.error("This saved revision is missing Development Setup selections: "
-                             + ", ".join(label for _, label in _audit["missing"][:12])
-                             + ". The displayed template defaults are NOT proven "
-                               "to be your original instructions. No AI generation "
-                               "was started. Review the saved Setup audit.")
-                    st.stop()
-            require_product_access("sandbox")
-            require_demo_action_available("sandbox")
-
-            # Resolve and protect the writer-selected source before any downstream
-            # draft/plot state is cleared.
-            selected_source_mode = str(
-                st.session_state.get("version_source_mode")
-                or st.session_state.get("starting_source_mode")
-                or "Custom Plot Line"
-            )
-
-            if selected_source_mode == "Saved Manuscript":
-                selected_source_text = str(
-                    st.session_state.get("saved_version_source_text") or ""
-                ).strip()
-                if not selected_source_text:
-                    st.error(
-                        "No current saved manuscript is available. Load a saved version "
-                        "or choose another starting source."
-                    )
-                    st.stop()
-                st.session_state.story_seed = selected_source_text
-
-            elif selected_source_mode in {"Replacement Draft / Manuscript", "Existing Draft / Manuscript"}:
-                selected_source_text = str(
-                    st.session_state.get("imported_source_text") or ""
-                ).strip()
-                if not selected_source_text:
-                    st.error(
-                        "Please upload a DOCX or TXT replacement draft before developing this version."
-                    )
-                    st.stop()
-                st.session_state.story_seed = selected_source_text
-
-            elif selected_source_mode in {"Custom Plot Line", "Quill Assisted"}:
-                selected_source_text = str(st.session_state.get("story_seed") or "").strip()
-                if not selected_source_text:
-                    st.error("Please enter or generate a starting point before continuing.")
-                    st.stop()
-
-            st.session_state.plot_outline = None
-            st.session_state.current_draft_output = ""
-            st.session_state.rewritten_manuscript = ""
-            st.session_state.manuscript_text = ""
-            st.session_state.current_processing_beat = 0
-            st.session_state.total_beats = 0
-            st.session_state.manuscript_version = 0
-            st.session_state.picture_book_layout_spreads = []
-            st.session_state.picture_book_layout_source_signature = ""
-            st.session_state.picture_book_layout_preview_id = 0
-            st.session_state.picture_book_page_size = DEFAULT_PICTURE_BOOK_PAGE_SIZE
-
-            if not get_project_title():
-                st.error("Please name this project before continuing.")
-                st.stop()
-
-
-            if not st.session_state.get("wbs_project_original_concept"):
-                st.session_state.wbs_project_original_concept = str(st.session_state.story_seed or "").strip()
-
-            if not st.session_state.story_seed.strip():
-                source_noun = str(concept_ui.get("source_noun") or "project premise")
-                st.error(f"Please enter a {source_noun} or upload an existing source before continuing.")
-                st.stop()
-
-            if (
-                st.session_state.get("version_source_mode") in {"Custom Plot Line", "Quill Assisted"}
-                and count_words(st.session_state.story_seed) > 1000
-            ):
-                st.error("Please reduce the Concept Development entry to 1,000 words or fewer before continuing.")
-                st.stop()
-
-            with st.spinner(str(concept_ui.get("spinner") or "Developing project paths...")):
-                time.sleep(1)
-
-                if create_bridge_adapter is None:
-                    st.error(
-                        "WritersBlock Model is unavailable. "
-                        f"{WBS_MODEL_IMPORT_ERROR}"
-                    )
-                    st.stop()
-
-                _wbs_bridge_adapter = create_bridge_adapter(
-                    backend=st.session_state.backend
-                )
-                _wbs_bridge_result = _wbs_bridge_adapter.execute(
-                    "Generate sandbox paths",
-                    st.session_state,
-                    prepared_context={
-                        "series_aware_story_seed": get_series_aware_story_seed(),
-                        "scripting_format_context": get_scripting_format_context(),
-                        "format_development_context": (
-                            get_full_project_continuity_context()
-                            + "\n\nSTAGE 2 — THREE SOURCE FIELDS GOVERN THE PLOT (ALL WRITING FORMATS):\n"
-                            + "MANDATORY AUTHOR MATERIAL, verbatim as entered (do not summarize or omit):\n"
-                            + "STORY PREMISE / ORIGINAL SOURCE:\n"
-                            + str(st.session_state.get("story_seed") or "")
-                            + "\n\nCENTRAL CONFLICT AND SUBPLOT / OTHER STAGE 1 DEVELOPMENT FIELDS:\n"
-                            + get_active_format_development_context()
-                            + "\n\nNON-NEGOTIABLE GENERATION RULES:\n"
-                            + "Treat the author's Story Premise, Central Conflict and Subplot as ONE binding story specification. "
-                            + "Each of the three generated Plot Architecture options (A/B/C) must include ALL explicit substantive "
-                            + "events and plot facts from ALL THREE fields; inclusion is the default, never condensation by deletion. "
-                            + "Follow the author's actual story sequence and causality from origin through development, climax, aftermath, "
-                            + "and FINAL outcome. Never stop at an earlier dramatic event when the premise continues beyond it. "
-                            + "A reveal may be moved for suspense only if the original event itself is still depicted or clearly accounted for. "
-                            + "Keep named characters, their relationships, setting, periods, identity changes, technical discoveries, "
-                            + "antagonists, supporting characters, subplot beats, consequences and resolutions. "
-                            + "Do NOT write a loosely inspired interpretation, a replacement story, a generic theme discussion, "
-                            + "or a different ending. Enhance and connect the supplied material with meaningful additional "
-                            + "developments, subplots, rising action and twists that DO NOT contradict it. "
-                            + "Plot A/B/C differ in pacing, scene emphasis, order of revelation and dramatic construction ONLY; "
-                            + "the writer's events and outcome remain the same in every option. "
-                            + "For EACH option, describe explicitly the opening/origin, central conflict, subplot development, "
-                            + "major turning points, climax, aftermath, and author-specified final outcome IN STORY TERMS. "
-                            + "Before responding, audit each option against EVERY significant source event and detail, "
-                            + "especially the FIRST and LAST paragraphs and every stated subplot. Expand missing items before returning. "
-                            + "When the original has no specified outcome, propose one without presenting it as the author's fact. "
-                            + "Do not print these internal instructions; output only the three writer-facing plot options.\n"
-                        ),
-                        "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
-                        "quill_template_context": refresh_quill_template_context(),
-                    },
-                    action_payload={
-                        "tone_style": st.session_state.tone_style,
-                        "author_style": st.session_state.author_style,
-                    },
-                )
-
-                if not _wbs_bridge_result.success:
-                    st.error(
-                        "WritersBlock Model Bridge could not generate the sandbox paths. "
-                        + (_wbs_bridge_result.error or "Unknown bridge error.")
-                    )
-                    st.stop()
-
-                st.session_state.sandbox_slates = _wbs_bridge_result.output
-                st.session_state["_wbs_agent_bridge_last_operation"] = (
-                    _wbs_bridge_result.backend_operation or ""
-                )
-                st.session_state["_wbs_agent_bridge_last_success"] = True
-
-                if not sandbox_output_is_usable(st.session_state.sandbox_slates):
-                    st.error("Quill did not return three usable paths. Nothing was saved.")
-                    st.stop()
-                mark_demo_action_used("sandbox")
-
-                if _wbs_create_saved_first_paths:
-                    # Routine initial plot paths are saved within current V-n.
-                    first_paths_save = save_current_project_session_to_supabase(
-                        version_name="First Scripting Paths", save_as_new_version=False,
-                    )
-                    if not first_paths_save or getattr(first_paths_save, "unchanged", False):
-                        st.error(
-                            "Generated paths remain in this session but were NOT saved. "
-                            "Use 'Save Project Changes As A New Version' above to "
-                            "retry the save without another AI generation."
-                        )
-                        st.stop()
-                    st.session_state.project_saved_notice = True
-                    wbs_request_stage_change("Sandbox")
-                    st.stop()
-
-                # A genuinely new project creates its parent only once.
-                # NEVER replace current_project_id while editing saved work.
-                if get_active_project_id():
-                    st.error("Existing project detected. No new project was created or saved.")
-                    st.stop()
-                new_project_result = save_project_to_supabase(
-                    project_title=get_project_title_for_display()[:80],
-                    project_type=st.session_state.format_type,
-                )
-                if not new_project_result or not get_active_project_id():
-                    st.error("New project creation could not be confirmed. Scripting was not opened.")
-                    st.stop()
-
-                if st.session_state.get("project_scope") == "Book in a Series":
-                    save_series_metadata_for_project(
-                        st.session_state.get("current_project_id")
-                    )
-
-
-                # Persist generated Stage 2 paths to the launched project's
-                # session snapshot before leaving Concept Development. A saved
-                # version must restore the actual generated paths, not rerun AI.
-                paths_checkpoint = save_current_project_session_to_supabase(
-                    version_name="First Scripting Paths", save_as_new_version=False,
-                )
-                if not paths_checkpoint:
-                    st.error("Generated paths were not saved. Stage 2 was not opened. Retry saving without regenerating.")
-                    st.stop()
-                st.session_state.project_saved_notice = True
-                wbs_request_stage_change("Sandbox")
-
-
-
-    # ======================================
-    # PHASE 2: SCRIPTING
-    # ======================================
-
-    with writer_quill_col:
-        if st.session_state.get("licensed_mode") or st.session_state.get("demo_mode"):
-            st.markdown(
-                '<div class="wbs-writer-quill-sticky-anchor"></div>',
-                unsafe_allow_html=True,
-            )
-            render_quill_for_current_stage(st_module=st, show_prelude=True)
+    from core.workflow_runtime import run_workflow
+    run_workflow('concept_development', globals())
 
 elif st.session_state.project_stage == "Sandbox":
-    st.header("🗺️ Step 2: Plot Architecture")
-    render_project_title_banner("step_2_scripting")
-    if st.session_state.get("active_format_id") != "novel_prose_novella":
-        st.markdown("##### Shape the first working script paths from your concept.")
-        st.caption(f"Dialogue Style: {get_dialogue_style_display()} — inherited from Concept Development. Project type controls dialogue formatting.")
-        st.markdown("---")
-    if st.session_state.get("project_saved_notice"):
-        st.session_state.project_saved_notice = False
-    _wbs_novel_plot_mode = (st.session_state.get("active_format_id") == "novel_prose_novella")
-    wbs_stage2_render_regenerate_novel_plots()
-    sandbox_slates = st.session_state.get("sandbox_slates", {})
-    _wbs_plot_display_identity = (
-        str(get_active_project_id() or ""),
-        str(st.session_state.get("_wbs_active_saved_session_row_id") or ""),
-        str(st.session_state.get("active_format_id") or ""),
-        get_text_signature(wbs_stage2_complete_plot_source_packet()) if _wbs_novel_plot_mode else "",
-    )
-    # Novel/Novella: a saved plot is visible whenever this exact loaded
-    # revision contains it. The temporary just-generated flag is for previews
-    # only and must NEVER be required to review existing saved work.
-    _wbs_saved_novel_paths = (
-        _wbs_novel_plot_mode
-        and bool(st.session_state.get("_wbs_active_saved_session_row_id"))
-        and sandbox_output_is_usable(sandbox_slates)
-        and not st.session_state.get("_wbs_stage2_regen_unsaved")
-    )
-    _wbs_saved_novel_choice = (
-        _wbs_novel_plot_mode
-        and bool(st.session_state.get("_wbs_active_saved_session_row_id"))
-        and str(st.session_state.get("chosen_option") or "").split(":", 1)[0].strip()
-            in ("Option A", "Option B", "Option C")
-        and bool(str(st.session_state.get("chosen_option_text") or "").strip())
-        and not st.session_state.get("_wbs_stage2_regen_unsaved")
-    )
-    _wbs_show_novel_plots = (
-        st.session_state.get("_wbs_stage2_novel_visible") == _wbs_plot_display_identity
-        or _wbs_saved_novel_paths
-    )
-    if _wbs_novel_plot_mode and not _wbs_show_novel_plots and _wbs_saved_novel_choice:
-        # Historical saves may preserve the exact selected plot even when A/B/C
-        # options are absent. Display that saved text; never fabricate replacements.
-        _wbs_existing_choice = str(st.session_state.get("chosen_option") or "").split(":", 1)[0].strip()
-        st.success(f"Saved selection: {_wbs_existing_choice}")
-        st.subheader(_wbs_existing_choice.replace("Option ", "Plot "))
-        st.info(str(st.session_state.get("chosen_option_text") or ""))
-        if st.button("Continue to Scene Scripting", key="wbs_stage2_saved_choice_only_continue",
-                     type="primary", use_container_width=True):
-            wbs_request_stage_change("Plot Architect")
-    elif _wbs_novel_plot_mode and not _wbs_show_novel_plots:
-        # The saved A/B/C data is never deleted; only the Stage 2 display starts blank.
-        for _wbs_i, _wbs_col in enumerate(st.columns(3, gap="medium"), 1):
-            with _wbs_col:
-                st.subheader(f"Plot {_wbs_i}")
-    elif not sandbox_slates:
-        if not _wbs_novel_plot_mode:
-            st.warning("No story paths are available yet. Return to Concept Development and generate story paths first.")
-    else:
-        if sandbox_slates.get("is_fallback", False):
-            st.warning("AI connection issue detected. Temporary local story paths are being shown.")
-        _wbs_stage2_options = (
-            ("Option A", "Classic Structure", "A clear, traditional story path."),
-            ("Option B", "Twisted Perspective", "A stranger version with a hidden truth or reversal."),
-            ("Option C", "High-Impact Version", "A faster, more intense story path."),
-        )
-        # Stage 2: a verified saved choice is shown alone. Legacy records with
-        # missing selection remain visibly unverified; never infer the choice.
-        _wbs_choice = str(st.session_state.get("chosen_option") or "").split(":", 1)[0].strip()
-        _wbs_text = str(st.session_state.get("chosen_option_text") or "")
-        _wbs_valid = (_wbs_choice in ("Option A", "Option B", "Option C")
-                      and bool(_wbs_text.strip())
-                      and (_wbs_text == str(sandbox_slates.get(_wbs_choice) or "")
-                           or (_wbs_novel_plot_mode and _wbs_saved_novel_choice)))
-        _wbs_review = bool(_wbs_valid and st.session_state.get("_wbs_active_saved_session_row_id")
-                           and not st.session_state.get("_wbs_stage2_choose_new"))
-        if _wbs_review:
-            st.success(f"Saved selection: {_wbs_choice}")
-            st.markdown(f"### {_wbs_choice}")
-            st.info(_wbs_text)
-            _wbs_next, _wbs_new = st.columns(2, gap="small")
-            with _wbs_next:
-                if st.button("Continue to Scene Scripting" if _wbs_novel_plot_mode else "Continue to Stage 3",
-                             key="wbs_stage2_saved_continue", type="primary", use_container_width=True):
-                    # Saved outline is displayed by Stage 3 unchanged; missing
-                    # outline follows the existing explicit development path.
-                    wbs_request_stage_change("Plot Architect")
-            with _wbs_new:
-                if st.button("Select a New Plot", key="wbs_stage2_choose_new", use_container_width=True):
-                    st.session_state["_wbs_stage2_choose_new"] = True
-                    st.session_state.pop("_wbs_stage2_pending_path", None)
-                    st.rerun()
-        else:
-            if not _wbs_novel_plot_mode:
-                if (st.session_state.get("_wbs_active_saved_session_row_id") and not _wbs_valid
-                        and not st.session_state.get("_wbs_stage2_regen_unsaved")):
-                    st.warning("Original selection was not saved in this revision. All three paths are shown; no original choice is assumed.")
-                if st.session_state.get("_wbs_stage2_choose_new"):
-                    st.info("Choose a plot. Nothing changes in the database until you click Save Current Version or Save Version As.")
-            _wbs_cols = st.columns(3)
-            for _wbs_i, (_wbs_col, (_wbs_opt, _wbs_name, _wbs_subtitle)) in enumerate(zip(_wbs_cols, _wbs_stage2_options), 1):
-                with _wbs_col:
-                    if _wbs_novel_plot_mode:
-                        st.subheader(f"Plot {_wbs_i}")
-                    else:
-                        st.subheader(f"{_wbs_opt}: {_wbs_name}")
-                        st.markdown(f"*{_wbs_subtitle}*")
-                    st.info(sandbox_slates.get(_wbs_opt, ""))
-                    if st.button((f"Select Plot {_wbs_i}" if _wbs_novel_plot_mode else f"Select Path {_wbs_opt[-1]}"),
-                                 key=f"wbs_stage2_select_{_wbs_opt[-1]}",
-                                 type="primary" if st.session_state.get("_wbs_stage2_pending_path") == _wbs_opt else "secondary",
-                                 use_container_width=True):
-                        st.session_state["_wbs_stage2_pending_path"] = _wbs_opt
-                        st.rerun()
-            _wbs_pending = st.session_state.get("_wbs_stage2_pending_path")
-            st.markdown("---")
-            _wbs_row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
-            _wbs_current_revision = str(globals().get("_active_version_number") or st.session_state.get("current_version_number") or "").replace("V-", "")
-            if not _wbs_current_revision.isdigit() and _wbs_row_id:
-                try:
-                    _wbs_rev_rows = (supabase.table("writersblock_project_drafts")
-                        .select("version_number").eq("id", _wbs_row_id)
-                        .eq("project_id", get_active_project_id())
-                        .eq("user_id", get_current_user_id()).eq("draft_type", "project_session")
-                        .limit(1).execute()).data or []
-                    _wbs_current_revision = str(_wbs_rev_rows[0]["version_number"]) if len(_wbs_rev_rows) == 1 else ""
-                except Exception:
-                    _wbs_current_revision = ""
-            _wbs_next_rev = get_next_project_session_internal_version(get_active_project_id()) if get_active_project_id() else 1
-            # Read the exact saved revision before deciding whether its path may be changed.
-            # Fail closed on database errors: never enable an overwrite by guessing.
-            _wbs_saved_path = ""
-            _wbs_saved_path_check_ok = not bool(_wbs_row_id)
-            if _wbs_row_id:
-                try:
-                    _wbs_guard_rows = (supabase.table("writersblock_project_drafts")
-                        .select("draft_content").eq("id", _wbs_row_id)
-                        .eq("project_id", get_active_project_id())
-                        .eq("user_id", get_current_user_id())
-                        .eq("draft_type", "project_session").limit(1).execute()).data or []
-                    if len(_wbs_guard_rows) == 1:
-                        _wbs_guard_snapshot = json.loads(_wbs_guard_rows[0].get("draft_content") or "{}")
-                        if isinstance(_wbs_guard_snapshot, dict):
-                            _wbs_saved_path = str(_wbs_guard_snapshot.get("chosen_option") or "").split(":", 1)[0].strip()
-                            _wbs_saved_path_check_ok = True
-                except Exception:
-                    pass
-            _wbs_is_plot_change = bool(_wbs_saved_path in ("Option A", "Option B", "Option C"))
-            if (not _wbs_novel_plot_mode and _wbs_pending and _wbs_is_plot_change
-                    and _wbs_pending != _wbs_saved_path):
-                st.info(f"This revision currently has {_wbs_saved_path}. Save Current Version replaces "
-                        "its selected path only when you click Save; Save Version As creates "
-                        "a separate revision only when requested.")
-            elif _wbs_pending and not _wbs_saved_path_check_ok:
-                st.warning("Saved revision could not be verified. Saving to the current revision is disabled.")
-            if _wbs_pending:
-                st.markdown('<div style="text-align:center;color:#ffffff;font-weight:700;margin:10px 0 12px 0">Save To Revision</div>', unsafe_allow_html=True)
-            if _wbs_novel_plot_mode:
-                # Stage 2 Novel/Novella: one manual Save Current Version action.
-                # New versions are only created through separate explicit Save Version As.
-                _wbs_save_current = st.button(
-                    f"Save Current Version (V-{_wbs_current_revision})" if _wbs_current_revision else "Save Current Version",
-                    key="wbs_stage2_save_current",
-                    type="primary" if _wbs_pending else "secondary",
-                    disabled=not bool(_wbs_pending and _wbs_row_id and _wbs_current_revision and _wbs_saved_path_check_ok),
-                    use_container_width=True,
-                )
-                _wbs_save_new = False
-            else:
-                # Preserve the existing Stage 2 layout for other formats.
-                _wbs_left, _wbs_right = st.columns(2, gap="small")
-                with _wbs_left:
-                    _wbs_save_current = st.button(f"Save Current Version (V-{_wbs_current_revision})" if _wbs_current_revision else "Save Current Version",
-                        key="wbs_stage2_save_current", type="primary" if _wbs_pending else "secondary", disabled=not bool(_wbs_pending and _wbs_row_id and _wbs_current_revision and _wbs_saved_path_check_ok), use_container_width=True)
-                with _wbs_right:
-                    _wbs_save_new = st.button(f"Save Version As (V-{_wbs_next_rev})", key="wbs_stage2_save_new",
-                        type="primary" if _wbs_pending else "secondary", disabled=not bool(_wbs_pending), use_container_width=True)
-            if _wbs_save_current or _wbs_save_new:
-                _wbs_selected_text = str(sandbox_slates.get(_wbs_pending) or "")
-                if not _wbs_selected_text.strip():
-                    st.error("Selected path has no text; nothing was saved.")
-                    st.stop()
-                _wbs_title = next(f"{key}: {name}" for key, name, _ in _wbs_stage2_options if key == _wbs_pending)
-                # Never write a selection over an unrelated project/revision.
-                if _wbs_save_current:
-                    try:
-                        _wbs_saved_rows = (supabase.table("writersblock_project_drafts")
-                            .select("id, version_number, draft_content")
-                            .eq("id", _wbs_row_id).eq("project_id", get_active_project_id())
-                            .eq("user_id", get_current_user_id()).eq("draft_type", "project_session")
-                            .limit(1).execute()).data or []
-                        if len(_wbs_saved_rows) != 1:
-                            raise ValueError("The exact revision was not found")
-                        _wbs_original = json.loads(_wbs_saved_rows[0]["draft_content"] or "{}")
-                        if not isinstance(_wbs_original, dict):
-                            raise ValueError("Invalid saved revision")
-                        # Explicit SAVE CURRENT means update this exact revision,
-                        # never insert a new one. Preserve downstream manuscript
-                        # and scene work rather than deleting it in a plot change.
-                        if str(_wbs_original.get("active_format_id") or "") != str(st.session_state.get("active_format_id") or ""):
-                            raise ValueError("Saved writing format differs from active format")
-                        if str(_wbs_original.get("story_seed") or "").strip() != str(st.session_state.get("story_seed") or "").strip():
-                            raise ValueError("Saved premise differs from the open revision; reload before saving")
-                        _wbs_original["sandbox_slates"] = dict(sandbox_slates)
-                        _wbs_original["chosen_option"] = _wbs_title
-                        _wbs_original["chosen_option_text"] = _wbs_selected_text
-                        _wbs_write = (supabase.table("writersblock_project_drafts")
-                            .update({"draft_content": json.dumps(_wbs_original)})
-                            .eq("id", _wbs_row_id).eq("project_id", get_active_project_id())
-                            .eq("user_id", get_current_user_id()).eq("draft_type", "project_session")
-                            .execute())
-                        if not getattr(_wbs_write, "data", None):
-                            raise ValueError("Database did not confirm the update")
-                    except Exception as _wbs_exc:
-                        st.error(f"Current revision was not confirmed: {_wbs_exc}")
-                        st.stop()
-                else:
-                    if not _wbs_saved_path_check_ok:
-                        st.error("Cannot verify the saved revision; no new revision was written.")
-                        st.stop()
-                    st.session_state.chosen_option = _wbs_title
-                    st.session_state.chosen_option_text = _wbs_selected_text
-                    # New branch only; existing saved revisions remain unchanged.
-                    st.session_state.plot_outline = None
-                    st.session_state.current_draft_output = None
-                    st.session_state.rewritten_manuscript = None
-                    st.session_state.final_output_text = None
-                    _wbs_reason = (f"Plot Change ({_wbs_saved_path} → {_wbs_pending})"
-                                   if _wbs_is_plot_change and _wbs_saved_path != _wbs_pending
-                                   else "Path Selection")
-                    _wbs_result = save_current_project_session_to_supabase(
-                        version_name=_wbs_reason, save_as_new_version=True)
-                    if not _wbs_result or getattr(_wbs_result, "unchanged", False):
-                        st.error("New revision was not confirmed; no further navigation permitted.")
-                        st.stop()
-                    _wbs_row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
-                try:
-                    _wbs_rows = (supabase.table("writersblock_project_drafts")
-                                 .select("id, project_id, draft_content")
-                                 .eq("id", _wbs_row_id)
-                                 .eq("project_id", get_active_project_id())
-                                 .eq("user_id", get_current_user_id())
-                                 .eq("draft_type", "project_session").limit(1).execute()).data or []
-                    _wbs_verified = json.loads(_wbs_rows[0]["draft_content"]) if len(_wbs_rows) == 1 else {}
-                except Exception as _wbs_exc:
-                    st.error(f"Path write could not be verified: {_wbs_exc}. Do not advance.")
-                    st.stop()
-                if (_wbs_verified.get("chosen_option") != _wbs_title
-                        or _wbs_verified.get("chosen_option_text") != _wbs_selected_text):
-                    st.error("Saved revision does not contain the exact selected path. Do not advance.")
-                    st.stop()
-                st.session_state.chosen_option = _wbs_title
-                st.session_state.chosen_option_text = _wbs_selected_text
-                if _wbs_save_current:
-                    set_loaded_concept_version_baseline(_wbs_verified)
-                    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(_wbs_verified)
-                    st.session_state["_wbs_last_saved_project_id"] = str(get_active_project_id())
-                st.session_state.pop("_wbs_stage2_regen_unsaved", None)
-                st.session_state.pop("_wbs_stage2_regen_preview", None)
-                st.session_state.pop("_wbs_stage2_pending_path", None)
-                st.session_state.pop("_wbs_stage2_choose_new", None)
-                st.session_state["_wbs_unlocked_saved_stage"] = max(
-                    int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 3)
-                st.rerun()
-            if (_wbs_novel_plot_mode and _wbs_valid and not _wbs_pending
-                    and st.session_state.get("_wbs_active_saved_session_row_id")):
-                if st.button("Continue to Stage 3", key="wbs_stage2_novel_saved_continue",
-                             type="primary", use_container_width=True):
-                    wbs_request_stage_change("Plot Architect")
+    from core.workflow_runtime import run_workflow
+    run_workflow('plot_architecture', globals())
 
 # WBS FIXES-4 — Novel/Novella helpers. Other writing formats are not modified.
-def wbs_novel_blocks(source):
-    if not isinstance(source, dict):
-        return {}
-    blocks = {}
-    for key, value in source.items():
-        try:
-            number = int(key)
-        except (TypeError, ValueError):
-            continue
-        if number > 0 and isinstance(value, str) and value.strip():
-            blocks[number] = value
-    return blocks
 
 
-def wbs_novel_manuscript(blocks):
-    return "\n\n".join(wbs_novel_blocks(blocks)[number]
-                         for number in sorted(wbs_novel_blocks(blocks)))
 
 
 def wbs_novel_save_chapters(changed, previous_source):
-    """Save chapter corrections in the selected existing revision only; no INSERT."""
-    project_id = get_active_project_id()
-    user_id = get_current_user_id()
-    row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
-    if not (project_id and user_id and row_id):
-        raise RuntimeError("Load and save a project revision before editing chapters.")
-    old_blocks = wbs_novel_blocks(st.session_state.get("scene_blocks") or {})
-    if set(changed) != set(old_blocks) or not all(str(v or "").strip() for v in changed.values()):
-        raise ValueError("All saved chapters must remain present and nonempty.")
-    if str(st.session_state.get("current_draft_output") or "").strip() != previous_source:
-        raise RuntimeError("The working manuscript changed. Reload it before saving corrections.")
-    updated = {int(k): str(v) for k, v in changed.items()}
-    if updated == old_blocks:
-        return False
-    result = (supabase.table("writersblock_project_drafts")
-              .select("id, draft_content").eq("id", row_id)
-              .eq("project_id", project_id).eq("user_id", user_id)
-              .eq("draft_type", "project_session").limit(1).execute())
-    rows = getattr(result, "data", None) or []
-    if len(rows) != 1:
-        raise RuntimeError("The exact saved revision could not be verified.")
-    snapshot = json.loads(rows[0].get("draft_content") or "{}")
-    if snapshot.get("active_format_id") != "novel_prose_novella":
-        raise RuntimeError("The saved revision is not a Novel/Novella.")
-    saved_blocks = wbs_novel_blocks(snapshot.get("scene_blocks") or {})
-    if saved_blocks != old_blocks or str(snapshot.get("current_draft_output") or "").strip() != previous_source:
-        raise RuntimeError("The saved revision has changed. Reload before editing.")
-    manuscript = wbs_novel_manuscript(updated)
-    snapshot["scene_blocks"] = {str(k): v for k, v in updated.items()}
-    snapshot["current_draft_output"] = manuscript
-    snapshot["project_integrity_report"] = ""
-    snapshot["project_integrity_source_signature"] = ""
-    snapshot["project_integrity_status"] = ""
-    saved = (supabase.table("writersblock_project_drafts")
-             .update({"draft_content": json.dumps(snapshot)})
-             .eq("id", row_id).eq("project_id", project_id)
-             .eq("user_id", user_id).eq("draft_type", "project_session").execute())
-    if not getattr(saved, "data", None):
-        raise RuntimeError("Chapter corrections could not be saved.")
-    st.session_state.scene_blocks = updated
-    st.session_state.current_draft_output = manuscript
-    for key in ("project_integrity_report", "project_integrity_source_signature", "project_integrity_status"):
-        st.session_state[key] = ""
-    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
-    st.session_state["_wbs_last_saved_project_id"] = str(project_id)
-    return True
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_novel_save_chapters', globals(), changed, previous_source)
 
 
 # SHORT STORY SCENE SCRIPTING — independent of other format pipelines.
 # Existing stage identifiers and Supabase revision IDs are not changed.
-def wbs_ss_blocks(source):
-    """Return the exact saved scene prose with numeric scene keys, without inventing boundaries."""
-    if not isinstance(source, dict):
-        return {}
-    result = {}
-    for key, value in source.items():
-        try:
-            index = int(key)
-        except (ValueError, TypeError):
-            continue
-        if 1 <= index <= 4 and isinstance(value, str) and value.strip():
-            result[index] = value
-    return result
 
 
-def wbs_ss_storyline(source):
-    """Produce manuscript from only explicitly created scenes in scene order."""
-    blocks = wbs_ss_blocks(source)
-    return "\n\n".join(blocks[n] for n in sorted(blocks))
 
 
-def wbs_ss_outline_parts(outline):
-    """Parse actual beat headings/titles and ONLY scene prose, not generator metadata."""
-    source = str(outline or "")
-    hits = list(re.finditer(r"(?im)^\s*\[BEAT\s+(\d+)\]\s*", source))
-    result = {}
-    for i, hit in enumerate(hits):
-        n = int(hit.group(1))
-        if n not in range(1, 5):
-            continue
-        block = source[hit.end():hits[i+1].start() if i+1 < len(hits) else len(source)]
-        title = re.search(r"(?is)\[SCENE TITLE\]\s*:\s*(.*?)(?=\n\s*\[[A-Z][A-Z\s&0-9]*\]\s*:|\Z)", block)
-        prose = re.search(r"(?is)\[(?:SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*)\]\s*:\s*(.*?)(?=\n\s*\[[A-Z][A-Z\s&0-9]*\]\s*:|\Z)", block)
-        title_text = title.group(1).strip().strip("=") if title else f"Scene {n}"
-        prose_text = prose.group(1).strip().strip("=") if prose else ""
-        # Never display planning directives hidden in a prose field.
-        prose_text = re.split(r"(?im)^\s*(?:CORE OBJECTIVE|STYLE\s*&\s*SYNTAX DIRECTIVE|THE CONFLICT)\s*:", prose_text)[0].strip()
-        result[n] = (title_text, prose_text, block)
-    return result
 
 
 def wbs_ss_revision_identity():
-    return (str(st.session_state.get("_wbs_active_saved_session_row_id") or ""),
-            str(get_active_project_id() or ""), str(get_current_user_id() or ""))
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_ss_revision_identity', globals())
 
 
 def wbs_ss_save_scene_to_current_revision(scene_number, scene_text):
-    """Explicit user save only; UPDATE exact revision, never create or renumber a revision.
-
-    Reject concurrent/stale changes and mismatched project/format identifiers.
-    Only the selected scene and working manuscript are written; siblings are preserved.
-    """
-    row_id, project_id, user_id = wbs_ss_revision_identity()
-    if not all((row_id, project_id, user_id)):
-        raise ValueError("Load the exact saved project revision before saving a scene.")
-    if st.session_state.get("active_format_id") != "short_story":
-        raise ValueError("Short Story scene saving cannot be used for another writing format.")
-    if scene_number not in range(1, 5) or not str(scene_text).strip():
-        raise ValueError("Select a numbered scene containing story text.")
-    rows = (supabase.table("writersblock_project_drafts")
-            .select("id, draft_content, version_number")
-            .eq("id", row_id).eq("project_id", project_id).eq("user_id", user_id)
-            .eq("draft_type", "project_session").limit(1).execute()).data or []
-    if len(rows) != 1:
-        raise ValueError("The exact saved revision was not found; nothing was changed.")
-    snapshot = json.loads(rows[0].get("draft_content") or "{}")
-    if not isinstance(snapshot, dict) or str(snapshot.get("current_project_id") or project_id) != project_id:
-        raise ValueError("Saved project identity mismatch; no record was changed.")
-    if snapshot.get("active_format_id") != "short_story":
-        raise ValueError("Saved format is not Short Story; no record was changed.")
-    saved_outline = str(snapshot.get("plot_outline") or "")
-    working_outline = str(st.session_state.get("plot_outline") or "")
-    if saved_outline and saved_outline != working_outline:
-        raise ValueError("Saved plot architecture differs from the working copy. Reload before saving.")
-    stored = wbs_ss_blocks(snapshot.get("scene_blocks") or {})
-    previously_assembled = wbs_ss_storyline(stored)
-    saved_manuscript = str(snapshot.get("current_draft_output") or "")
-    # Older V-n revisions can contain a full manuscript but no scene_blocks.
-    # Keep that original manuscript verbatim while scenes 1-4 are being scripted.
-    # Never erase it when saving the first, second or third scene.
-    # Preserve a reversible copy before assembling all four saved scenes.
-    if (saved_manuscript.strip()
-            and saved_manuscript.strip() != previously_assembled.strip()
-            and not str(snapshot.get("wbs_ss_original_manuscript_backup") or "").strip()):
-        snapshot["wbs_ss_original_manuscript_backup"] = saved_manuscript
-    expected = st.session_state.get("_wbs_ss_db_scene_baseline")
-    if expected is None:
-        # On first entry require an explicit matching baseline from the exact row.
-        # Previous scene blocks may exist; compare using loaded project state.
-        loaded = wbs_ss_blocks(st.session_state.get("_wbs_ss_initial_loaded_blocks") or {})
-        if any(loaded.get(i, "") != stored.get(i, "") for i in range(1, 5)):
-            raise ValueError("Saved scenes differ from the loaded revision. Reload before saving.")
-    elif any(str(expected.get(i, "")) != str(stored.get(i, "")) for i in range(1, 5)):
-        raise ValueError("The saved scene data changed elsewhere. Reload to avoid overwriting it.")
-    stored[scene_number] = str(scene_text)
-    # Store the initial scene structure only when the saved revision has none.
-    if not saved_outline and working_outline:
-        snapshot["plot_outline"] = working_outline
-    snapshot["scene_blocks"] = {str(k): v for k, v in sorted(stored.items())}
-    if set(stored) == {1, 2, 3, 4}:
-        # The completed four-scene manuscript is committed only after all
-        # four explicit scene saves. Original legacy text remains recoverable.
-        snapshot["current_draft_output"] = wbs_ss_storyline(stored)
-    elif (not saved_manuscript.strip()
-          or saved_manuscript.strip() == previously_assembled.strip()):
-        # If this revision was already scene-based, keep its partial manuscript
-        # synchronized. Never overwrite a legacy full-manuscript source.
-        snapshot["current_draft_output"] = wbs_ss_storyline(stored)
-    # Only clear obsolete QC; do not overwrite sibling snapshots or Quill.
-    for field in ("project_integrity_report", "project_integrity_source_signature", "project_integrity_status"):
-        snapshot.pop(field, None)
-    updated = (supabase.table("writersblock_project_drafts")
-               .update({"draft_content": json.dumps(snapshot, ensure_ascii=False)})
-               .eq("id", row_id).eq("project_id", project_id).eq("user_id", user_id)
-               .eq("draft_type", "project_session").execute())
-    if not getattr(updated, "data", None):
-        raise ValueError("The database did not confirm the scene save.")
-    # Preserve the existing V-number and row ID. Update the in-memory baseline.
-    st.session_state["_wbs_ss_db_scene_baseline"] = dict(stored)
-    st.session_state["_wbs_ss_initial_loaded_blocks"] = dict(stored)
-    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
-    st.session_state["_wbs_last_saved_project_id"] = str(project_id)
-    return stored
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_ss_save_scene_to_current_revision', globals(), scene_number, scene_text)
 
 
 def wbs_ss_safe_scene_draft(draft, recorded_scene):
-    """Never let an empty transient editor buffer conceal existing scene prose.
-
-    Streamlit can retain an empty widget value while a generated or saved scene
-    already exists. A blank is not a valid scene save, so restore the intact
-    generated/saved text; do not change either the database or V-number here.
-    Nonempty edits, including accepted rewrite previews, are kept exactly.
-    """
-    if not str(draft or "").strip() and str(recorded_scene or "").strip():
-        return recorded_scene
-    return draft if draft is not None else recorded_scene
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_ss_safe_scene_draft', globals(), draft, recorded_scene)
 
 
 def wbs_ss_capture_draft_on_selection_change():
-    """Keep scene edits in session while navigating, without saving a revision."""
-    old_n = st.session_state.get("_wbs_ss_previous_selection")
-    old_widget = st.session_state.get("_wbs_ss_editor_widget_key")
-    if old_n in (1, 2, 3, 4) and old_widget and old_widget in st.session_state:
-        buffers = dict(st.session_state.get("_wbs_ss_edit_buffers") or {})
-        existing = wbs_ss_blocks(st.session_state.get("scene_blocks") or {}).get(old_n, "")
-        buffers[old_n] = wbs_ss_safe_scene_draft(st.session_state[old_widget], existing)
-        st.session_state["_wbs_ss_edit_buffers"] = buffers
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_ss_capture_draft_on_selection_change', globals())
 
 
 def wbs_ss_approved_for_final():
-    blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
-    if set(blocks) != {1, 2, 3, 4}:
-        return False
-    if str(st.session_state.get("current_draft_output") or "") != wbs_ss_storyline(blocks):
-        return False
-    signature = get_text_signature(wbs_ss_storyline(blocks))
-    identity = (str(st.session_state.get("_wbs_active_saved_session_row_id") or ""), signature,
-                tuple((i, get_text_signature(blocks[i])) for i in range(1, 5)))
-    persisted = wbs_stage4_valid_approvals(
-        st.session_state.get("wbs_stage4_scene_approvals"), blocks,
-        st.session_state.get("current_draft_output"))
-    return (persisted == {1, 2, 3, 4}
-            or (st.session_state.get("_wbs_stage4_review_identity") == identity
-                and set(st.session_state.get("_wbs_stage4_approved_scenes") or []) == {1, 2, 3, 4}))
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_ss_approved_for_final', globals())
 
 # STAGE 4 — Editorial approvals share one scene-based workflow across formats.
 # The selected scene's content is NEVER changed by approving it. A review
 # confirmation is stored on the existing project_session row, without V-number
 # increments or a new version. Saved content hashes prevent stale approvals.
 def wbs_stage4_approval_record(blocks, manuscript):
-    """Expected proof of exactly which four scene texts are being accepted."""
-    actual = wbs_ss_blocks(blocks)
-    if set(actual) != {1, 2, 3, 4} or wbs_ss_storyline(actual) != str(manuscript or ""):
-        raise ValueError("All four original scenes must match the current manuscript before approval.")
-    return {
-        "source_signature": get_text_signature(manuscript),
-        "scene_signatures": {str(n): get_text_signature(actual[n]) for n in range(1, 5)},
-    }
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_stage4_approval_record', globals(), blocks, manuscript)
 
 
 def wbs_stage4_valid_approvals(approvals, blocks, manuscript):
-    """Only trust approvals for these EXACT scene boundaries and story contents."""
-    if not isinstance(approvals, dict):
-        return set()
-    try:
-        proof = wbs_stage4_approval_record(blocks, manuscript)
-    except ValueError:
-        return set()
-    if (approvals.get("source_signature") != proof["source_signature"]
-            or approvals.get("scene_signatures") != proof["scene_signatures"]):
-        return set()
-    approved = approvals.get("approved") or []
-    if not isinstance(approved, list):
-        return set()
-    return {int(n) for n in approved if str(n) in {"1", "2", "3", "4"}}
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_stage4_valid_approvals', globals(), approvals, blocks, manuscript)
 
 
 def wbs_stage4_accept_and_save(scene_number=None):
-    """Accept the complete four-scene story with a SINGLE exact-revision update.
-
-    A numbered scene is supported for backward compatibility, but Stage 4's
-    user-facing approval now signs off the entire manuscript at once. The
-    original scene text, format, and V-number are never changed here.
-    """
-    number = int(scene_number) if scene_number is not None else None
-    if number is not None and number not in (1, 2, 3, 4):
-        raise ValueError("Choose a scene from 1 to 4.")
-    row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
-    project_id = str(get_active_project_id() or "")
-    user_id = str(get_current_user_id() or "")
-    active_format = str(st.session_state.get("active_format_id") or "")
-    if not (row_id and project_id and user_id and active_format):
-        raise ValueError("Load the exact saved revision before accepting a scene.")
-    manuscript = str(st.session_state.get("current_draft_output") or "")
-    blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
-    proof = wbs_stage4_approval_record(blocks, manuscript)
-    query = (supabase.table("writersblock_project_drafts")
-             .select("id, draft_content, version_number")
-             .eq("id", row_id).eq("project_id", project_id)
-             .eq("user_id", user_id).eq("draft_type", "project_session")
-             .limit(1).execute())
-    rows = getattr(query, "data", None) or []
-    if len(rows) != 1:
-        raise ValueError("The selected saved revision was not found. Nothing was saved.")
-    snapshot = json.loads(rows[0].get("draft_content") or "{}")
-    if (not isinstance(snapshot, dict)
-            or str(snapshot.get("current_project_id") or project_id) != project_id
-            or snapshot.get("active_format_id") != active_format):
-        raise ValueError("Project or format mismatch; approval was not saved.")
-    if (wbs_ss_blocks(snapshot.get("scene_blocks")) != blocks
-            or str(snapshot.get("current_draft_output") or "") != manuscript):
-        raise ValueError("The saved scenes have changed. Reload the revision before accepting.")
-    stored = wbs_stage4_valid_approvals(snapshot.get("wbs_stage4_scene_approvals"), blocks, manuscript)
-    if number is None:
-        stored.update((1, 2, 3, 4))
-    else:
-        stored.add(number)
-    approval = {**proof, "approved": sorted(stored)}
-    snapshot["wbs_stage4_scene_approvals"] = approval
-    updated = (supabase.table("writersblock_project_drafts")
-               .update({"draft_content": json.dumps(snapshot, ensure_ascii=False)})
-               .eq("id", row_id).eq("project_id", project_id)
-               .eq("user_id", user_id).eq("draft_type", "project_session")
-               .execute())
-    if not getattr(updated, "data", None):
-        raise ValueError("The saved revision did not confirm this approval.")
-    st.session_state["wbs_stage4_scene_approvals"] = approval
-    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
-    st.session_state["_wbs_last_saved_project_id"] = project_id
-    return stored
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_stage4_accept_and_save', globals(), scene_number)
 
 
 def wbs_stage4_save_manuscript_corrections(edited_blocks, expected_manuscript, expected_blocks):
-    """Save all four author-edited scenes into the CURRENT revision in one DB update.
-
-    No AI call, new revision, changed format, generated scene, or Quill change.
-    Refuse to overwrite an out-of-date or different project session.
-    Existing integrity reviews and approvals remain historical, but are NOT
-    valid for revised text until a fresh review and editorial acceptance.
-    """
-    row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
-    project_id = str(get_active_project_id() or "")
-    user_id = str(get_current_user_id() or "")
-    active_format = str(st.session_state.get("active_format_id") or "")
-    if not all((row_id, project_id, user_id, active_format)):
-        raise ValueError("Load the exact saved revision before editing the full manuscript.")
-    if (not isinstance(edited_blocks, dict) or len(edited_blocks) != 4
-            or {str(k) for k in edited_blocks} != {"1", "2", "3", "4"}):
-        raise ValueError("Only the original four scenes can be edited here.")
-    original = wbs_ss_blocks(expected_blocks)
-    revised = wbs_ss_blocks(edited_blocks)
-    if set(original) != {1, 2, 3, 4} or set(revised) != {1, 2, 3, 4}:
-        raise ValueError("Each of the four scenes must contain text. No changes saved.")
-    if wbs_ss_storyline(original) != str(expected_manuscript or ""):
-        raise ValueError("Scene boundaries no longer match this manuscript. Reload before editing.")
-    if (wbs_ss_blocks(st.session_state.get("scene_blocks") or {}) != original or
-            str(st.session_state.get("current_draft_output") or "") != expected_manuscript):
-        raise ValueError("The working story changed since this page opened. Reload and review before saving.")
-    if revised == original:
-        return False
-    result = (supabase.table("writersblock_project_drafts")
-              .select("id, draft_content, version_number")
-              .eq("id", row_id).eq("project_id", project_id)
-              .eq("user_id", user_id).eq("draft_type", "project_session")
-              .limit(1).execute())
-    rows = getattr(result, "data", None) or []
-    if len(rows) != 1:
-        raise ValueError("The selected saved revision could not be verified. Nothing was saved.")
-    snapshot = json.loads(rows[0].get("draft_content") or "{}")
-    if (not isinstance(snapshot, dict)
-            or str(snapshot.get("current_project_id") or project_id) != project_id
-            or str(snapshot.get("active_format_id") or "") != active_format):
-        raise ValueError("Saved project identity or format mismatch. Nothing was changed.")
-    if (wbs_ss_blocks(snapshot.get("scene_blocks") or {}) != original or
-            str(snapshot.get("current_draft_output") or "") != expected_manuscript):
-        raise ValueError("The saved manuscript has changed elsewhere. Reload before saving corrections.")
-
-    # The four editor fields are the sole source; headings never enter the prose.
-    # Preserve other saved fields, including the original V-number and Quill.
-    updated_story = wbs_ss_storyline(revised)
-    snapshot["scene_blocks"] = {str(n): revised[n] for n in range(1, 5)}
-    snapshot["current_draft_output"] = updated_story
-    # Delete approval proof so old approval cannot authorize new text.
-    snapshot.pop("wbs_stage4_scene_approvals", None)
-    snapshot.pop("wbs_stage4_final_acceptance", None)
-    # Keep the prior integrity report for comparison, but its old source
-    # signature will invalidate it until a NEW integrity run is completed.
-    persisted = (supabase.table("writersblock_project_drafts")
-                 .update({"draft_content": json.dumps(snapshot, ensure_ascii=False)})
-                 .eq("id", row_id).eq("project_id", project_id)
-                 .eq("user_id", user_id).eq("draft_type", "project_session")
-                 .execute())
-    if not getattr(persisted, "data", None):
-        raise ValueError("The database did not confirm the corrections save.")
-
-    st.session_state["scene_blocks"] = dict(revised)
-    st.session_state["current_draft_output"] = updated_story
-    st.session_state["wbs_stage4_scene_approvals"] = {}
-    st.session_state.pop("wbs_stage4_final_acceptance", None)
-    st.session_state.pop("_wbs_stage4_approved_scenes", None)
-    st.session_state.pop("_wbs_stage4_review_identity", None)
-    st.session_state.pop("_wbs_final_saved_proof", None)
-    # Returning to Stage 3 must show the just-saved prose, not stale buffers.
-    st.session_state.pop("_wbs_ss_edit_buffers", None)
-    st.session_state.pop("_wbs_ss_editor_widget_key", None)
-    st.session_state.pop("_wbs_ss_rewrite_preview", None)
-    st.session_state["_wbs_ss_db_scene_baseline"] = dict(revised)
-    st.session_state["_wbs_ss_initial_loaded_blocks"] = dict(revised)
-    st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(snapshot)
-    st.session_state["_wbs_last_saved_project_id"] = project_id
-    return True
+    from core.workflow_runtime import call_format_helper
+    return call_format_helper('wbs_stage4_save_manuscript_corrections', globals(), edited_blocks, expected_manuscript, expected_blocks)
 
 
 # ==========================================
 # PHASE 3: PLOT ARCHITECT ENGINE
 # ==========================================
 if st.session_state.project_stage == "Plot Architect":
-    st.header("🏗️ Step 3: Scene Scripting")
-    render_project_title_banner("step_3_plot_architecture")
-    st.caption(
-        f"Dialogue Style: {get_dialogue_style_display()} — carried forward from Concept Development. "
-        "The selected project type controls dialogue formatting."
-    )
-    st.markdown(f"**Selected Direction:** `{st.session_state.chosen_option}`")
-    st.markdown("---")
-
-    # A selected Sandbox path starts plot generation immediately, without an extra click.
-    # A loaded outline is displayed unchanged; never regenerate it automatically.
-    if st.session_state.plot_outline is None:
-        if st.session_state.get("active_format_id") == "short_story":
-            st.info("The selected Plot Architecture is ready. Generate its scene structure when you choose; scenes will not be scripted automatically.")
-            if not st.button("Prepare Scene Structure", key="wbs_ss_explicit_outline", type="primary"):
-                st.stop()
-        require_product_access("plot")
-        require_demo_action_available("plot")
-
-        with st.spinner("Locking down scene beats and style directives..."):
-            time.sleep(1)
-
-            if create_bridge_adapter is None:
-                st.error(
-                    "WritersBlock Model is unavailable. "
-                    f"{WBS_MODEL_IMPORT_ERROR}"
-                )
-                st.stop()
-
-            _wbs_plot_bridge = create_bridge_adapter(
-                backend=st.session_state.backend
-            )
-            # Short Story only: give the initial architecture substantive narrative.
-            # Keep the original format-specific generator intact for all other formats.
-            _wbs_short_story_plot = str(get_effective_format_type() or "").strip().lower().replace("_", " ") == "short story"
-            _wbs_plot_length_guidance = (
-                "SHORT STORY INITIAL PLOT ARCHITECTURE: Write FOUR scenes, with at least "
-                "250 words of actual story narrative in each scene (approximately 1,000 words "
-                "total), staying below the 1,500-word short-story cap. Exclude titles, "
-                "planning commentary, scene objectives and style directives from narrative "
-                "word counts. Put planning directives in their dedicated metadata fields, "
-                "never in scene prose. The author may shorten or lengthen scenes later."
-                if _wbs_short_story_plot else ""
-            )
-            _wbs_plot_result = _wbs_plot_bridge.execute(
-                "Generate plot outline",
-                st.session_state,
-                prepared_context={
-                    "series_aware_story_seed": get_series_aware_story_seed(),
-                    "effective_format_type": get_effective_format_type(),
-                    "format_development_context": get_full_project_continuity_context(),
-                    "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
-                    "quill_template_context": refresh_quill_template_context(),
-                    "initial_scene_length_guidance": _wbs_plot_length_guidance,
-                },
-                action_payload={
-                    "initial_scene_length_guidance": _wbs_plot_length_guidance,
-                    "chosen_option": st.session_state.chosen_option,
-                    "chosen_option_text": get_plot_dialogue_context(),
-                    "tone_style": st.session_state.tone_style,
-                    "author_style": st.session_state.author_style,
-                },
-            )
-
-            if not _wbs_plot_result.success:
-                st.error(
-                    "WritersBlock Model Bridge could not generate Plot Architecture. "
-                    + (_wbs_plot_result.error or "Unknown bridge error.")
-                )
-                st.stop()
-
-            st.session_state.plot_outline = _wbs_plot_result.output
-            # Newly generated outlines require their first save.
-            st.session_state["_wbs_stage3_saved_outline_baseline"] = ""
-            st.session_state["_wbs_stage3_unsaved_changes"] = True
-            st.session_state["_wbs_agent_bridge_last_operation"] = (
-                _wbs_plot_result.backend_operation or ""
-            )
-            st.session_state["_wbs_agent_bridge_last_success"] = True
-
-            # WritersBlock Model state pin:
-            # Plot generation belongs to Step 3. Preserve the current selection
-            # and explicitly keep the app on Plot Architect before Streamlit reruns.
-            st.session_state.project_stage = "Plot Architect"
-            st.session_state.chosen_option = st.session_state.get("chosen_option")
-            st.session_state.chosen_option_text = st.session_state.get("chosen_option_text")
-            st.session_state["_wbs_agent_bridge_plot_stage_pinned"] = True
-
-        if ai_output_is_usable(st.session_state.plot_outline):
-            mark_demo_action_used("plot")
-        if not ai_output_is_usable(st.session_state.get("plot_outline")):
-            st.error("Plot generation did not produce a usable result. Return to Scripting and select a path again.")
-            st.stop()
-
-    # Stage 3 display guard: planning language can be embedded inside a SCENE
-    # field (without a tag). Never display it as part of the reader's story.
-    def _wbs_reader_scene_text(raw):
-        raw = str(raw or "").strip()
-        # Remove planning language accidentally embedded in a prose field.
-        # Preserve the authoritative raw outline; clean only the reader-facing view.
-        raw = re.sub(
-            r'(?is)(?:^|(?<=[.!?])\s+)["“]?\s*(?:Her|His|Their|The character\'s|The protagonist\'s)\s+'
-            r'conflict\s+is\s+(?:purely|primarily|largely)\s+(?:internal|external)'
-            r'.*?(?:[.!?](?=\s|$)|$)["”]?',
-            ' ', raw,
-        )
-        # Strip editorial/generation commentary only when a clause explicitly
-        # discusses the scene, narration, directive or writer, not the action.
-        raw = re.sub(
-            r"(?is)(?:^|(?<=[.!?])\s+)(?:The scene (?:emphasizes|focuses on|is carried|will be|relies on|should|uses|highlights|establishes)|"
-            r"Narration (?:carries|highlights|focuses|will|should|describes)|"
-            r"The narration (?:carries|highlights|focuses|will|should|describes)|"
-            r"This (?:beat|scene) (?:emphasizes|focuses|should|uses|is designed)|"
-            r"(?:Use|Maintain|Employ|Apply|Analyze and apply) (?:active syntax|descriptive|style syntax|narration|dialogue)).*?(?:[.!?](?=\s|$)|$)",
-            " ", raw,
-        )
-        return re.sub(r"[ \t]{2,}", " ", raw).strip()
-
-    def _wbs_display_paragraphs(raw):
-        """Presentation-only paragraph layout; never mutates the saved manuscript.
-
-        Existing author paragraph breaks are authoritative. For a single long
-        prose block, group sentences into readable paragraphs without changing
-        the words or punctuation. This is a visual aid, not semantic editing.
-        """
-        raw = str(raw or "").strip()
-        if not raw:
-            return []
-        original_paragraphs = re.split(r"\n\s*\n", raw)
-        output = []
-        for paragraph in original_paragraphs:
-            paragraph = paragraph.strip()
-            if not paragraph:
-                continue
-            if "\n" in paragraph or len(paragraph.split()) < 105:
-                output.append(paragraph)
-                continue
-            # Split only at unambiguous sentence boundaries; avoid initials,
-            # decimals, abbreviations and quotation marks where possible.
-            sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z“\"])', paragraph)
-            if len(sentences) < 4:
-                output.append(paragraph)
-                continue
-            group, count = [], 0
-            for sentence in sentences:
-                group.append(sentence)
-                count += len(sentence.split())
-                if count >= 65 and len(group) >= 2:
-                    output.append(" ".join(group))
-                    group, count = [], 0
-            if group:
-                if output and count < 22 and len(original_paragraphs) == 1:
-                    output[-1] += " " + " ".join(group)
-                else:
-                    output.append(" ".join(group))
-        return output
-
-    def _wbs_reader_outline_preview(raw):
-        # Preserve source tags internally, but present only scene titles and
-        # prose during review; all format controls still use the raw outline.
-        beats = re.split(r"(?im)^\s*\[BEAT\s+\d+\]\s*", str(raw or ""))
-        displayed = []
-        for section in beats:
-            title = re.search(r"(?is)\[SCENE TITLE\]\s*:\s*(.*?)(?=\[[A-Z][A-Z\s&0-9]*\]\s*:|$)", section)
-            scene = re.search(r"(?is)\[(?:SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*)\]\s*:\s*(.*?)(?=\[[A-Z][A-Z\s&0-9]*\]\s*:|$)", section)
-            if scene:
-                prose = _wbs_reader_scene_text(scene.group(1))
-                if prose:
-                    displayed.append(((title.group(1).strip() + "\n\n") if title else "") + prose)
-        return "\n\n".join(displayed)
-
-    # SHORT STORY: four writer-controlled scenes at Stage 3. Other formats use
-    # the existing pipeline below, completely untouched.
-    if st.session_state.get("active_format_id") == "short_story":
-        _ss_parts = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
-        _ss_identity = wbs_ss_revision_identity()
-        if st.session_state.get("_wbs_ss_editor_identity") != _ss_identity:
-            for _key in ("_wbs_ss_edit_buffers", "_wbs_ss_selected", "_wbs_ss_previous_selection",
-                         "_wbs_ss_editor_widget_key", "_wbs_ss_db_scene_baseline", "_wbs_ss_rewrite_preview", "_wbs_ss_last_configs"):
-                st.session_state.pop(_key, None)
-            st.session_state["_wbs_ss_editor_identity"] = _ss_identity
-            st.session_state["_wbs_ss_initial_loaded_blocks"] = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
-        _ss_blocks = wbs_ss_blocks(st.session_state.get("scene_blocks") or {})
-        # The existing outline's Scene 1 is the initial writer-facing prose,
-        # without registering any additional scenes or making a database save.
-        _ss_seed_one = _wbs_reader_scene_text(_ss_parts.get(1, ("", "", ""))[1])
-        if 1 not in _ss_blocks and not _ss_seed_one:
-            st.warning("Scene 1 has no story text in this revision. Restore its original storyline before continuing.")
-            st.stop()
-        _ss_available = sorted(set(_ss_blocks) | {1})
-        _ss_pending_jump = st.session_state.pop("_wbs_ss_jump_to", None)
-        if _ss_pending_jump in _ss_available:
-            st.session_state["_wbs_ss_selected"] = _ss_pending_jump
-        _ss_selected_default = st.session_state.get("_wbs_ss_selected")
-        if _ss_selected_default not in _ss_available:
-            st.session_state["_wbs_ss_selected"] = _ss_available[0]
-        st.markdown("### Scene Scripting — Four Scenes")
-        st.caption("Open written scenes in any order. Navigation does not save, generate, or create another V-number.")
-        st.markdown("#### Choose an existing scene")
-        _ss_selected = st.selectbox(
-            "Choose an existing scene", _ss_available,
-            key="_wbs_ss_selected", format_func=lambda n: f"Scene {n} — {_ss_parts.get(n, (f'Scene {n}', '', ''))[0]}",
-            on_change=wbs_ss_capture_draft_on_selection_change,
-            label_visibility="collapsed",
-        )
-        _ss_title = _ss_parts.get(_ss_selected, (f"Scene {_ss_selected}", "", ""))[0]
-        _ss_original = _ss_blocks.get(_ss_selected, _ss_seed_one if _ss_selected == 1 else "")
-        _ss_buffer = dict(st.session_state.get("_wbs_ss_edit_buffers") or {})
-        _ss_widget_key = (f"wbs_ss_text_{_ss_identity[0]}_{_ss_identity[1]}_{_ss_selected}_"
-                          f"{get_text_signature(_ss_original)[:12]}")
-        _ss_pending_accept = st.session_state.pop("_wbs_ss_pending_accept", None)
-        if (isinstance(_ss_pending_accept, (tuple, list)) and len(_ss_pending_accept) == 2
-                and _ss_pending_accept[0] == _ss_selected):
-            _ss_buffer[_ss_selected] = _ss_pending_accept[1]
-            st.session_state[_ss_widget_key] = _ss_pending_accept[1]
-            st.session_state["_wbs_ss_edit_buffers"] = _ss_buffer
-        # Recover the existing scene from its canonical scene block when an
-        # empty scratch buffer or Streamlit widget would otherwise hide it.
-        # This is an in-memory UI repair, NOT a generation or automatic save.
-        _ss_buffer[_ss_selected] = wbs_ss_safe_scene_draft(
-            _ss_buffer.get(_ss_selected), _ss_original)
-        st.session_state[_ss_widget_key] = wbs_ss_safe_scene_draft(
-            st.session_state.get(_ss_widget_key, _ss_buffer[_ss_selected]),
-            _ss_buffer[_ss_selected])
-        st.session_state["_wbs_ss_edit_buffers"] = _ss_buffer
-        st.session_state["_wbs_ss_previous_selection"] = _ss_selected
-        st.session_state["_wbs_ss_editor_widget_key"] = _ss_widget_key
-        # Keep the original writer-facing layout: scene story on the LEFT;
-        # the original script rewrite controls, not a duplicate story, on RIGHT.
-        # Unsaved changes live only in per-scene scratch buffers until Save or Next.
-        _ss_working = str(st.session_state.get(_ss_widget_key, _ss_original) or "")
-        _ss_changed = _ss_working != _ss_original
-        _ss_left, _ss_right = st.columns([1.15, 1], gap="large")
-        with _ss_left:
-            st.subheader(f"Scene {_ss_selected} — {_ss_title}")
-            if _ss_changed:
-                st.caption(f"Edited working scene · {count_words(_ss_working):,} words · Not yet saved")
-            elif _ss_selected in _ss_blocks:
-                st.caption(f"Saved working scene · {count_words(_ss_working):,} words")
-            else:
-                st.caption("Original story from the selected plot — save before advancing")
-            for _p in _wbs_display_paragraphs(_ss_working):
-                if _p.strip():
-                    st.write(_p)
-        with _ss_right:
-            # Keep the original scene-script editor controls in the right column.
-            # Only the LEFT column displays the accepted/current story. The right
-            # column displays proposed prose only after a rewrite request.
-            st.markdown("#### Script Rewrite Controls")
-            _ss_mode = st.selectbox("Rewrite Mode", [
-                "Creative Script Rewrite / Improve Scene",
-                "Polish Only / Do Not Change Story",
-            ], key=f"wbs_ss_rewrite_mode_{_ss_selected}")
-            _ss_length = st.selectbox("Target Length", [
-                "Keep Current Length", "Condense for Tighter Pacing", "Custom Word Count",
-            ], key=f"wbs_ss_rewrite_length_{_ss_selected}")
-            _ss_custom_words = None
-            if _ss_length == "Custom Word Count":
-                _ss_custom_words = st.number_input(
-                    "Target words", min_value=50, max_value=2500,
-                    value=max(50, min(2500, count_words(_ss_working) or 250)),
-                    step=25, key=f"wbs_ss_rewrite_custom_words_{_ss_selected}")
-            _ss_dialogue = st.selectbox("Dialogue Style for Rewrite", [
-                "Use Current Project Dialogue Style", *DIALOGUE_STYLE_OPTIONS,
-            ], key=f"wbs_ss_rewrite_dialogue_{_ss_selected}")
-            _ss_exact = st.checkbox(
-                "Direct Script Change / Obey My Instructions Exactly",
-                key=f"wbs_ss_direct_{_ss_selected}",
-                help="Apply only the requested changes, without creative additions.")
-            _ss_rewrite_direction = st.text_area(
-                "Specific Rewrite Direction (optional)",
-                key=f"wbs_ss_rewrite_direction_{_ss_selected}", height=130,
-                placeholder="Describe the change you want to this scene.")
-
-            # Selecting a *different* dropdown setting previews a new rewrite.
-            # Initial widget render does not make an API call. Changing only the
-            # instructions requires clicking Preview or Rewrite Again; this
-            # avoids API calls on every text-editing rerun.
-            _ss_control_values = (
-                _ss_mode, _ss_length, _ss_custom_words, _ss_dialogue, _ss_exact)
-            _ss_config_key = (str(_ss_identity), _ss_selected)
-            _ss_previous_configs = dict(st.session_state.get("_wbs_ss_last_configs") or {})
-            _ss_previous_config = _ss_previous_configs.get(str(_ss_config_key))
-            _ss_dropdown_changed = (_ss_previous_config is not None
-                                    and tuple(_ss_previous_config) != _ss_control_values)
-            _ss_previous_configs[str(_ss_config_key)] = _ss_control_values
-            st.session_state["_wbs_ss_last_configs"] = _ss_previous_configs
-            _ss_request_signature = get_text_signature(repr((
-                _ss_selected, _ss_working, _ss_control_values,
-                _ss_rewrite_direction)))
-            _ss_preview_clicked = st.button(
-                "Preview Rewritten Storyline", key=f"wbs_ss_preview_{_ss_selected}",
-                use_container_width=True)
-            _ss_previous_proposal = st.session_state.get("_wbs_ss_rewrite_preview")
-            _ss_rewrite_again = False
-            if (isinstance(_ss_previous_proposal, (tuple, list))
-                    and len(_ss_previous_proposal) == 4
-                    and _ss_previous_proposal[0] == _ss_selected
-                    and _ss_previous_proposal[3] == _ss_request_signature):
-                # A preview is always shown beneath the controls, never left.
-                st.markdown("##### Preview Rewritten Storyline")
-                st.text_area(
-                    "Proposed scene — review before accepting",
-                    value=_ss_previous_proposal[2], disabled=True, height=230,
-                    key=f"wbs_ss_proposal_read_{_ss_selected}_{get_text_signature(_ss_previous_proposal[2])[:14]}")
-                _ss_accept_col, _ss_again_col = st.columns(2)
-                with _ss_accept_col:
-                    if st.button("✓ Accept Rewrite", key=f"wbs_ss_accept_{_ss_selected}",
-                                 type="primary", use_container_width=True):
-                        if _ss_working != _ss_previous_proposal[1]:
-                            st.error("The original scene changed; generate another preview before accepting.")
-                        else:
-                            # Accept updates the LEFT story on rerun, but does NOT
-                            # silently save or increment a revision number.
-                            st.session_state["_wbs_ss_pending_accept"] = (
-                                _ss_selected, _ss_previous_proposal[2])
-                            st.session_state.pop("_wbs_ss_rewrite_preview", None)
-                            st.rerun()
-                with _ss_again_col:
-                    _ss_rewrite_again = st.button(
-                        "↻ Rewrite Again", key=f"wbs_ss_again_{_ss_selected}",
-                        use_container_width=True)
-            elif _ss_previous_proposal and _ss_previous_proposal[0] == _ss_selected:
-                # An edited source or changed setting invalidates the old
-                # proposal. Never offer to accept an outdated rewrite.
-                st.session_state.pop("_wbs_ss_rewrite_preview", None)
-
-            if _ss_dropdown_changed or _ss_preview_clicked or _ss_rewrite_again:
-                _backend = st.session_state.get("backend")
-                _client = getattr(_backend, "client", None)
-                _model = getattr(_backend, "model_name", None)
-                if not _ss_working.strip():
-                    st.error("This scene has no story text to revise.")
-                elif _ss_exact and not _ss_rewrite_direction.strip():
-                    st.error("Describe the exact change before requesting a rewrite.")
-                elif not _client or not _model:
-                    st.error("The writing service is unavailable. Your existing scene was not changed.")
-                else:
-                    try:
-                        _ss_dialogue_rule = (
-                            get_dialogue_style_instruction()
-                            if _ss_dialogue == "Use Current Project Dialogue Style"
-                            else DIALOGUE_STYLE_INSTRUCTIONS.get(_ss_dialogue, _ss_dialogue))
-                        _ss_target = (f"Target approximately {_ss_custom_words} words."
-                                      if _ss_custom_words else _ss_length + ".")
-                        _ss_directive = (
-                            "Follow the writer's change instructions EXACTLY. Do not add "
-                            "creative changes or alter unrelated passages. " if _ss_exact else
-                            "Revise this scene according to the selected rewrite mode. ")
-                        _ss_prompt = (
-                            "You are rewriting ONLY ONE scene of an existing FOUR-scene short story. "
-                            + _ss_directive +
-                            "Return ONLY finished narrative prose. No titles, scene numbers, "
-                            "meta-commentary, objectives, formatting tags, or writing directions. "
-                            "Preserve voice, characters, tense, plot continuity, and key events "
-                            "unless the writer explicitly requests otherwise. "
-                            f"Mode: {_ss_mode}. Length: {_ss_target} "
-                            f"Dialogue: {_ss_dialogue_rule}. "
-                            f"Writer direction: {_ss_rewrite_direction or 'Improve the prose while preserving the story.'}\n\n"
-                            f"SCENE {_ss_selected} ORIGINAL:\n{_ss_working}")
-                        with st.spinner("Preparing rewrite preview..."):
-                            _ss_res = _client.models.generate_content(
-                                model=_model, contents=_ss_prompt)
-                        _ss_proposed = str(getattr(_ss_res, "text", "") or "").strip()
-                        if not _ss_proposed or re.search(
-                                r"(?im)^\s*\[(BEAT|CORE OBJECTIVE|STYLE)", _ss_proposed):
-                            raise ValueError("The writer did not return clean story prose")
-                        st.session_state["_wbs_ss_rewrite_preview"] = (
-                            _ss_selected, _ss_working, _ss_proposed, _ss_request_signature)
-                        # Preview is displayed directly below the controls on
-                        # the next rerun; nothing on the left changes yet.
-                        st.rerun()
-                    except Exception as exc:
-                        st.session_state.pop("_wbs_ss_rewrite_preview", None)
-                        st.error(f"Rewrite unavailable: {exc}")
-
-            # Optional manual editing remains available but never duplicates
-            # an unsolicited scene review in this column.
-            with st.expander("Edit Scene Text Manually", expanded=False):
-                _ss_manual_edit = st.text_area(
-                    "Editable scene text", height=220, key=_ss_widget_key)
-                st.caption(f"Working words: {count_words(_ss_manual_edit):,}")
-                if st.button(f"Save Scene {_ss_selected} to Current Revision",
-                             key=f"wbs_ss_save_{_ss_selected}", use_container_width=True,
-                             disabled=bool(st.session_state.get("demo_mode"))):
-                    try:
-                        wbs_ss_save_scene_to_current_revision(_ss_selected, _ss_manual_edit)
-                    except Exception as exc:
-                        st.error(f"Scene was not saved: {exc}")
-                    else:
-                        _ss_blocks[_ss_selected] = _ss_manual_edit
-                        st.session_state.scene_blocks = _ss_blocks
-                        if set(_ss_blocks) == {1, 2, 3, 4}:
-                            st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
-                        _ss_buffer.pop(_ss_selected, None)
-                        st.session_state["_wbs_ss_edit_buffers"] = _ss_buffer
-                        st.session_state.pop("_wbs_ss_rewrite_preview", None)
-                        st.rerun()
-            if _ss_changed:
-                st.caption("Accepted edits appear on the left. Save Scene or use the bottom button to save them to this revision.")
-        # Stage 3 footer: writer chooses a destination from a dropdown.
-        # Existing scenes may be revisited in any order. Only the NEXT missing
-        # scene can be generated; jumping past unwritten scenes is never allowed.
-        # Save & Return to Integrity is always available, even when this scene
-        # was opened from ordinary development rather than a report shortcut.
-        # These controls affect only Short Story Stage 3, not other formats.
-        _ss_next_missing = next((n for n in range(2, 5) if n not in _ss_blocks), None)
-        _ss_destinations = [("scene", n) for n in sorted(set(_ss_blocks) | {1})]
-        if _ss_next_missing is not None:
-            _ss_destinations.append(("generate", _ss_next_missing))
-        if set(_ss_blocks) == {1, 2, 3, 4}:
-            _ss_destinations.append(("review", 4))
-
-        def _ss_destination_label(value):
-            if value is None:
-                return "Choose a scene or Editorial Review..."
-            kind, number = value
-            if kind == "review":
-                return "Stage 4 — Editorial & Publisher Review"
-            title = _ss_parts.get(number, (f"Scene {number}", "", ""))[0]
-            if kind == "generate":
-                return f"Generate Scene {number} — {title}"
-            return f"Scene {number} — {title}"
-
-        # Use Streamlit's own PRIMARY-colored popover button for this dropdown.
-        # A CSS-styled selectbox was still rendered gray in the deployed app.
-        # The popover's selected destination uses the SAME save/navigation path
-        # below; no extra AI calls and no changes to any other scene controls.
-        _ss_destination = None
-        _ss_continue_col, _ss_integrity_col = st.columns(2, gap="small")
-        with _ss_continue_col:
-            with st.popover(
-                f"Save Scene {_ss_selected} And Continue To:",
-                type="primary",
-                use_container_width=True,
-                disabled=bool(st.session_state.get("demo_mode")),
-                help="Save this scene to the current revision, then open the chosen scene or Editorial Review.",
-            ):
-                for _ss_kind, _ss_number in _ss_destinations:
-                    if st.button(
-                        _ss_destination_label((_ss_kind, _ss_number)),
-                        key=f"wbs_ss_go_{_ss_selected}_{_ss_kind}_{_ss_number}",
-                        use_container_width=True,
-                        disabled=bool(st.session_state.get("demo_mode")),
-                    ):
-                        _ss_destination = (_ss_kind, _ss_number)
-        with _ss_integrity_col:
-            _ss_integrity_clicked = st.button(
-                f"Save Scene {_ss_selected} And Return To Integrity Report",
-                key=f"wbs_ss_save_return_integrity_{_ss_selected}",
-                type="primary", use_container_width=True,
-                disabled=bool(st.session_state.get("demo_mode")),
-            )
-
-        # Selecting the dropdown is itself the intentional Save & Continue
-        # action. No supplementary click, no new V-number, no automatic API call
-        # for previously written scenes or for returning to Integrity.
-        if _ss_destination is not None or _ss_integrity_clicked:
-            _ss_final_text = wbs_ss_safe_scene_draft(
-                st.session_state.get(_ss_widget_key),
-                _ss_blocks.get(_ss_selected, _ss_seed_one if _ss_selected == 1 else ""),
-            )
-            if not str(_ss_final_text or "").strip():
-                st.error("This scene has no story text. Nothing was saved.")
-            else:
-                try:
-                    # A newly generated scene exists in session before its first
-                    # database save. Compare against the SAVED baseline, not
-                    # _ss_blocks, so it cannot disappear after reloading V-6.
-                    _ss_saved_baseline = st.session_state.get("_wbs_ss_db_scene_baseline")
-                    if _ss_saved_baseline is None:
-                        _ss_saved_baseline = st.session_state.get("_wbs_ss_initial_loaded_blocks") or {}
-                    _ss_saved_baseline = wbs_ss_blocks(_ss_saved_baseline)
-                    _ss_needs_save = _ss_saved_baseline.get(_ss_selected) != _ss_final_text
-                    if _ss_needs_save:
-                        wbs_ss_save_scene_to_current_revision(_ss_selected, _ss_final_text)
-                except Exception as _ss_save_exc:
-                    st.error(f"Scene {_ss_selected} could not be saved: {_ss_save_exc}")
-                else:
-                    _ss_blocks[_ss_selected] = _ss_final_text
-                    st.session_state.scene_blocks = _ss_blocks
-                    _ss_saved_buffers = dict(st.session_state.get("_wbs_ss_edit_buffers") or {})
-                    _ss_saved_buffers[_ss_selected] = _ss_final_text
-                    st.session_state["_wbs_ss_edit_buffers"] = _ss_saved_buffers
-                    if set(_ss_blocks) == {1, 2, 3, 4}:
-                        st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
-                    st.session_state.pop("_wbs_ss_rewrite_preview", None)
-
-                    if _ss_integrity_clicked or _ss_destination[0] == "review":
-                        st.session_state.pop("_wbs_ss_integrity_return_context", None)
-                        st.session_state["_wbs_unlocked_saved_stage"] = max(
-                            int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 4)
-                        wbs_request_stage_change("Isolation Guardrail", export_view=False)
-                    elif _ss_destination[0] == "scene":
-                        st.session_state["_wbs_ss_jump_to"] = _ss_destination[1]
-                        st.rerun()
-                    elif _ss_destination[0] == "generate":
-                        _ss_target_scene = _ss_destination[1]
-                        # Generate ONLY the next missing scene, after the
-                        # preceding scene has been saved. No other scene changes.
-                        _ss_beat = _ss_parts.get(_ss_target_scene, ("", "", ""))[2]
-                        if not _ss_beat:
-                            st.error(f"Scene {_ss_target_scene} has no saved plot beat; no scene was generated.")
-                        else:
-                            _ss_backend = st.session_state.get("backend")
-                            _ss_client = getattr(_ss_backend, "client", None)
-                            _ss_model = getattr(_ss_backend, "model_name", None)
-                            if not _ss_client or not _ss_model:
-                                st.error("Writing service is unavailable; preceding scene was saved.")
-                            else:
-                                try:
-                                    require_product_access("drafting")
-                                    _ss_prompt = (
-                                        f"Write ONLY Scene {_ss_target_scene} of a FOUR-SCENE short story. "
-                                        "Return ONLY complete, finished narrative prose in natural paragraphs. "
-                                        "No tags, titles, writing directives, recap or explanations. "
-                                        "Preserve characters, continuity, voice, dialogue style and tense. "
-                                        "Do not repeat earlier scenes. Aim for 200–350 words unless the scene requires otherwise.\n\n"
-                                        f"DIALOGUE: {get_dialogue_development_packet()}\n"
-                                        f"DEVELOPMENT: {get_active_format_development_context()}\n"
-                                        f"SCENE PLAN (internal only):\n{_ss_beat}\n\n"
-                                        f"PRECEDING MANUSCRIPT:\n{wbs_ss_storyline(_ss_blocks)}"
-                                    )
-                                    _ss_response = _ss_client.models.generate_content(
-                                        model=_ss_model, contents=_ss_prompt)
-                                    _ss_text = str(getattr(_ss_response, "text", "") or "").strip()
-                                    if not _ss_text or re.search(r"(?im)^\s*\[(BEAT|CORE OBJECTIVE|STYLE)", _ss_text):
-                                        raise ValueError("The generator did not return clean scene prose")
-                                except Exception as _ss_gen_exc:
-                                    st.error(f"Scene {_ss_target_scene} was not created: {_ss_gen_exc}")
-                                else:
-                                    _ss_blocks[_ss_target_scene] = _ss_text
-                                    st.session_state.scene_blocks = _ss_blocks
-                                    _ss_next_buffers = dict(st.session_state.get("_wbs_ss_edit_buffers") or {})
-                                    _ss_next_buffers[_ss_target_scene] = _ss_text
-                                    st.session_state["_wbs_ss_edit_buffers"] = _ss_next_buffers
-                                    if set(_ss_blocks) == {1, 2, 3, 4}:
-                                        st.session_state.current_draft_output = wbs_ss_storyline(_ss_blocks)
-                                    st.session_state["_wbs_ss_jump_to"] = _ss_target_scene
-                                    st.success(f"Scene {_ss_target_scene} generated as working text. Review it before saving.")
-                                    st.rerun()
-        st.stop()
-
-    # Single Stage 3 workspace: source on the left, editing / rewrite on the right.
-    # The tagged outline remains authoritative for every writing format.
-    _outline_now = str(st.session_state.get("plot_outline") or "").strip()
-    _beat_pattern = r"(?im)^\s*\[BEAT\s+(\d+)\]"
-    _beat_matches = list(re.finditer(_beat_pattern, _outline_now))
-    _beat_sections = {}
-    for _idx, _hit in enumerate(_beat_matches):
-        _section_end = _beat_matches[_idx + 1].start() if _idx + 1 < len(_beat_matches) else len(_outline_now)
-        _beat_sections[_hit.group(1)] = _outline_now[_hit.start():_section_end].strip()
-    _beat_numbers = list(_beat_sections)
-    _locations = [f"Scene Beat {_num}" for _num in _beat_numbers] + ["Full Storyline"]
-    _source_col, _edit_col = st.columns([1.15, 1], gap="large")
-
-    # Selection lives with the edit controls; only that beat is shown on the left.
-    with _edit_col:
-        st.subheader("Edit / Rewrite Storyline")
-        _location = st.selectbox("Choose scene / beat to edit", _locations,
-            key="_wbs_stage3_rewrite_location")
-    _selected_number = re.search(r"\d+", _location).group() if _location != "Full Storyline" else ""
-    _selected_outline = _beat_sections.get(_selected_number, "") if _selected_number else _outline_now
-    _edit_signature = get_text_signature(_selected_outline) + "|" + _location
-    if st.session_state.get("_wbs_stage3_edit_signature") != _edit_signature:
-        st.session_state["_wbs_stage3_edit_source"] = _selected_outline
-        st.session_state["_wbs_stage3_edit_signature"] = _edit_signature
-
-    # The left workspace must show the active manuscript text when the
-    # selected beat already has a drafted scene. Do not show an obsolete
-    # plot-outline scene after the writer accepts a manuscript rewrite.
-    _visible_blocks = st.session_state.get("scene_blocks") or {}
-    _visible_beat = int(_selected_number) if _selected_number else None
-    _visible_draft = (
-        str(_visible_blocks.get(_visible_beat, _visible_blocks.get(str(_visible_beat), "")) or "").strip()
-        if _visible_beat is not None and isinstance(_visible_blocks, dict)
-        else ""
-    )
-    _visible_draft = _visible_draft if str(st.session_state.get("current_draft_output") or "").strip() else ""
-
-    with _source_col:
-        st.subheader(f"Beat {_selected_number} — Scene {_selected_number}" if _selected_number else "Full Storyline")
-        if not _selected_outline:
-            st.info("No scene content is available yet.")
-        else:
-            # Approved manuscript rewrites immediately appear in this left panel.
-            if _visible_draft:
-                st.caption("Current working manuscript scene")
-                for _paragraph in _wbs_display_paragraphs(_wbs_reader_scene_text(_visible_draft)):
-                    if _paragraph.strip():
-                        st.write(_paragraph.strip())
-            # Otherwise display the outline's story text, never its directives.
-            elif _selected_number:
-                _title_match = re.search(r"\[SCENE TITLE\]\s*:\s*", _selected_outline, flags=re.I)
-                _scene_match = re.search(
-                    r"\[(?:SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*)\]\s*:\s*",
-                    _selected_outline, flags=re.I)
-                _next_header = re.compile(r"\[(?:BEAT\s*\d+|SCENE TITLE|CORE OBJECTIVE|SCENE DETAILS(?:\s*&\s*CONFLICT)?|SCENE\s*\d*|THE\s+CONFLICT|STYLE\s*&\s*SYNTAX DIRECTIVE)\]", re.I)
-                if _title_match:
-                    _tail = _selected_outline[_title_match.end():]
-                    _next = _next_header.search(_tail)
-                    _title = _tail[:_next.start() if _next else len(_tail)].strip().strip("=").strip()
-                    if _title:
-                        st.markdown(f"**{_title}**")
-                if _scene_match:
-                    _tail = _selected_outline[_scene_match.end():]
-                    _next = _next_header.search(_tail)
-                    _raw_scene_text = _tail[:_next.start() if _next else len(_tail)].strip().strip("=").strip()
-                    _scene_text = _wbs_reader_scene_text(_raw_scene_text)
-                    if str(get_effective_format_type() or "").strip().lower().replace("_", " ") == "short story":
-                        _direction = re.search(
-                            r"(?is)(?:Her|His|Their|The character's|The protagonist's)\s+conflict\s+is\s+"
-                            r"(?:purely|primarily|largely)\s+(?:internal|external).*?(?:[.!?](?=\s|$)|$)",
-                            _raw_scene_text,
-                        )
-                        if _direction:
-                            _direction_text = _direction.group(0).strip().strip('“”"')
-                            st.markdown('**Directional Intent (not manuscript text)**')
-                            st.markdown('*“' + _direction_text.replace('*', r'\*') + '”*')
-                    if _scene_text:
-                        st.markdown("**Scene**")
-                        for _paragraph in _wbs_display_paragraphs(_scene_text):
-                            if _paragraph.strip():
-                                st.write(_paragraph.strip())
-                elif not _title_match:
-                    st.info("Scene text is unavailable for this beat.")
-            else:
-                st.caption("Select an individual beat to read its scene.")
-
-    with _edit_col:
-        st.markdown("#### Script Rewrite Controls")
-        # Creative modes stay in the rewrite dropdown. Exact/direct changes
-        # have their own explicit control immediately above the text box.
-        _mode = st.selectbox("Rewrite Mode", [
-            "Creative Script Rewrite / Improve Scene",
-            "Polish Only / Do Not Change Story",
-        ], key="_wbs_stage3_rewrite_mode")
-        _length = st.selectbox("Target Length", [
-            "Keep Current Length", "Condense for Tighter Pacing",
-            "Custom Word Count",
-        ], key="_wbs_stage3_rewrite_length")
-        _custom_words = None
-        if _length == "Custom Word Count":
-            _custom_words = st.number_input("Target words", 50, 2500, 400, 25,
-                key="_wbs_stage3_rewrite_custom_words")
-        _dialogue = st.selectbox("Dialogue Style for Rewrite", [
-            "Use Current Project Dialogue Style", *DIALOGUE_STYLE_OPTIONS,
-        ], key="_wbs_stage3_rewrite_dialogue")
-        _exact_script_change = st.checkbox(
-            "Direct Script Change / Obey My Instructions Exactly",
-            key="_wbs_stage3_direct_script_change",
-            help="Use the text below as an exact replacement rather than a creative rewrite.")
-        if _exact_script_change:
-            _mode = "Direct Script Change / Obey My Instructions Exactly"
-        rewrite_direction = st.text_area(
-            "Replacement Text" if _exact_script_change else "Specific Rewrite Direction (optional)",
-            key="_wbs_stage3_rewrite_direction", height=130,
-            placeholder=("Paste replacement text for the selected scene."
-                         if _exact_script_change else
-                         "Describe changes to the selected beat or entire storyline."))
-        # If the scene is already drafted, this editor must rewrite the ACTUAL
-        # manuscript scene, rather than silently changing only its old outline.
-        _draft_blocks = st.session_state.get("scene_blocks") or {}
-        _draft_beat_num = int(_selected_number) if _selected_number else None
-        _draft_scene = (str(_draft_blocks.get(_draft_beat_num, _draft_blocks.get(str(_draft_beat_num), "")) or "").strip()
-                        if _draft_beat_num is not None and isinstance(_draft_blocks, dict) else "")
-        _rewrite_existing_draft = bool(_draft_scene and str(st.session_state.get("current_draft_output") or "").strip())
-        if _rewrite_existing_draft:
-            st.caption("Editing the existing manuscript scene. Accept Rewrite will replace this scene in the working draft.")
-        if st.button("Preview Rewritten Storyline", key="_wbs_stage3_rewrite_preview_button",
-                     use_container_width=True):
-            backend = st.session_state.get("backend")
-            client = getattr(backend, "client", None)
-            model = getattr(backend, "model_name", None)
-            if client is None or not model or not _selected_outline:
-                st.error("The source storyline or writing service is unavailable. No changes were made.")
-            else:
-                _target = f"Aim for about {_custom_words} words." if _custom_words else _length
-                _dialogue_rule = (get_dialogue_style_instruction() if
-                    _dialogue == "Use Current Project Dialogue Style" else
-                    DIALOGUE_STYLE_INSTRUCTIONS.get(_dialogue, _dialogue))
-                _instruction = (
-                    "Revise the supplied STORY OUTLINE only, not finished manuscript prose. "
-                    "Return only the complete revised selected outline. "
-                    "Keep every original [BEAT N] heading, [SCENE TITLE], [CORE OBJECTIVE], "
-                    "[SCENE DETAILS & CONFLICT] and [STYLE & SYNTAX DIRECTIVE] so later generation works. "
-                    "Preserve the writer's format, characters, continuity, voice, and development tense. "
-                    "In SCENE DETAILS & CONFLICT write story events only. NEVER add commentary about "
-                    "the scene, narration, objectives, pacing, syntax or writing technique to story text. "
-                    "Put all such instructions solely in CORE OBJECTIVE or STYLE & SYNTAX DIRECTIVE. "
-                    f"Mode: {_mode}. Target length: {_target}. Dialogue: {_dialogue_rule}. "
-                    f"Development: {get_active_format_development_context()}. "
-                    f"Writer's direction: {rewrite_direction or 'Improve selected outline.'}\n\n"
-                    f"SOURCE OUTLINE:\n{_selected_outline}")
-                if _rewrite_existing_draft:
-                    _instruction = (
-                        "Rewrite the following FINISHED MANUSCRIPT SCENE according to the writer's instructions. "
-                        "Return only replacement story prose, no headers, beat markers, meta commentary, "
-                        "writing instructions or explanation. Preserve story continuity, characters, "
-                        "format, voice and existing scene length unless requested otherwise. "
-                        f"Mode: {_mode}. Target length: {_target}. Dialogue: {_dialogue_rule}. "
-                        f"Writer's direction: {rewrite_direction or 'Improve this scene.'}\n\n"
-                        f"EXISTING MANUSCRIPT SCENE:\n{_draft_scene}"
-                    )
-                # Short-story scene length applies to the reader-facing SCENE,
-                # not the metadata-heavy outline. Preserve all backend tags.
-                _scene_word_rewrite = bool(
-                    _selected_number and _custom_words and not _rewrite_existing_draft
-                    and str(get_effective_format_type() or "").strip().lower().replace("_", " ") == "short story"
-                )
-                if _scene_word_rewrite:
-                    _scene_field = re.search(
-                        r"(?is)(\[SCENE DETAILS(?:\s*&\s*CONFLICT)?\]\s*:\s*)(.*?)(?=\n\s*\[[A-Z][A-Z\s&0-9]*\]\s*:|\Z)",
-                        _selected_outline,
-                    )
-                    if not _scene_field:
-                        st.error("Scene details could not be isolated. Original retained.")
-                        st.stop()
-                    _story_source = _wbs_reader_scene_text(_scene_field.group(2))
-                    _instruction = (
-                        "Rewrite and expand ONLY the following short-story scene into finished narrative prose. "
-                        f"Write approximately {_custom_words} words of actual STORY prose (not outline metadata). "
-                        "Use natural paragraph breaks. Return ONLY the prose, without scene titles, "
-                        "tags, directions, explanations, or writing analysis. Keep the plot, characters, "
-                        "point of view and continuity intact. "
-                        f"Mode: {_mode}. Dialogue: {_dialogue_rule}. "
-                        f"Writer direction: {rewrite_direction or 'Expand the scene naturally.'}\n\n"
-                        f"STORY SCENE:\n{_story_source}"
-                    )
-                try:
-                    _response = client.models.generate_content(model=model, contents=_instruction)
-                    _preview = str(getattr(_response, "text", "") or "").strip()
-                    if _scene_word_rewrite:
-                        _valid_prose = bool(_preview) and not re.search(
-                            r"(?im)^\s*\[(?:BEAT|SCENE TITLE|CORE OBJECTIVE|STYLE|SCENE DETAILS)", _preview)
-                        _prose_words = len(_preview.split())
-                        _valid_prose = _valid_prose and _prose_words >= max(40, int(_custom_words * 0.65))
-                        if _valid_prose:
-                            _preview = (_selected_outline[:_scene_field.start(2)] + _preview +
-                                        _selected_outline[_scene_field.end(2):])
-                    if _rewrite_existing_draft:
-                        _valid = bool(_preview) and not re.search(
-                            r"(?im)^\s*\[(?:BEAT|CORE OBJECTIVE|STYLE\s*&\s*SYNTAX DIRECTIVE)", _preview)
-                    else:
-                        _old_ids = re.findall(_beat_pattern, _selected_outline)
-                        _new_ids = re.findall(_beat_pattern, _preview)
-                        _tags = ("[SCENE TITLE]", "[CORE OBJECTIVE]", "[SCENE DETAILS & CONFLICT]", "[STYLE & SYNTAX DIRECTIVE]")
-                        _valid = bool(_preview) and _old_ids == _new_ids and not any(
-                            _preview.upper().count(tag) != len(_old_ids) for tag in _tags)
-                        if _scene_word_rewrite:
-                            _valid = _valid and _valid_prose
-                    if not _valid:
-                        st.error("The rewrite did not preserve the required scene format. Original retained.")
-                    else:
-                        st.session_state["_wbs_stage3_rewrite_preview"] = _preview
-                        st.session_state["_wbs_stage3_rewrite_origin"] = get_text_signature(_outline_now)
-                        st.session_state["_wbs_stage3_rewrite_target"] = _location
-                        st.session_state["_wbs_stage3_rewrite_draft_beat"] = _draft_beat_num if _rewrite_existing_draft else None
-                        st.session_state["_wbs_stage3_rewrite_draft_signature"] = get_text_signature(_draft_scene) if _rewrite_existing_draft else ""
-                except Exception as exc:
-                    st.error(f"Rewrite could not be completed: {exc}")
-        _preview = str(st.session_state.get("_wbs_stage3_rewrite_preview") or "").strip()
-        if _preview:
-            st.text_area("Review proposed rewrite before approval",
-                         value=(_preview if st.session_state.get("_wbs_stage3_rewrite_draft_beat") is not None
-                                else _wbs_reader_outline_preview(_preview)),
-                         height=240, disabled=True, key="_wbs_stage3_rewrite_display")
-            _accept, _discard = st.columns(2)
-            with _accept:
-                if st.button("Accept Rewrite", key="_wbs_stage3_accept_rewritten_outline", use_container_width=True):
-                    _original = str(st.session_state.get("plot_outline") or "")
-                    if st.session_state.get("_wbs_stage3_rewrite_origin") != get_text_signature(_original):
-                        st.error("Source changed. Generate another preview first.")
-                    elif st.session_state.get("_wbs_stage3_rewrite_draft_beat") is not None:
-                        _n = int(st.session_state["_wbs_stage3_rewrite_draft_beat"])
-                        _blocks = st.session_state.get("scene_blocks") or {}
-                        _old_scene = str(_blocks.get(_n, _blocks.get(str(_n), "")) or "").strip()
-                        if get_text_signature(_old_scene) != st.session_state.get("_wbs_stage3_rewrite_draft_signature"):
-                            st.error("The manuscript scene changed. Generate another preview before accepting.")
-                        elif _preview != _old_scene:
-                            _blocks[_n] = _preview
-                            _blocks.pop(str(_n), None)
-                            st.session_state.scene_blocks = _blocks
-                            st.session_state.current_draft_output = "\n\n".join(
-                                str(_blocks[k]).strip() for k in sorted(_blocks, key=lambda v: int(v))
-                                if str(_blocks[k] or "").strip())
-                            st.session_state["_wbs_stage3_manuscript_rewrite_notice"] = f"Scene {_n} rewrite applied to working manuscript. Save when ready."
-                            for _key in ("_wbs_stage3_rewrite_preview", "_wbs_stage3_rewrite_origin", "_wbs_stage3_rewrite_target", "_wbs_stage3_rewrite_draft_beat", "_wbs_stage3_rewrite_draft_signature"):
-                                st.session_state.pop(_key, None)
-                            st.rerun()
-                    else:
-                        _target = st.session_state.get("_wbs_stage3_rewrite_target") or ""
-                        if _target == "Full Storyline":
-                            _new_outline = _preview
-                        else:
-                            _num = re.search(r"\d+", _target).group()
-                            _match = re.search(rf"(?ims)^\s*\[BEAT\s+{_num}\].*?(?=^\s*\[BEAT\s+\d+\]|\Z)", _original)
-                            _new_outline = (_original[:_match.start()] + _preview + "\n" + _original[_match.end():]) if _match else ""
-                        if _new_outline:
-                            st.session_state.plot_outline = _new_outline
-                            st.session_state["_wbs_stage3_unsaved_changes"] = True
-                            for _key in ("_wbs_stage3_rewrite_preview", "_wbs_stage3_rewrite_origin", "_wbs_stage3_rewrite_target", "_wbs_stage3_rewrite_draft_beat", "_wbs_stage3_rewrite_draft_signature"):
-                                st.session_state.pop(_key, None)
-                            st.rerun()
-            with _discard:
-                if st.button("Discard", key="_wbs_stage3_discard_rewrite", use_container_width=True):
-                    for _key in ("_wbs_stage3_rewrite_preview", "_wbs_stage3_rewrite_origin", "_wbs_stage3_rewrite_target", "_wbs_stage3_rewrite_draft_beat", "_wbs_stage3_rewrite_draft_signature"):
-                        st.session_state.pop(_key, None)
-                    st.rerun()
-
-    if st.session_state.get("_wbs_stage3_manuscript_rewrite_notice"):
-        st.success(st.session_state.pop("_wbs_stage3_manuscript_rewrite_notice"))
-    # Review all approved manuscript scenes before leaving Plot Architecture.
-    # This is an inspection and in-place checkpoint, never a new version.
-    _preview_scene_blocks = st.session_state.get("scene_blocks") or {}
-    _preview_scenes = []
-    if isinstance(_preview_scene_blocks, dict):
-        for _scene_key, _scene_value in sorted(_preview_scene_blocks.items(), key=lambda kv: int(kv[0])):
-            _scene_text = str(_scene_value or "").strip()
-            if _scene_text:
-                _preview_scenes.append((int(_scene_key), _scene_text))
-    if _preview_scenes:
-        st.markdown("---")
-        st.subheader("Final Working Manuscript Preview")
-        st.caption("Review all scenes together before saving Plot Architecture. This preview uses the accepted working manuscript; no AI generation.")
-        _preview_complete_text = "\n\n".join(_text for _, _text in _preview_scenes)
-        for _scene_id, _scene_text in _preview_scenes:
-            st.markdown(f"**Scene {_scene_id}**")
-            for _paragraph in _wbs_display_paragraphs(_scene_text):
-                if _paragraph.strip():
-                    st.write(_paragraph.strip())
-        _original_full_draft = str(st.session_state.get("current_draft_output") or "").strip()
-        if _original_full_draft != _preview_complete_text:
-            st.warning("The working manuscript and scene list do not match. Saving is blocked to avoid losing accepted edits.")
-        elif st.button("💾 Save Working Manuscript to Current Revision", key="_wbs_stage3_save_existing_revision", use_container_width=True, disabled=bool(st.session_state.get("demo_mode"))):
-            _row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "").strip()
-            _project_id = get_active_project_id()
-            _user_id = get_current_user_id()
-            if not _row_id or not _project_id or not _user_id:
-                st.error("Cannot identify the exact current saved revision. No record changed.")
-            else:
-                try:
-                    _query = (supabase.table("writersblock_project_drafts")
-                        .select("id, draft_content")
-                        .eq("id", _row_id)
-                        .eq("project_id", _project_id)
-                        .eq("user_id", _user_id)
-                        .eq("draft_type", "project_session")
-                        .limit(1).execute())
-                    _rows = getattr(_query, "data", None) or []
-                    if not _rows:
-                        st.error("The selected saved revision was not found. No record changed.")
-                    else:
-                        _snapshot = json.loads(_rows[0].get("draft_content") or "{}")
-                        if not isinstance(_snapshot, dict):
-                            raise ValueError("The existing revision data is invalid")
-                        _previous_text = str(_snapshot.get("current_draft_output") or "").strip()
-                        _previous_blocks = _snapshot.get("scene_blocks") or {}
-                        _new_blocks = {str(_n): _text for _n, _text in _preview_scenes}
-                        if _previous_text == _preview_complete_text and _previous_blocks == _new_blocks:
-                            st.info("Current revision already contains these scenes. No changes or new version created.")
-                        else:
-                            _snapshot["current_draft_output"] = _preview_complete_text
-                            _snapshot["scene_blocks"] = _new_blocks
-                            # Any previous integrity report applied to different prose is no longer current.
-                            _snapshot.pop("project_integrity_report", None)
-                            _snapshot.pop("project_integrity_source_signature", None)
-                            _snapshot.pop("project_integrity_status", None)
-                            _updated = (supabase.table("writersblock_project_drafts")
-                                .update({"draft_content": json.dumps(_snapshot)})
-                                .eq("id", _row_id)
-                                .eq("project_id", _project_id)
-                                .eq("user_id", _user_id)
-                                .eq("draft_type", "project_session")
-                                .execute())
-                            if not getattr(_updated, "data", None):
-                                raise RuntimeError("The database did not confirm the update")
-                            st.session_state.current_draft_output = _preview_complete_text
-                            st.session_state.pop("project_integrity_report", None)
-                            st.session_state.pop("project_integrity_source_signature", None)
-                            st.session_state.pop("project_integrity_status", None)
-                            st.success("Working manuscript saved to the existing revision. No new version created.")
-                except Exception as _save_exc:
-                    st.error(f"Manuscript was not saved: {_save_exc}")
-
-    st.markdown("---")
-    st.caption("Save and continue. Unchanged storylines retain their existing version number.")
-    if st.button("💾 Save Plot Architecture & Continue", key="_wbs_stage3_save_plot_architecture",
-                 type="primary", use_container_width=True):
-        if st.session_state.get("demo_mode"):
-            full_version_only_notice("Save Plot Architecture")
-        else:
-            # Compare with the outline loaded by this writer (or last saved
-            # in this session). Never compare against the latest project row:
-            # other saved versions/branches can have different outlines.
-            _current_outline = str(st.session_state.get("plot_outline") or "").strip()
-            _baseline = st.session_state.get("_wbs_stage3_saved_outline_baseline")
-            _explicit_edits = bool(st.session_state.get("_wbs_stage3_unsaved_changes", False))
-            _project_id = get_active_project_id()
-            # A project that has never been saved needs an initial checkpoint.
-            _requires_first_save = not _project_id
-            if _baseline is None and _project_id:
-                # Existing project loaded through a legacy flow: determine its
-                # exact selected saved snapshot, not the newest sibling version.
-                _baseline = _current_outline if not _explicit_edits else ""
-            _changed = (_baseline is not None and _current_outline != _baseline)
-            if not ai_output_is_usable(st.session_state.get("plot_outline")):
-                st.error("No usable Plot Architecture is available to save. No work was changed.")
-                st.stop()
-            if _requires_first_save:
-                if not save_current_project_session_to_supabase():
-                    st.stop()
-                st.session_state["_wbs_stage3_saved_outline_baseline"] = _current_outline
-            elif _changed or _explicit_edits:
-                # First completion of an empty Stage 3 is an update to the
-                # exact loaded revision, never an automatic new V-number.
-                _row_id = str(st.session_state.get("_wbs_active_saved_session_row_id") or "").strip()
-                _user_id = get_current_user_id()
-                if not (_row_id and _project_id and _user_id):
-                    st.error("The exact active revision cannot be verified. Nothing was saved.")
-                    st.stop()
-                try:
-                    _rows = (supabase.table("writersblock_project_drafts")
-                             .select("id, draft_content")
-                             .eq("id", _row_id).eq("project_id", _project_id)
-                             .eq("user_id", _user_id).eq("draft_type", "project_session")
-                             .limit(1).execute()).data or []
-                    if len(_rows) != 1:
-                        raise ValueError("Saved revision not found")
-                    _saved_snapshot = json.loads(_rows[0].get("draft_content") or "{}")
-                    if not isinstance(_saved_snapshot, dict):
-                        raise ValueError("Invalid saved revision")
-                    _previous_outline = str(_saved_snapshot.get("plot_outline") or "").strip()
-                    if _previous_outline and _previous_outline != _current_outline:
-                        st.error("This revision already contains a different saved Plot Architecture. Save as a new revision to preserve it. No automatic version was created.")
-                        st.stop()
-                    if not _previous_outline:
-                        _saved_snapshot["plot_outline"] = _current_outline
-                        _write = (supabase.table("writersblock_project_drafts")
-                                  .update({"draft_content": json.dumps(_saved_snapshot)})
-                                  .eq("id", _row_id).eq("project_id", _project_id)
-                                  .eq("user_id", _user_id).eq("draft_type", "project_session")
-                                  .execute())
-                        if not getattr(_write, "data", None):
-                            raise ValueError("Database did not confirm save")
-                        _check = (supabase.table("writersblock_project_drafts")
-                                  .select("draft_content")
-                                  .eq("id", _row_id).eq("project_id", _project_id)
-                                  .eq("user_id", _user_id).eq("draft_type", "project_session")
-                                  .limit(1).execute()).data or []
-                        _verified = json.loads(_check[0].get("draft_content") or "{}") if len(_check) == 1 else {}
-                        if str(_verified.get("plot_outline") or "").strip() != _current_outline:
-                            raise ValueError("Saved outline did not match the current storyline")
-                        set_loaded_concept_version_baseline(_verified)
-                        st.session_state["_wbs_last_saved_work_signature"] = wbs_save_state_signature(_verified)
-                        st.session_state["_wbs_last_saved_project_id"] = str(_project_id)
-                    st.session_state["_wbs_stage3_saved_outline_baseline"] = _current_outline
-                except Exception as _exc:
-                    st.error(f"Stage 3 save failed: {_exc}. No new revision was created.")
-                    st.stop()
-            # With no edits, advance without ANY Supabase insert/version bump.
-            # Explicit Stage 3 Save & Continue authorizes the next room only when
-            # a real plot outline is present. Sidebar review alone never does.
-            if not ai_output_is_usable(st.session_state.get("plot_outline")):
-                st.error("No usable Plot Architecture is available to continue. No work was changed.")
-                st.stop()
-            st.session_state["_wbs_stage3_unsaved_changes"] = False
-            st.session_state["_wbs_unlocked_saved_stage"] = max(
-                int(st.session_state.get("_wbs_unlocked_saved_stage") or 1), 4
-            )
-            # A saved complete manuscript must not be regenerated simply because
-            # the writer returns to Plot Architecture and advances again.
-            if str(st.session_state.get("current_draft_output") or "").strip():
-                wbs_request_stage_change("Isolation Guardrail", export_view=False)
-            else:
-                wbs_request_stage_change("Drafting Engine")
-    if st.session_state.get("_wbs_stage3_unsaved_changes"):
-        st.caption("There are unsaved changes to the storyline.")
+    from core.workflow_runtime import run_workflow
+    run_workflow('scene_scripting', globals())
 
 # ======================================
 # PHASE 4: RECURSIVE DRAFTING ENGINE
 # ======================================
 elif st.session_state.project_stage in ["Drafting", "Drafting Engine"]:
-    require_product_access("drafting")
-
-    _wbs_novel_draft = st.session_state.get("active_format_id") == "novel_prose_novella"
-    _wbs_unit = "Chapter" if _wbs_novel_draft else "Scene Block"
-    st.header("📄 Generating Your Creative Draft")
-    st.caption("WBS is writing the approved story sections in sequence and preserving continuity. Each section is generated only once.")
-    render_project_title_banner("step_4_creative_draft")
-    st.caption(
-        f"Dialogue Style: {get_dialogue_style_display()} — applied to every scene block. "
-        "Project type controls how dialogue is written and formatted."
-    )
-  
-
-    if "current_draft_output" not in st.session_state:
-        st.session_state.current_draft_output = ""
-
-    if "rolling_lore_book" not in st.session_state:
-        st.session_state.rolling_lore_book = ""
-
-    if "current_processing_beat" not in st.session_state:
-        st.session_state.current_processing_beat = 1
-
-    plot_outline_text = st.session_state.get("plot_outline", "")
-
-    def split_plot_outline_into_beats(outline_text):
-        text = str(outline_text or "").strip()
-        if not text:
-            return []
-
-        # Current Plot Architecture format: [BEAT 1], [BEAT 2], etc.
-        beat_pattern = re.compile(
-            r"(?im)^\s*\[BEAT\s+(\d+)\]\s*$"
-        )
-        matches = list(beat_pattern.finditer(text))
-
-        if matches:
-            beats = []
-            for idx, match in enumerate(matches):
-                end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-                beat_block = text[match.start():end].strip()
-                if beat_block:
-                    beats.append(beat_block)
-            return beats
-
-        # Compatibility with older outlines that used === separators.
-        legacy_beats = [
-            beat.strip()
-            for beat in text.split("===")
-            if beat.strip()
-        ]
-        if len(legacy_beats) > 1:
-            return legacy_beats
-
-        # Final compatibility fallback for plain BEAT 1 / BEAT 2 headings.
-        plain_pattern = re.compile(
-            r"(?im)^\s*BEAT\s+(\d+)\s*:?\s*$"
-        )
-        plain_matches = list(plain_pattern.finditer(text))
-        if plain_matches:
-            beats = []
-            for idx, match in enumerate(plain_matches):
-                end = plain_matches[idx + 1].start() if idx + 1 < len(plain_matches) else len(text)
-                beat_block = text[match.start():end].strip()
-                if beat_block:
-                    beats.append(beat_block)
-            return beats
-
-        return [text]
-
-    filtered_beats = split_plot_outline_into_beats(plot_outline_text)
-    total_beats = len(filtered_beats)
-    st.session_state.total_beats = total_beats
-
-    if total_beats == 0:
-        st.warning("No plot outline beats found. Return to Plot Architect and create an outline first.")
-
-    else:
-        if "scene_blocks" not in st.session_state:
-            st.session_state.scene_blocks = {}
-
-        saved_scene_numbers = [
-            int(scene_number)
-            for scene_number, scene_text in st.session_state.scene_blocks.items()
-            if str(scene_text or "").strip()
-        ]
-
-        next_missing_scene = None
-        for scene_number in range(1, total_beats + 1):
-            if scene_number not in saved_scene_numbers:
-                next_missing_scene = scene_number
-                break
-
-        if next_missing_scene is not None:
-            st.session_state.current_processing_beat = next_missing_scene
-        else:
-            st.session_state.current_processing_beat = total_beats + 1
-
-        recommended_scene_word_count = 2000 if _wbs_novel_draft else 1200
-        audiobook_scene_instruction = ""
-
-        if is_picture_book_project():
-            render_picture_book_budget("drafting")
-            alloc = picture_book_allocations()
-            beat_index = max(0, min(3, int(st.session_state.current_processing_beat or 1)-1))
-            recommended_scene_word_count = alloc[beat_index]
-            if total_beats != 4:
-                st.warning("Picture books require exactly four beats. Return to Plot Architecture and set four beats.")
-                st.stop()
-            remaining = picture_book_target() - count_words(st.session_state.current_draft_output)
-            st.info(f"Beat {beat_index+1} suggested allocation: {recommended_scene_word_count} words. "
-                    f"Overall target remaining: {max(0,remaining)} words. "
-                    "Scene allocations are guidelines; review overall length before final output.")
-
-        if st.session_state.get("format_type") == "Audio Book":
-            audiobook_spec = get_audiobook_length_spec()
-            audiobook_target_total = int(
-                st.session_state.get(
-                    "audiobook_target_word_count",
-                    audiobook_spec["default_words"],
-                )
-            )
-            drafted_word_count = count_words(st.session_state.current_draft_output)
-            remaining_scene_count = max(1, total_beats - len(saved_scene_numbers))
-            remaining_word_target = max(50, audiobook_target_total - drafted_word_count)
-            recommended_scene_word_count = int(
-                round((remaining_word_target / remaining_scene_count) / 25) * 25
-            )
-            recommended_scene_word_count = max(50, min(2500, recommended_scene_word_count))
-
-            st.info(
-                f"Audio Book target: {st.session_state.get('audiobook_length', '30 Minutes')} | "
-                f"{audiobook_target_total:,} total words | "
-                f"{drafted_word_count:,} written | "
-                f"approximately {remaining_word_target:,} remaining across "
-                f"{remaining_scene_count} unwritten scene block(s)."
-            )
-
-            audiobook_scene_instruction = f"""
-AUDIO BOOK LENGTH CONTROL:
-Selected finished length: {st.session_state.get('audiobook_length', '30 Minutes')}
-Acceptable total manuscript range: {audiobook_spec['min_words']:,}–{audiobook_spec['max_words']:,} words
-Selected total manuscript target: {audiobook_target_total:,} words
-Words already drafted before this scene: {drafted_word_count:,}
-Approximate words remaining before this scene: {remaining_word_target:,}
-Keep this scene close to its assigned target so the completed manuscript remains within the selected Audio Book length.
-"""
-
-        if st.session_state.get("_wbs_last_draft_budget_notice"):
-            st.info(st.session_state.pop("_wbs_last_draft_budget_notice"))
-
-        # WBS_20261023_SCENE_BEAT_EDITOR
-        with st.expander("✏️ Edit Saved Scene Beat / Manuscript", expanded=False):
-            _existing_blocks = st.session_state.get("scene_blocks") or {}
-            _scene_numbers = sorted(int(k) for k,v in _existing_blocks.items() if str(k).isdigit() and str(v or "").strip())
-            _labels = [f"Scene Beat {k}" for k in _scene_numbers]
-            if str(st.session_state.get("current_draft_output") or "").strip():
-                _labels.append("Full Manuscript")
-            if not _labels:
-                st.info("Load an existing manuscript or generate a scene first.")
-            else:
-                _chosen = st.selectbox("Select section to revise", _labels, key="wbs_scene_edit_choice")
-                _beat_no = None if _chosen == "Full Manuscript" else int(_chosen.rsplit(" ",1)[-1])
-                _old_text = str(st.session_state.get("current_draft_output") or "") if _beat_no is None else str(_existing_blocks.get(_beat_no, _existing_blocks.get(str(_beat_no), "")))
-                _sig = get_text_signature(_old_text)[:12]
-                _edited = st.text_area("Editable scene text — paste Quill's revision here", value=_old_text,
-                                        height=320, key=f"wbs_scene_edit_{_beat_no}_{_sig}")
-                if st.button("💾 Save This Version", key="wbs_scene_save_revision", type="primary",
-                             disabled=bool(st.session_state.get("demo_mode"))):
-                    if not _edited.strip():
-                        st.error("Empty text cannot be saved.")
-                    elif _edited == _old_text:
-                        st.info("No changes to save.")
-                    else:
-                        _old_draft = st.session_state.get("current_draft_output", "")
-                        _old_blocks = dict(_existing_blocks)
-                        _old_branch = st.session_state.get("project_version_name", "Original")
-                        if _beat_no is None:
-                            st.session_state.current_draft_output = _edited
-                            st.session_state.scene_blocks = {}
-                        else:
-                            st.session_state.scene_blocks[_beat_no] = _edited
-                            st.session_state.current_draft_output = "\n\n".join(
-                                str(v).strip() for k,v in sorted(st.session_state.scene_blocks.items(),key=lambda kv:int(kv[0])) if str(v or "").strip())
-                        _new_branch = f"Edited {datetime.now():%m-%d %H%M}"
-                        try:
-                            _result = save_current_project_session_to_supabase(version_name=_new_branch, save_as_new_version=True)
-                            if not _result:
-                                raise RuntimeError("Database save was not confirmed")
-                        except Exception as _exc:
-                            st.session_state.current_draft_output = _old_draft
-                            st.session_state.scene_blocks = _old_blocks
-                            st.session_state.project_version_name = _old_branch
-                            st.error(f"Unable to save; previous content restored: {_exc}")
-                        else:
-                            st.success("Edited manuscript saved as a new version; previous version preserved.")
-                            st.rerun()
-
-        col_left, col_right = st.columns([2, 1])
-
-        with col_left:
-            st.subheader("📄 Draft Output Canvas")
-
-            latest_scene_number = max(1, int(st.session_state.get("current_processing_beat", 1) or 1) - 1)
-            latest_scene_text = ""
-            if isinstance(st.session_state.get("scene_blocks"), dict):
-                latest_scene_text = st.session_state.scene_blocks.get(latest_scene_number, "")
-
-            st.text_area(
-                "Latest Scene Output:",
-                value=latest_scene_text or st.session_state.current_draft_output,
-                height=500,
-                label_visibility="collapsed",
-                disabled=True,
-            )
-
-            st.subheader("⚙️ Chapter / Scene Settings")
-
-            chapter_title = st.text_input(
-                "Chapter / Scene Title:",
-                value=f"{_wbs_unit} {st.session_state.current_processing_beat}",
-                key=f"chapter_title_{st.session_state.current_processing_beat}"
-            )
-
-            target_word_count = st.number_input(
-                "Target Word Count Per Chapter:" if _wbs_novel_draft else "Target Word Count Per Scene Block:",
-                min_value=50,
-                max_value=6000 if _wbs_novel_draft else 2500,
-                value=recommended_scene_word_count,
-                step=25,
-                key=f"target_word_count_{st.session_state.current_processing_beat}"
-            )
-
-            pov_choice = st.selectbox(
-                "Point of View:",
-                ["Third Person Limited", "Third Person Omniscient", "First Person"],
-                key=f"pov_choice_{st.session_state.current_processing_beat}"
-            )
-
-            # Read-only preview of the CURRENT planned scene, before instructions.
-            # Uses the existing Stage 3 outline; does not generate or modify story content.
-            _preview_index = int(st.session_state.current_processing_beat) - 1
-            if 0 <= _preview_index < len(filtered_beats):
-                _preview_beat = str(filtered_beats[_preview_index] or "")
-
-                def _preview_field(label):
-                    _match = re.search(
-                        rf"(?ims)^\s*\[{label}\]\s*:\s*(.*?)(?=^\s*\[[A-Z][^\n]*\]\s*:|^\s*\[BEAT\s+\d+\]|^\s*===|\Z)",
-                        _preview_beat,
-                    )
-                    return _match.group(1).strip() if _match else ""
-
-                _preview_title = _preview_field(r"SCENE TITLE")
-                _preview_goal = _preview_field(r"CORE OBJECTIVE")
-                _preview_detail = (_preview_field(r"SCENE DETAILS\s*&\s*CONFLICT")
-                                   or _preview_field(r"SCENE DETAILS"))
-                st.markdown(f"**Upcoming Scene {(_preview_index + 1)} of {total_beats} — Story Plan**")
-                if _preview_title:
-                    st.markdown(f"**{_preview_title}**")
-                if _preview_goal:
-                    st.markdown(_preview_goal)
-                if _preview_detail:
-                    st.markdown(_preview_detail)
-                if not (_preview_title or _preview_goal or _preview_detail):
-                    st.caption("This scene's detailed plan is not available in the loaded outline.")
-                st.caption("Read-only scene plan from Stage 3. The scene will be drafted from this outline; review wording after the draft is assembled.")
-
-            st.markdown("---")
-
-        # WBS_FAST_PICTURE_BOOK_20261025
-        # A picture book is short enough to draft in one model call. Split the
-        # returned story into individually resumable blocks, without creating
-        # a numbered project version. Fall back to the existing per-beat
-        # drafting engine if the four labeled blocks cannot be verified.
-        _wbs_pb_fast_ready = (
-            is_picture_book_project()
-            and total_beats == 4
-            and not any(str(v or "").strip() for v in st.session_state.scene_blocks.values())
-            and not st.session_state.get("_wbs_pb_fast_attempted")
-            and not st.session_state.get("_wbs_overbudget_scene")
-        )
-        if _wbs_pb_fast_ready:
-            st.session_state["_wbs_pb_fast_attempted"] = True
-            st.subheader("Preparing complete picture-book draft")
-            _wbs_pb_progress = st.progress(0, text="Drafting four beats together — one model request")
-            _wbs_pb_outline = "\n\n".join(filtered_beats)
-            _wbs_pb_alloc = picture_book_allocations()
-            _wbs_pb_instruction = f"""
-WRITE THE COMPLETE CHILDREN'S PICTURE BOOK IN ONE RESPONSE.
-Use exactly FOUR scenes, following each outline beat IN ORDER.
-Begin each scene on a new line with EXACTLY this marker:
-[SCENE BLOCK 1]
-[SCENE BLOCK 2]
-[SCENE BLOCK 3]
-[SCENE BLOCK 4]
-After each marker write only the finished narrative for that scene.
-Do not use additional [SCENE BLOCK] labels. Do not insert commentary,
-markdown code fences, planning notes, or a summary. Do not include
-=== LORE UPDATE ===; this is the entire short book in one request.
-Maintain plot continuity between all four scenes and honor the project
-format, age group, POV, writing tense, style, and narration rules.
-Total manuscript maximum: {picture_book_target()} words; suggested
-beat allocations: {', '.join(str(n) for n in _wbs_pb_alloc)} words.
-These are guidelines for the scenes; respect the total manuscript maximum.
-DIALOGUE AND NARRATION:
-{get_dialogue_development_packet()}
-PROJECT CREATIVE CONTEXT:
-{get_full_project_continuity_context()}
-WRITING TENSE:
-{get_development_writing_tense()}
-STORY OUTLINE:
-{_wbs_pb_outline}
-"""
-            try:
-                if create_bridge_adapter is None:
-                    raise RuntimeError("WritersBlock Model bridge unavailable")
-                _wbs_pb_bridge = create_bridge_adapter(backend=st.session_state.backend)
-                _wbs_pb_result = _wbs_pb_bridge.execute(
-                    "Continue drafting",
-                    st.session_state,
-                    prepared_context={
-                        "effective_format_type": get_effective_format_type(),
-                        "dialogue_development_packet": get_dialogue_development_packet(),
-                        "format_development_context": get_full_project_continuity_context(),
-                        "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
-                        "quill_template_context": refresh_quill_template_context(),
-                    },
-                    action_payload={
-                        "current_beat_text": _wbs_pb_instruction,
-                        "rolling_lore": st.session_state.rolling_lore_book,
-                        "format_type": get_effective_format_type(),
-                        "tone_style": st.session_state.tone_style,
-                        "author_style": st.session_state.author_style,
-                    },
-                )
-                if not _wbs_pb_result.success or not ai_output_is_usable(_wbs_pb_result.output):
-                    raise RuntimeError(_wbs_pb_result.error or "Empty or unusable story response")
-                _wbs_pb_text = str(_wbs_pb_result.output).strip()
-                _wbs_pb_matches = list(re.finditer(r"(?im)^\s*\[SCENE\s+BLOCK\s+([1-4])\]\s*$", _wbs_pb_text))
-                _wbs_pb_numbers = [int(m.group(1)) for m in _wbs_pb_matches]
-                if _wbs_pb_numbers != [1, 2, 3, 4]:
-                    raise ValueError("Model did not return four separately labeled scenes")
-                _wbs_pb_scenes = {}
-                for _i, _m in enumerate(_wbs_pb_matches):
-                    _end = _wbs_pb_matches[_i + 1].start() if _i < 3 else len(_wbs_pb_text)
-                    _scene_text = _wbs_pb_text[_m.end():_end].strip()
-                    if not _scene_text or not ai_output_is_usable(_scene_text):
-                        raise ValueError(f"Scene {_i + 1} was empty")
-                    _wbs_pb_scenes[_i + 1] = _scene_text
-                # Commit only AFTER all four scenes have passed validation.
-                st.session_state.scene_blocks.update(_wbs_pb_scenes)
-                st.session_state.current_draft_output = "\n\n".join(
-                    st.session_state.scene_blocks[i] for i in range(1, 5))
-                st.session_state.current_processing_beat = 5
-                _project_id = get_active_project_id()
-                if _project_id:
-                    for _scene_no, _scene_text in _wbs_pb_scenes.items():
-                        try:
-                            supabase.table("writersblock_project_drafts").insert({
-                                "project_id": _project_id,
-                                "user_id": get_current_user_id(),
-                                "draft_title": f"Scene Block {_scene_no}",
-                                "draft_type": "scene_draft",
-                                "draft_content": _scene_text,
-                                "version_number": _scene_no,
-                            }).execute()
-                        except Exception as _save_error:
-                            st.warning(f"Scene {_scene_no} completed in this session but its background checkpoint failed: {_save_error}")
-                _wbs_pb_progress.progress(100, text="All four picture-book scenes completed")
-                wbs_request_stage_change("Isolation Guardrail", export_view=False)
-                st.stop()
-            except Exception as _wbs_pb_error:
-                _wbs_pb_progress.empty()
-                st.info("Fast picture-book draft was unavailable. Switching to reliable scene-by-scene drafting; no completed scenes were duplicated.")
-                # One attempt only per session. This prevents repeated paid
-                # fast-path API calls on each Streamlit rerun.
-
-        if st.session_state.current_processing_beat <= total_beats:
-            current_scene_number = st.session_state.current_processing_beat
-
-            if current_scene_number in st.session_state.scene_blocks and str(st.session_state.scene_blocks.get(current_scene_number, "")).strip():
-                st.info(f"Scene Block {current_scene_number} is already written.")
-                st.stop()
-
-            # WBS: A generated picture-book scene that exceeds its budget remains editable.
-            # Nothing is appended until the writer accepts a version within the limits.
-            _pending = st.session_state.get("_wbs_overbudget_scene")
-            if isinstance(_pending, dict) and _pending.get("beat") == current_scene_number and is_picture_book_project():
-                _beat_limit = picture_book_allocations()[current_scene_number - 1]
-                _book_remaining = max(0, picture_book_target() - count_words(st.session_state.current_draft_output))
-                _effective_limit = min(_beat_limit, _book_remaining)
-                st.warning(f"Scene {current_scene_number} needs shortening to {_effective_limit} words or fewer before it can be added.")
-                _review = st.text_area(
-                    "Edit generated scene to fit the word budget",
-                    value=str(_pending.get("text") or ""),
-                    height=300,
-                    key=f"wbs_overbudget_review_{current_scene_number}_{_pending['token']}",
-                )
-                _review_count = count_words(_review)
-                st.caption(f"Scene words: {_review_count} / {_effective_limit} allowed · "
-                           f"{max(0, _review_count - _effective_limit)} words to remove")
-                _accept, _discard = st.columns(2)
-                with _accept:
-                    if st.button("✅ Accept Edited Scene", key=f"wbs_accept_overbudget_{current_scene_number}",
-                                 disabled=not (0 < _review_count <= _effective_limit), use_container_width=True):
-                        if current_scene_number in st.session_state.scene_blocks:
-                            st.warning("This scene was already added. The edit was not duplicated.")
-                            st.stop()
-                        _project_id = get_active_project_id()
-                        if _project_id:
-                            try:
-                                supabase.table("writersblock_project_drafts").insert({
-                                    "project_id": _project_id,
-                                    "user_id": get_current_user_id(),
-                                    "draft_title": f"{_wbs_unit} {current_scene_number}",
-                                    "draft_type": "scene_draft",
-                                    "draft_content": _review,
-                                    "version_number": current_scene_number,
-                                }).execute()
-                            except Exception as _exc:
-                                st.error(f"Scene could not be saved: {_exc}")
-                                st.stop()
-                        st.session_state.scene_blocks[current_scene_number] = _review
-                        st.session_state.current_draft_output = "\n\n".join(
-                            str(v).strip() for _, v in sorted(
-                                st.session_state.scene_blocks.items(), key=lambda kv: int(kv[0]))
-                            if str(v or "").strip()
-                        )
-                        if _pending.get("lore"):
-                            st.session_state.rolling_lore_book = _pending["lore"]
-                        mark_demo_action_used("draft_scene")
-                        st.session_state.pop("_wbs_overbudget_scene", None)
-                        _next = next((i for i in range(1, total_beats + 1)
-                                      if not str(st.session_state.scene_blocks.get(i, "")).strip()), None)
-                        if _next is None:
-                            st.session_state.current_processing_beat = total_beats + 1
-                            wbs_request_stage_change("Isolation Guardrail", export_view=False)
-                        else:
-                            st.session_state.current_processing_beat = _next
-                        st.rerun()
-                with _discard:
-                    if st.button("Discard and Regenerate", key=f"wbs_discard_overbudget_{current_scene_number}",
-                                 use_container_width=True):
-                        st.session_state.pop("_wbs_overbudget_scene", None)
-                        st.rerun()
-                st.info("Your generated scene has not been added. Edit and accept it, or discard and regenerate.")
-
-            btn_label = f"Execute {_wbs_unit} {current_scene_number} of {total_beats} ⚡"
-
-            # Explicit writer action only. Never generate scene blocks on navigation or rerun.
-            # Preserve existing scene text and all saved revision records.
-            if st.button(f"Develop {_wbs_unit} {current_scene_number} — Writer Approval Required", key=f"wbs_manual_scene_{current_scene_number}", use_container_width=True):
-                require_product_access("drafting")
-                require_demo_action_available("draft_scene", current_scene_number)
-                current_beat_data = filtered_beats[current_scene_number - 1]
-
-                series_drafting_context = build_series_context_text(
-                    max_total_chars=18000,
-                    per_source_chars=8000,
-                )
-
-                drafting_instruction_packet = f"""
-{audiobook_scene_instruction}
-CHAPTER / SCENE SETTINGS:
-Chapter / Scene Title: {chapter_title}
-Target Word Count: Approximately {recommended_scene_word_count if is_picture_book_project() else target_word_count} words
-Picture Book Word Budget (if applicable): {f'Overall target {picture_book_target()} words; beat {current_scene_number} suggested allocation {picture_book_allocations()[current_scene_number-1]} words. Try to stay near these targets; do not truncate or omit story content to enforce a single scene limit.' if is_picture_book_project() else 'Not applicable'}
-Point of View: {pov_choice}
-Tense (set in Development Setup; maintain consistently): {get_development_writing_tense()}
-
-DIALOGUE / NARRATION REQUIREMENT:
-{get_dialogue_development_packet()}
-Apply this requirement to the current scene. Preserve the selected project type and its dialogue conventions.
-
-SERIES CONTINUITY REFERENCE:
-{series_drafting_context or "This is a standalone book with no series reference package."}
-
-PROJECT-WIDE CREATIVE CONTINUITY:
-{get_full_project_continuity_context()}
-
-CURRENT OUTLINE BEAT:
-{current_beat_data}
-
-IMPORTANT OUTPUT RULE:
-Write ONLY this single scene block. Do not repeat earlier scenes. Do not summarize the full manuscript. Do not include manuscript output, prior scene text, headings, or any material outside this current scene block. End with a LORE UPDATE only if needed.
-"""
-
-                with st.spinner(f"Drafting scene block {current_scene_number}..."):
-                        try:
-
-                            if create_bridge_adapter is None:
-                                st.error(
-                                    "WritersBlock Model is unavailable. "
-                                    f"{WBS_MODEL_IMPORT_ERROR}"
-                                )
-                                st.stop()
-
-                            _wbs_draft_bridge = create_bridge_adapter(
-                                backend=st.session_state.backend
-                            )
-                            _wbs_draft_result = _wbs_draft_bridge.execute(
-                                "Continue drafting",
-                                st.session_state,
-                                prepared_context={
-                                    "effective_format_type": get_effective_format_type(),
-                                    "dialogue_development_packet": get_dialogue_development_packet(),
-                                    "format_development_context": get_full_project_continuity_context(),
-                                    "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
-                                    "quill_template_context": refresh_quill_template_context(),
-                                },
-                                action_payload={
-                                    "current_beat_text": drafting_instruction_packet,
-                                    "rolling_lore": st.session_state.rolling_lore_book,
-                                    "format_type": get_effective_format_type(),
-                                    "tone_style": st.session_state.tone_style,
-                                    "author_style": st.session_state.author_style,
-                                },
-                            )
-
-                            if not _wbs_draft_result.success:
-                                raise RuntimeError(
-                                    _wbs_draft_result.error
-                                    or "WritersBlock Model Bridge returned no draft."
-                                )
-
-                            raw_response = _wbs_draft_result.output
-                            st.session_state["_wbs_agent_bridge_last_operation"] = (
-                                _wbs_draft_result.backend_operation or ""
-                            )
-                            st.session_state["_wbs_agent_bridge_last_success"] = True
-
-                        except Exception as e:
-                            st.error(f"Drafting failed. No scene text was saved. Backend error: {e}")
-                            st.stop()
-
-                        if not ai_output_is_usable(raw_response):
-                            st.error("Drafting failed. Gemini did not return usable scene text. No scene text was saved.")
-                            st.stop()
-
-
-                        lore_marker_match = re.search(
-                            r"===?\s*LORE\s+UPDATE\s*===?",
-                            str(raw_response),
-                            re.IGNORECASE,
-                        )
-
-                        if lore_marker_match:
-                            start_idx, end_idx = lore_marker_match.span()
-                            narrative_text = str(raw_response)[:start_idx].strip()
-                            new_lore = str(raw_response)[end_idx:].strip()
-                        else:
-                            narrative_text = str(raw_response).strip()
-                            new_lore = (
-                                st.session_state.rolling_lore_book
-                                if st.session_state.rolling_lore_book
-                                else "- Active context state synchronized."
-                            )
-
-                        if narrative_text and is_picture_book_project():
-                            _suggested = picture_book_allocations()[current_scene_number - 1]
-                            _scene_words = count_words(narrative_text)
-                            if _scene_words > _suggested:
-                                st.session_state["_wbs_last_draft_budget_notice"] = (
-                                    f"Scene {current_scene_number}: {_scene_words} words, above its "
-                                    f"suggested {_suggested}-word allocation. The scene was kept intact. "
-                                    "Review total length in Stage 5 or rewrite in Stage 7."
-                                )
-                        if narrative_text:
-                            if "scene_blocks" not in st.session_state:
-                                st.session_state.scene_blocks = {}
-
-                            if current_scene_number in st.session_state.scene_blocks:
-                                st.warning(f"Scene Block {current_scene_number} was already written. It was not added twice.")
-                                st.stop()
-
-                            st.session_state.scene_blocks[current_scene_number] = narrative_text
-
-                            ordered_scene_texts = []
-                            for scene_idx in sorted(st.session_state.scene_blocks.keys()):
-                                scene_text = str(st.session_state.scene_blocks.get(scene_idx) or "").strip()
-                                if scene_text:
-                                    ordered_scene_texts.append(scene_text)
-
-                            st.session_state.current_draft_output = "\n\n".join(ordered_scene_texts)
-
-                        if new_lore:
-                            st.session_state.rolling_lore_book = new_lore
-
-                        if narrative_text:
-                            mark_demo_action_used("draft_scene")
-
-                        # Save generated scene block to the selected project only.
-                        active_project_id = get_active_project_id()
-
-                        if active_project_id and narrative_text:
-                            supabase.table("writersblock_project_drafts").insert({
-                                "project_id": active_project_id,
-                                "user_id": get_current_user_id(),
-                                "draft_title": f"{_wbs_unit} {current_scene_number}",
-                                "draft_type": "scene_draft",
-                                "draft_content": narrative_text,
-                                "version_number": current_scene_number
-                            }).execute()
-
-                        saved_scene_numbers = [
-                            int(scene_number)
-                            for scene_number, scene_text in st.session_state.scene_blocks.items()
-                            if str(scene_text or "").strip()
-                        ]
-
-                        next_missing_scene = None
-                        for scene_number in range(1, total_beats + 1):
-                            if scene_number not in saved_scene_numbers:
-                                next_missing_scene = scene_number
-                                break
-
-                        if next_missing_scene is None:
-                            st.session_state.current_processing_beat = total_beats + 1
-                            wbs_request_stage_change("Isolation Guardrail", export_view=False)
-                        else:
-                            st.session_state.current_processing_beat = next_missing_scene
-
-                        st.rerun()
-
-        with col_right:
-            st.subheader("🧠 Rolling Lore Memory")
-
-            st.text_area(
-                "Rolling Lore Memory:",
-                value=st.session_state.rolling_lore_book,
-                height=250,
-                label_visibility="collapsed",
-                disabled=True,
-            )
-
-            st.markdown("---")
-
-            saved_scene_count = len([
-                scene_text
-                for scene_text in st.session_state.scene_blocks.values()
-                if str(scene_text or "").strip()
-            ])
-
-            st.metric(
-                "Current Scene Beat",
-                f"{saved_scene_count} / {total_beats}"
-            )
-
-            st.markdown("---")
-
-            for idx in range(1, total_beats + 1):
-                scene_is_saved = (
-                    idx in st.session_state.scene_blocks
-                    and str(st.session_state.scene_blocks.get(idx, "")).strip()
-                )
-
-                if scene_is_saved:
-                    st.markdown(f"✅ Scene Block {idx}: Written")
-                elif idx == st.session_state.current_processing_beat:
-                    st.markdown(f"🔷 Scene Block {idx}: Ready")
-                else:
-                    st.markdown(f"⚪ Scene Block {idx}: Pending")
+    from core.workflow_runtime import run_workflow
+    run_workflow('drafting', globals())
 # ======================================================================================
 # PHASE 5: SCRIPT LOCK / MANUSCRIPT OUTPUT
 # ======================================================================================
 elif st.session_state.project_stage == "Isolation Guardrail":
-    require_product_access("safety")
-
-
-    # Step 8 is the only place where the neutral working manuscript is converted to an industry format.
-    if st.session_state.get("export_view", False):
-        st.header("📤 Stage 6: Manuscript Review" if st.session_state.get("demo_mode") else "✅ Stage 6: Final Manuscript")
-        render_project_title_banner("step_8_final_output_conversion")
-        st.markdown("---")
-
-        # Step 8 terminates this rerun with st.stop(), so render Shadow here.
-
-        current_source = str(st.session_state.get("current_draft_output") or "").strip()
-        if not current_source:
-            st.warning("No working manuscript is available for Final Output.")
-            st.stop()
-
-        # The manuscript was written for the format selected at project setup.
-        # Final output must not request another format selection, model call, or rewrite.
-        selected_final_format = str(st.session_state.get("format_type") or "Novel / Prose").strip()
-        if selected_final_format not in FINAL_OUTPUT_FORMAT_OPTIONS:
-            selected_final_format = get_final_output_format()
-        st.session_state.final_output_format = selected_final_format
-
-        source_signature = get_text_signature(current_source)
-        if st.session_state.get("final_output_source_signature") != source_signature or str(st.session_state.get("final_output_text") or "").strip() != current_source:
-            st.session_state.final_output_text = current_source
-            st.session_state.final_output_source_signature = source_signature
-            st.session_state.final_output_saved_signature = ""
-
-        st.subheader(f"📋 FINAL MANUSCRIPT — {get_automatic_output_label(selected_final_format)}")
-        st.caption(f"{count_words(current_source):,} words · Prepared directly from the approved manuscript · No AI regeneration")
-        st.text_area("Final Manuscript", value=current_source, height=520, disabled=True, key=f"wbs_final_manuscript_readonly_{source_signature}")
-
-        _wbs_final_integrity_current = (
-            not project_integrity_review_applies() or (
-                bool(str(st.session_state.get("project_integrity_report") or "").strip())
-                and st.session_state.get("project_integrity_source_signature") == source_signature
-            )
-        )
-        if not _wbs_final_integrity_current:
-            st.warning("Return to Stage 4 and run Project Integrity before downloading the final manuscript.")
-        st.caption("Your final manuscript was already saved and approved in Stage 4; no additional save is needed.")
-        if st.session_state.get("demo_mode"):
-            if st.button("Download / Print Manuscript (.docx) 🔒", type="primary",
-                         key="trial_download_final_converted_output", use_container_width=True):
-                full_version_only_notice("Manuscript Printout")
-        else:
-            if selected_final_format == PICTURE_BOOK_FORMAT:
-                spreads = build_picture_book_spreads_locally(current_source)
-                docx_bytes = build_picture_book_layout_docx_bytes(
-                    get_project_title_for_display(), spreads,
-                    st.session_state.get("picture_book_page_size", DEFAULT_PICTURE_BOOK_PAGE_SIZE),
-                )
-            else:
-                docx_bytes = build_final_output_docx_bytes(
-                    get_project_title_for_display(), current_source, selected_final_format
-                )
-            project_stem = safe_download_stem(get_project_title_for_display(), "writersblock_project")
-            format_stem = safe_download_stem(get_automatic_output_label(selected_final_format), "final_output")
-            st.download_button(
-                label="🖨️ Download / Print Manuscript (.docx)",
-                data=docx_bytes,
-                file_name=f"{project_stem}_{format_stem}_final.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                type="primary",
-                use_container_width=True,
-            )
-
-        st.stop()
-
-    if st.session_state.get("export_view", False):
-        if st.session_state.get("demo_mode"):
-            st.header("📤 Stage 6: Manuscript Review")
-            st.markdown("##### Review the completed manuscript. Final manuscript saving and printout are available in the full Writer Edition.")
-        else:
-            st.header("📤 Stage 6: FINAL OUTPUT")
-            st.markdown("##### Stage 6 is final manuscript output. Save the final manuscript before downloading or starting a new project.")
-        render_project_title_banner("step_8_manuscript_output")
-    else:
-        # Stage 4 only: reduce unused space above the central working column.
-        # The one-row title/rename/save controls always render, whether or not
-        # older scene records match the exact compiled manuscript.
-        st.markdown("""<style>
-        [data-testid="stMainBlockContainer"] {padding-top: 0 !important;}
-        [data-testid="stMainBlockContainer"] h2 {margin-top: 0 !important;}
-        </style>""", unsafe_allow_html=True)
-        st.header("🛡️ Stage 4: Editorial & Publisher Review")
-        render_project_title_banner("step_5_script_lock")
-        current_source = str(st.session_state.get("current_draft_output") or "").strip()
-        source_signature = get_text_signature(current_source)
-        _wbs_novel_active = st.session_state.get("active_format_id") == "novel_prose_novella"
-        _wbs_review_blocks = (wbs_novel_blocks(st.session_state.get("scene_blocks") or {})
-                              if _wbs_novel_active else wbs_ss_blocks(st.session_state.get("scene_blocks") or {}))
-        _wbs_novel_complete = (bool(_wbs_review_blocks)
-                               and set(_wbs_review_blocks) == set(range(1, max(_wbs_review_blocks) + 1))
-                               and current_source == wbs_novel_manuscript(_wbs_review_blocks)) if _wbs_novel_active else False
-        _wbs_exact_four = (set(_wbs_review_blocks) == {1, 2, 3, 4}
-                           and current_source == wbs_ss_storyline(_wbs_review_blocks)) if not _wbs_novel_active else False
-        st.markdown("### Complete Manuscript — Review & Correct")
-        st.caption("The full story is shown in order with permanent scene labels. "
-                   "Edit any or all scenes here, then click Save Manuscript Corrections once. "
-                   "No AI is used when saving; run Integrity again after the save.")
-        if _wbs_novel_active and _wbs_novel_complete:
-            _wbs_chapter_scope = (str(get_active_project_id() or "") + "_"
-                                  + str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
-                                  + "_" + source_signature[:16])
-            st.caption(f"{len(_wbs_review_blocks)} saved chapters · {count_words(current_source):,} words")
-            with st.form(key="wbs_novel_chapter_review_" + _wbs_chapter_scope):
-                _novel_changed = {}
-                for _n in sorted(_wbs_review_blocks):
-                    st.markdown(f"#### Chapter {_n}")
-                    _novel_changed[_n] = st.text_area(
-                        f"Chapter {_n} text", value=_wbs_review_blocks[_n],
-                        height=350, key=f"wbs_novel_review_{_n}_{_wbs_chapter_scope}",
-                        disabled=bool(st.session_state.get("demo_mode")))
-                _novel_submit = st.form_submit_button(
-                    "Save Manuscript Corrections", type="primary",
-                    disabled=bool(st.session_state.get("demo_mode")), use_container_width=True)
-            if _novel_submit:
-                try:
-                    changed = wbs_novel_save_chapters(_novel_changed, current_source)
-                except Exception as exc:
-                    st.error(f"Chapter corrections were not saved: {exc}")
-                else:
-                    st.session_state["_wbs_stage4_corrections_notice"] = (
-                        "Chapter corrections saved. Run Project Integrity again." if changed
-                        else "No chapter changes detected.")
-                    st.rerun()
-        elif _wbs_exact_four:
-            _wbs_scene_titles = wbs_ss_outline_parts(st.session_state.get("plot_outline") or "")
-            _wbs_editor_tag = (str(get_active_project_id() or "") + "_"
-                               + str(st.session_state.get("_wbs_active_saved_session_row_id") or "")
-                               + "_" + source_signature[:18])
-            with st.form(key="wbs_stage4_entire_story_editor_" + _wbs_editor_tag):
-                _wbs_corrections = {}
-                for _n in range(1, 5):
-                    _title = _wbs_scene_titles.get(_n, (f"Scene {_n}", "", ""))[0]
-                    st.markdown(f"#### Scene {_n} — {html.escape(str(_title))}")
-                    _wbs_corrections[_n] = st.text_area(
-                        f"Scene {_n} story text",
-                        value=_wbs_review_blocks[_n],
-                        height=max(200, min(500, 140 + count_words(_wbs_review_blocks[_n]) // 2)),
-                        key=f"wbs_stage4_edit_scene_{_n}_{_wbs_editor_tag}",
-                        disabled=bool(st.session_state.get("demo_mode")),
-                        help="Edit this scene directly. Scene labels are not saved as story text.",
-                    )
-                _wbs_save_corrections = st.form_submit_button(
-                    "Optional: Review And Save Any Final Manuscript Changes",
-                    type="primary", use_container_width=True,
-                    disabled=bool(st.session_state.get("demo_mode")),
-                )
-            if _wbs_save_corrections:
-                try:
-                    _changed = wbs_stage4_save_manuscript_corrections(
-                        _wbs_corrections, current_source, _wbs_review_blocks)
-                except Exception as _save_exc:
-                    st.error(f"Manuscript corrections were not saved: {_save_exc}")
-                else:
-                    if _changed:
-                        st.session_state["_wbs_stage4_corrections_notice"] = (
-                            "All four scenes saved to the current revision. "
-                            "Run Project Integrity again to verify your corrections."
-                        )
-                    else:
-                        st.session_state["_wbs_stage4_corrections_notice"] = (
-                            "No changes detected. No save or AI call was needed."
-                        )
-                    st.rerun()
-        elif current_source:
-            # Never guess scene divisions or overwrite a legacy manuscript.
-            st.text_area("Entire manuscript (read-only)", value=current_source,
-                         height=640, disabled=True,
-                         key=f"wbs_stage4_entire_manuscript_{source_signature[:12]}")
-            st.info("Inline scene corrections are available when the four saved scene "
-                    "blocks match this manuscript. Existing text is protected.")
-        else:
-            st.warning("No complete manuscript is available. Return to Scene Scripting.")
-        _notice = st.session_state.pop("_wbs_stage4_corrections_notice", None)
-        if _notice:
-            st.success(_notice)
-        # Scene labels live in the inspection editor; the persisted manuscript
-        # remains plain story text and preserves each exact scene boundary.
-        _wbs_scene_review_required = (
-            str(st.session_state.get("active_format_id") or "") == "short_story"
-            or _wbs_exact_four
-        )
-        _wbs_scene_review_complete = True
-        if _wbs_scene_review_required:
-            _wbs_scene_review_complete = False
-            if not _wbs_exact_four:
-                st.warning(
-                    "All four saved scenes must match the working manuscript. "
-                    "Return to Scene Scripting to save the missing or edited scene. "
-                    "No replacement text will be generated here."
-                )
-                if st.button("Return to Scene Scripting", key="wbs_stage4_return_incomplete",
-                             use_container_width=True):
-                    wbs_request_stage_change("Plot Architect")
-            else:
-                _approved = wbs_stage4_valid_approvals(
-                    st.session_state.get("wbs_stage4_scene_approvals"),
-                    _wbs_review_blocks, current_source
-                )
-                _wbs_scene_review_complete = _approved == {1, 2, 3, 4}
-                st.caption(f"{count_words(current_source):,} words · Four scenes assembled in order · "
-                           "No AI regeneration or change to the saved story")
-                st.caption("Complete story is ready for Project Integrity review below. "
-                           "Final acceptance is located after the review results.")
-        # ------------------------------------------------------------------
-        # PROJECT INTEGRITY / FINAL REVIEW — read-only whole-manuscript QC.
-        # This never changes current_draft_output and never applies fixes automatically.
-        # ------------------------------------------------------------------
-        if project_integrity_review_applies():
-            st.subheader("🛡️ Project Integrity / Final Review")
-            st.caption(
-                "Whole-manuscript quality control before Final Output. It checks continuity, names, timeline, "
-                "repetition, POV/tense drift, unresolved placeholders, missing/duplicate sections, structure, "
-                "and other inconsistencies. This review does not rewrite or alter your manuscript."
-            )
-
-            integrity_is_current = bool(
-                str(st.session_state.get("project_integrity_report") or "").strip()
-                and st.session_state.get("project_integrity_source_signature") == source_signature
-            )
-
-            if not integrity_is_current and st.session_state.get("project_integrity_report"):
-                st.info("The manuscript has changed since the last Project Integrity review. Run the review again for the current manuscript.")
-
-            # A current report is automatically shown beneath the Run button.
-            # Opening or revisiting it never invokes the AI or adds API usage.
-            _wbs_report_visible = integrity_is_current
-            _wbs_run_integrity = st.button(
-                "Run Project Integrity Report",
-                key="run_project_integrity_final_review",
-                type="primary",
-                use_container_width=True,
-            )
-
-            if _wbs_run_integrity:
-                with st.spinner("Running whole-manuscript Project Integrity review..."):
-                    try:
-                        integrity_report = run_project_integrity_final_review(current_source)
-                    except Exception as exc:
-                        st.error(f"Project Integrity review failed: {exc}")
-                    else:
-                        st.session_state.project_integrity_report = integrity_report
-                        st.session_state.project_integrity_source_signature = source_signature
-                        first_line = integrity_report.splitlines()[0].strip().upper() if integrity_report else ""
-                        integrity_status = (
-                            "PASS" if "OVERALL STATUS: PASS" in first_line else
-                            "REVIEW INCONCLUSIVE" if "OVERALL STATUS: REVIEW INCONCLUSIVE" in first_line else
-                            "WARNINGS"
-                        )
-                        st.session_state.project_integrity_status = integrity_status
-                        # The newly generated current report appears automatically on rerun.
-                        try:
-                            persist_project_integrity_in_current_version(
-                                integrity_report, source_signature, integrity_status
-                            )
-                        except Exception as save_exc:
-                            st.error(f"Review completed but could not auto-save: {save_exc}")
-                        else:
-                            st.success("Project Integrity saved in the current version — no new version created.")
-                        st.rerun()
-
-            if integrity_is_current and _wbs_report_visible:
-                if st.session_state.get("project_integrity_status") == "PASS":
-                    st.success("Project Integrity Review: PASS")
-                elif st.session_state.get("project_integrity_status") == "REVIEW INCONCLUSIVE":
-                    st.warning("Project Integrity Review: INCONCLUSIVE — proposed warnings did not meet "
-                               "the evidence requirements. Review the report before Final Output.")
-                else:
-                    st.warning("Project Integrity Review: WARNINGS — review the report before Final Output.")
-
-                # Resolve scene references BEFORE displaying the full report,
-                # so a writer sees the exact scene and a Modify link at the top.
-                # This also works for reports already saved in V-6; no new AI
-                # call, save, version change, or manuscript rewrite is needed.
-                _ir_matches = (
-                    wbs_ir_located_issues(
-                        st.session_state.get("project_integrity_report", ""),
-                        _wbs_review_blocks,
-                        wbs_ss_outline_parts(st.session_state.get("plot_outline") or ""),
-                        manuscript_text=current_source,
-                    ) if _wbs_review_blocks else []
-                )
-                if _ir_matches:
-                    st.markdown("### Integrity Warnings — Scene Locations")
-                    for _ir_index, _ir_issue in enumerate(_ir_matches):
-                        st.markdown(f"**Scene {_ir_issue['scene']} — {_ir_issue['title']}**")
-                        # The quoted sentence is a location anchor, not necessarily
-                        # the mistake. Always display the actual AI finding and a
-                        # concrete writer-controlled review action beside that anchor.
-                        _wbs_finding = wbs_ir_parse_actionable_finding(_ir_issue["issue"])
-                        st.markdown("**Why this scene was flagged:**")
-                        if _wbs_finding:
-                            st.write(_wbs_finding["ISSUE"] + " — " + _wbs_finding["WHY"])
-                            st.markdown("**Specific suggested correction (optional):**")
-                            st.write(_wbs_finding["SUGGESTED FIX"])
-                        else:
-                            # Historical reports may predate the new evidence standard.
-                            st.warning("This older warning does not give a verified, "
-                                       "specific correction. Do not alter your story on "
-                                       "the basis of this excerpt alone.")
-                            st.write(_ir_issue["issue"])
-                        if _ir_issue["quote"]:
-                            st.caption("Passage used to locate the warning (not necessarily erroneous): “"
-                                       + _ir_issue["quote"] + "”")
-                        if st.button(
-                            f"Modify This Scene {_ir_issue['scene']}",
-                            key=f"wbs_integrity_modify_scene_{_ir_index}_{source_signature[:12]}",
-                            use_container_width=False,
-                        ):
-                            wbs_ir_go_to_scene(_ir_issue["scene"])
-                        st.divider()
-                elif _wbs_review_blocks and st.session_state.get("project_integrity_status") != "PASS":
-                    st.info("No scene location could be verified from the report's exact quotes. "
-                            "Use Stage 3 Scene Scripting to inspect the passage; no scene number has been guessed.")
-
-                if ("OVERALL STATUS: WARNINGS" in str(st.session_state.get("project_integrity_report") or "")
-                        and "| SUGGESTED FIX:" not in str(st.session_state.get("project_integrity_report") or "")):
-                    st.info("This report predates the stricter evidence checks. A quoted "
-                            "passage does not by itself prove a problem; you can run "
-                            "a new review if you want verified, specific recommendations.")
-                st.markdown("**Project Integrity Report:**")
-                st.markdown(
-                    render_project_integrity_report_html(
-                        st.session_state.get("project_integrity_report", ""),
-                        located_issues=_ir_matches,
-                    ),
-                    unsafe_allow_html=True,
-                )
-            elif not integrity_is_current:
-                st.info("Run Project Integrity for the current saved manuscript. "
-                        "It reads your saved corrections but does not alter them.")
-                if str(st.session_state.get("project_integrity_report") or "").strip():
-                    with st.expander("Previous Integrity Report — before manuscript corrections", expanded=False):
-                        st.markdown(render_project_integrity_report_html(
-                            st.session_state.get("project_integrity_report", "")),
-                            unsafe_allow_html=True)
-
-            st.markdown("---")
-
-        # Approval is deliberately BELOW the integrity review for every format.
-        # A previously accepted story is never unapproved merely by this UI move.
-        _wbs_ir_ready = (not project_integrity_review_applies() or bool(
-            str(st.session_state.get("project_integrity_report") or "").strip()
-            and st.session_state.get("project_integrity_source_signature") == source_signature
-        ))
-        if _wbs_scene_review_required and _wbs_exact_four:
-            st.subheader("For Final Editorial Acceptance, Check Each Button Below")
-            st.caption("The existing project title is verified against its saved record. "
-                       "Confirm the completed manuscript and current Integrity Report below. "
-                       "Each acceptance also confirms the saved title without renaming or changing V-number.")
-            if not _wbs_ir_ready:
-                st.info("The saved Integrity Report does not match this manuscript (or no current "
-                        "report exists). Click Run Project Integrity Report above. Once it completes, "
-                        "check each box to activate its red Save button. Your story is unchanged.")
-            _saved_title = get_project_title()
-            _proposed_title = re.sub(r"\s+", " ", str(
-                st.session_state.get(wbs_stage4_title_input_key()) or "")).strip() or _saved_title
-            _wbs_current_status = wbs_stage4_final_status(
-                st.session_state.get("wbs_stage4_final_acceptance"),
-                _saved_title, current_source,
-                st.session_state.get("project_integrity_report") or "",
-                st.session_state.get("project_integrity_source_signature"),
-                _wbs_scene_review_complete,
-                get_active_project_id(), st.session_state.get("_wbs_active_saved_session_row_id"),
-            )
-            # Scope confirmations to the exact reviewed report as well as the
-            # revision. A new report starts new checkboxes, preventing stale
-            # checkmarks from approving a changed Integrity finding.
-            _stage4_scope = (str(get_active_project_id() or "new") + "_"
-                             + str(st.session_state.get("_wbs_active_saved_session_row_id") or "none")
-                             + "_" + get_text_signature(
-                                 st.session_state.get("project_integrity_report") or "")[:16])
-            # WBS Stage 4 acceptance visuals only — no changes to approval logic.
-            # CSS :has is supported by the Chrome client used for Streamlit.
-            st.markdown("""<style>
-            /* Make the two remaining approval checkboxes visible on the charcoal theme. */
-            [class*="st-key-wbs_stage4_confirm_"] label[data-baseweb="checkbox"] > div:first-child,
-            [class*="st-key-wbs_stage4_confirm_"] label[data-baseweb="checkbox"] input[type="checkbox"] + div,
-            [class*="st-key-wbs_stage4_confirm_"] label[data-baseweb="checkbox"] input[type="checkbox"] + span {
-                outline: 2px solid #ffffff !important;
-                outline-offset: 1px !important;
-                border-radius: 3px !important;
-            }
-            /* Once a confirmation is checked, its button becomes visibly red.
-               The existing disabled gates (e.g., missing Integrity report) remain. */
-            [data-testid="stColumn"]:has([class*="st-key-wbs_stage4_confirm_manuscript_"] input:checked)
-              .st-key-wbs_stage4_accept_full_story button,
-            [data-testid="stColumn"]:has([class*="st-key-wbs_stage4_confirm_integrity_"] input:checked)
-              .st-key-wbs_stage4_accept_integrity button {
-                background-color: #ff4b4b !important;
-                border-color: #ff4b4b !important;
-                color: #ffffff !important;
-                font-weight: 700 !important;
-            }
-            /* Still clearly unavailable when a required review has not run. */
-            [data-testid="stColumn"]:has([class*="st-key-wbs_stage4_confirm_"] input:checked)
-              .stButton button:disabled {
-                opacity: .65 !important;
-                cursor: not-allowed !important;
-            }
-            </style>""", unsafe_allow_html=True)
-            # Title saving was moved to the row beside Rename Project Title above.
-            _manuscript_col, _integrity_col = st.columns(2, gap="small")
-            if _wbs_current_status["title"] and _proposed_title == _saved_title:
-                st.caption("✓ Existing project title confirmed in the saved revision")
-            elif _proposed_title != _saved_title:
-                st.caption("A new title has been entered but not saved. Save it above or clear the rename field.")
-            else:
-                st.caption("The existing saved title will be confirmed when you accept the manuscript or Integrity Report. Renaming is optional.")
-            # Never keep an old checked box visually active after a manuscript
-            # edit invalidates its report. This only resets transient UI state;
-            # it does not modify a saved report, manuscript or revision.
-            _manuscript_check_key = "wbs_stage4_confirm_manuscript_" + _stage4_scope
-            _integrity_check_key = "wbs_stage4_confirm_integrity_" + _stage4_scope
-            if not _wbs_ir_ready:
-                st.session_state[_manuscript_check_key] = False
-                st.session_state[_integrity_check_key] = False
-            else:
-                # Reopening an already approved revision should show its
-                # exact, saved approvals; no API call or DB write is needed.
-                if _manuscript_check_key not in st.session_state:
-                    st.session_state[_manuscript_check_key] = bool(_wbs_current_status["manuscript"])
-                if _integrity_check_key not in st.session_state:
-                    st.session_state[_integrity_check_key] = bool(_wbs_current_status["integrity"])
-            _checkbox_error = st.session_state.pop("_wbs_stage4_checkbox_error", None)
-            if _checkbox_error:
-                st.error(f"Editorial acceptance was not saved: {_checkbox_error}")
-            _checkbox_notice = st.session_state.pop("_wbs_stage4_checkbox_notice", None)
-            if _checkbox_notice:
-                st.success(_checkbox_notice)
-            st.caption("Checking either box saves that approval automatically to the current revision. "
-                       "After both are checked and saved, Stage 5 unlocks. No new V-number is created.")
-            with _manuscript_col:
-                _confirm_manuscript = st.checkbox("Confirm final manuscript",
-                    key=_manuscript_check_key,
-                    on_change=wbs_stage4_confirm_and_save_from_checkbox,
-                    args=("manuscript", _manuscript_check_key),
-                    disabled=(not _wbs_ir_ready or bool(st.session_state.get("demo_mode"))))
-                if st.button("Accept And Save Final Manuscript", type="primary",
-                             key="wbs_stage4_accept_full_story", use_container_width=True,
-                             disabled=(not _wbs_ir_ready or not _confirm_manuscript
-                                       or bool(st.session_state.get("demo_mode")))):
-                    try:
-                        _approved = wbs_stage4_accept_and_save()
-                        st.session_state["_wbs_stage4_approved_scenes"] = sorted(_approved)
-                        wbs_stage4_save_final_acceptance("manuscript")
-                    except Exception as exc:
-                        st.error(f"Manuscript acceptance was not saved: {exc}")
-                    else:
-                        st.rerun()
-                if _wbs_current_status["manuscript"]:
-                    st.caption("✓ Final manuscript accepted and saved")
-                elif not _wbs_ir_ready:
-                    st.caption("Run Integrity before final manuscript acceptance")
-
-            with _integrity_col:
-                _confirm_integrity = st.checkbox("Confirm Integrity Report",
-                    key=_integrity_check_key,
-                    on_change=wbs_stage4_confirm_and_save_from_checkbox,
-                    args=("integrity", _integrity_check_key),
-                    disabled=(not _wbs_ir_ready or bool(st.session_state.get("demo_mode"))))
-                if st.button("Accept And Save Integrity Report", type="primary",
-                             key="wbs_stage4_accept_integrity", use_container_width=True,
-                             disabled=(not _wbs_ir_ready or not _confirm_integrity
-                                       or bool(st.session_state.get("demo_mode")))):
-                    try:
-                        wbs_stage4_save_final_acceptance("integrity")
-                    except Exception as exc:
-                        st.error(f"Integrity acceptance was not saved: {exc}")
-                    else:
-                        st.rerun()
-                if _wbs_current_status["integrity"]:
-                    st.caption("✓ Current Integrity Report accepted and saved")
-                elif not _wbs_ir_ready:
-                    st.caption("Run the current Integrity Report first")
-
-            if all(_wbs_current_status.values()) and _proposed_title == _saved_title:
-                st.caption("✓ Both confirmations saved. Stage 5 is unlocked for this revision.")
-            else:
-                st.caption("Run the current Integrity Check and check both acceptance boxes. "
-                           "The approvals save automatically and Stage 5 unlocks. "
-                           "Scene corrections remain available in Stage 3.")
-        if is_picture_book_project() and str(st.session_state.get("current_draft_output") or "").strip():
-            with st.expander("Picture Book — Illustration & Page Turn Suggestions", expanded=False):
-                st.caption("Planning suggestions only. The manuscript and version number are not changed. "
-                           "Adjust the exact page breaks and artwork during layout.")
-                st.text_area("Suggested picture-book script", value=build_picture_book_cue_script(
-                    st.session_state.current_draft_output), height=300,
-                    key="wbs_picture_book_cue_preview", disabled=True)
-
-        st.markdown("---")
-        _wbs_final_acceptances = wbs_stage4_final_status(
-            st.session_state.get("wbs_stage4_final_acceptance"),
-            get_project_title(), str(st.session_state.get("current_draft_output") or ""),
-            st.session_state.get("project_integrity_report") or "",
-            st.session_state.get("project_integrity_source_signature"),
-            _wbs_scene_review_complete,
-            get_active_project_id(), st.session_state.get("_wbs_active_saved_session_row_id"),
-        )
-        _wbs_pending_rename = re.sub(r"\s+", " ", str(
-            st.session_state.get(wbs_stage4_title_input_key()) or "")).strip()
-        _wbs_title_has_unsaved_edit = bool(
-            _wbs_pending_rename and _wbs_pending_rename != get_project_title()
-        )
-        _wbs_ready_for_final = (
-            _wbs_scene_review_complete and _wbs_ir_ready
-            and (not _wbs_scene_review_required or (
-                all(_wbs_final_acceptances.values())
-                and not _wbs_title_has_unsaved_edit))
-        )
-        if st.button("Proceed to Stage 5 — Publisher & Market Readiness (Optional)",
-                     key="wbs_editorial_to_final", type="primary",
-                     disabled=not _wbs_ready_for_final, use_container_width=True):
-            if _wbs_ready_for_final:
-                st.session_state.project_stage = "Publisher Assessment"
-                st.session_state.export_view = False
-                st.rerun()
-        # Stage 4 ends here. Stage 5 publisher review is optional and separate;
-        # the unchanged save/print/export engine follows as Stage 6.
-        st.stop()
-    st.markdown("---")
-
-    if st.session_state.get("export_view", False):
-        st.info("✅ FINAL OUTPUT is ready. Save the final manuscript before downloading or starting a new project.")
-    else:
-        st.info("This is a working draft. Stage 5 provides optional publisher assessment; Stage 6 handles final saving and export.")
-
-    if not st.session_state.get("export_view", False):
-        st.markdown("## 📝 DRAFT OUTPUT")
-        st.caption("This manuscript is still a working draft. Save it to history before downloading or proceeding if you want this draft preserved.")
-
-        draft_save_notice = st.session_state.pop("draft_save_notice_step5", None)
-        if isinstance(draft_save_notice, dict):
-            notice_type = draft_save_notice.get("type")
-            notice_text = draft_save_notice.get("text") or ""
-            if notice_type == "success":
-                st.success(notice_text)
-            elif notice_type == "info":
-                st.info(notice_text)
-            elif notice_type == "error":
-                st.error(notice_text)
-
-        # For specialized formats that do not use the standard manuscript download block below,
-        # keep the draft-save control visible here. Standard prose/script formats render it
-        # immediately above their download button.
-        if is_picture_book_project() or st.session_state.get("format_type") == "Audio Book":
-            if st.session_state.get("demo_mode"):
-                if st.button("💾 SAVE CURRENT DRAFT 🔒", key="save_current_draft_step5_trial_special", use_container_width=True):
-                    full_version_only_notice("Saved Versions")
-            else:
-                if st.button(
-                    "💾 SAVE CURRENT DRAFT",
-                    key="save_current_draft_step5_special",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    draft_result = save_manuscript_checkpoint(
-                        status="DRAFT",
-                        stage_label="Script Lock",
-                        source_stage="script_lock_draft",
-                    )
-                    save_current_project_session_to_supabase()
-                    if draft_result.get("status") == "saved":
-                        st.session_state.draft_save_notice_step5 = {
-                            "type": "success",
-                            "text": f"DRAFT — Script Lock — V{draft_result.get('version_number')} saved to version history.",
-                        }
-                    elif draft_result.get("status") == "unchanged":
-                        st.session_state.draft_save_notice_step5 = {
-                            "type": "info",
-                            "text": f"This DRAFT — Script Lock — V{draft_result.get('version_number')} is already saved.",
-                        }
-                    else:
-                        st.session_state.draft_save_notice_step5 = {
-                            "type": "error",
-                            "text": "Current draft could not be saved to version history.",
-                        }
-                    st.rerun()
-
-    if st.session_state.get("export_view", False) and not st.session_state.get("demo_mode"):
-        st.markdown("## ✅ FINAL OUTPUT")
-        if st.button(
-            "💾 SAVE FINAL OUTPUT MANUSCRIPT",
-            key="save_final_output_manuscript_step8",
-            type="primary",
-            use_container_width=True,
-        ):
-            final_result = save_manuscript_checkpoint(
-                status="FINAL",
-                stage_label="Manuscript Output",
-                source_stage="final_output",
-            )
-            save_result = save_current_project_session_to_supabase()
-            if final_result.get("status") == "saved" and save_result:
-                st.success(f"FINAL — Manuscript Output — V{final_result.get('version_number')} saved.")
-            elif final_result.get("status") == "unchanged" and save_result:
-                st.info(f"FINAL — Manuscript Output — V{final_result.get('version_number')} is already saved.")
-            else:
-                st.error("Final manuscript could not be saved completely. No manuscript text was changed.")
-
-    if st.session_state.get("format_type") == "Audio Book":
-        audiobook_spec = get_audiobook_length_spec()
-        audiobook_target_total = int(
-            st.session_state.get(
-                "audiobook_target_word_count",
-                audiobook_spec["default_words"],
-            )
-        )
-        current_audiobook_words = count_words(st.session_state.current_draft_output)
-
-        st.write(
-            f"**Audio Book Length:** {st.session_state.get('audiobook_length', '30 Minutes')}  "
-            f"| **Target:** {audiobook_target_total:,} words  "
-            f"| **Current:** {current_audiobook_words:,} words"
-        )
-
-        if current_audiobook_words < audiobook_spec["min_words"]:
-            st.warning(
-                f"The manuscript is below the recommended minimum of "
-                f"{audiobook_spec['min_words']:,} words for the selected length."
-            )
-        elif current_audiobook_words > audiobook_spec["max_words"]:
-            st.warning(
-                f"The manuscript is above the recommended maximum of "
-                f"{audiobook_spec['max_words']:,} words for the selected length."
-            )
-        else:
-            st.success("The manuscript is within the selected Audio Book word-count range.")
-
-    col_left, col_right = st.columns([2, 1])
-
-    with col_left:
-        automatic_output_label = get_automatic_output_label()
-        if st.session_state.get("demo_mode"):
-            st.subheader(f"📋 {automatic_output_label} Review")
-        elif st.session_state.get("export_view", False):
-            st.subheader(f"📋 FINAL OUTPUT — {automatic_output_label}")
-        else:
-            st.subheader(f"📋 DRAFT OUTPUT — {automatic_output_label}")
-
-        # Keep edits in the current working manuscript before a save or stage change.
-        draft_editor_key = "final_manuscript_export_view"
-        draft_identity = (str(get_active_project_id()),
-                          str(st.session_state.get('project_stage') or ''),
-                          bool(st.session_state.get('export_view', False)))
-        if st.session_state.get('_wbs_stage5_editor_identity') != draft_identity:
-            st.session_state[draft_editor_key] = str(st.session_state.current_draft_output or '')
-            st.session_state['_wbs_stage5_editor_identity'] = draft_identity
-
-        def _wbs_sync_stage5_manuscript():
-            st.session_state.current_draft_output = str(st.session_state.get(draft_editor_key) or '')
-
-        st.text_area(
-            "Review Manuscript:",
-            height=500,
-            key=draft_editor_key,
-            on_change=_wbs_sync_stage5_manuscript,
-        )
-        if not st.session_state.get('export_view', False):
-            if st.session_state.get('demo_mode'):
-                if st.button('💾 Save This Version 🔒', key='wbs_stage5_revision_trial', use_container_width=True):
-                    full_version_only_notice('Saved Versions')
-            elif st.button('💾 Save This Version', key='wbs_stage5_revision_save', use_container_width=True):
-                _wbs_sync_stage5_manuscript()
-                revision = save_stage5_lettered_revision(st.session_state.current_draft_output)
-                if revision and revision.get('status') == 'saved':
-                    st.success(f"{revision['label']} saved as a separate manuscript revision.")
-                elif revision and revision.get('status') == 'unchanged':
-                    st.info('This manuscript is already saved as a revision.')
-                else:
-                    st.error('Revision could not be saved; your text remains in the editor.')
-
-        try:
-            if not is_picture_book_project() and st.session_state.get("format_type") != "Audio Book":
-                # Stage 5 downloads the current working draft only. Saved versions are managed
-                # from the sidebar; there is no version-selection dropdown in the normal workflow.
-                current_download_text = str(st.session_state.current_draft_output or "")
-
-                doc = Document()
-                doc.add_heading(f"WritersBlock Studios — {automatic_output_label}", level=1)
-                doc.add_paragraph(
-                    f"Output Status: {'FINAL' if st.session_state.get('export_view', False) else 'DRAFT'}"
-                )
-                normal_style = doc.styles["Normal"]
-                normal_style.font.name = (
-                    "Courier New"
-                    if st.session_state.get("format_type") in {"Screenplay Outline", "Stage Play / Dramatic Script"}
-                    else "Times New Roman"
-                )
-                normal_style.font.size = Pt(12)
-                section = doc.sections[0]
-                section.top_margin = Inches(1)
-                section.bottom_margin = Inches(1)
-                section.left_margin = Inches(1)
-                section.right_margin = Inches(1)
-
-                for paragraph in current_download_text.split("\n\n"):
-                    clean_paragraph = paragraph.strip()
-                    if clean_paragraph:
-                        p = doc.add_paragraph(clean_paragraph)
-                        p.paragraph_format.space_after = Pt(8)
-                        if st.session_state.get("format_type") in {"Novel / Prose", "Short Story", "Novella"}:
-                            p.paragraph_format.line_spacing = 2.0
-                        elif st.session_state.get("format_type") in {"Screenplay Outline", "Stage Play / Dramatic Script"}:
-                            p.paragraph_format.line_spacing = 1.0
-                        else:
-                            p.paragraph_format.line_spacing = 1.15
-
-                docx_buffer = BytesIO()
-                doc.save(docx_buffer)
-                docx_bytes = docx_buffer.getvalue()
-
-                project_stem = safe_download_stem(get_project_title_for_display(), "writersblock_project")
-                format_stem = safe_download_stem(automatic_output_label, "project_output")
-                output_status_stem = "final" if st.session_state.get("export_view", False) else "draft"
-                safe_filename = f"{project_stem}_{format_stem}_{output_status_stem}"
-
-                if not st.session_state.get("export_view", False):
-                    if st.session_state.get("demo_mode"):
-                        if st.button(
-                            "💾 SAVE CURRENT DRAFT 🔒",
-                            key="save_current_draft_step5_trial",
-                            use_container_width=True,
-                        ):
-                            full_version_only_notice("Saved Versions")
-                    else:
-                        if st.button(
-                            "💾 SAVE CURRENT DRAFT",
-                            key="save_current_draft_step5",
-                            type="primary",
-                            use_container_width=True,
-                        ):
-                            draft_result = save_manuscript_checkpoint(
-                                status="DRAFT",
-                                stage_label="Script Lock",
-                                source_stage="script_lock_draft",
-                            )
-                            save_current_project_session_to_supabase()
-                            if draft_result.get("status") == "saved":
-                                st.session_state.draft_save_notice_step5 = {
-                                    "type": "success",
-                                    "text": f"DRAFT — Script Lock — V{draft_result.get('version_number')} saved to version history.",
-                                }
-                            elif draft_result.get("status") == "unchanged":
-                                st.session_state.draft_save_notice_step5 = {
-                                    "type": "info",
-                                    "text": f"This DRAFT — Script Lock — V{draft_result.get('version_number')} is already saved.",
-                                }
-                            else:
-                                st.session_state.draft_save_notice_step5 = {
-                                    "type": "error",
-                                    "text": "Current draft could not be saved to version history.",
-                                }
-                            st.rerun()
-
-                if st.session_state.get("demo_mode"):
-                    if st.button(
-                        f"Download {automatic_output_label} (.docx) 🔒",
-                        key="trial_manuscript_printout_notice",
-                        type="primary",
-                        use_container_width=True,
-                    ):
-                        full_version_only_notice("Manuscript Printout")
-                else:
-                    output_download_prefix = "Final" if st.session_state.get("export_view", False) else "Draft"
-                    st.download_button(
-                        label=f"Download {output_download_prefix} {automatic_output_label} (.docx)",
-                        data=docx_bytes,
-                        file_name=f"{safe_filename}.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        type="primary",
-                        use_container_width=True,
-                    )
-
-            if st.session_state.get("export_view", False) and is_picture_book_project():
-                st.markdown("---")
-                st.subheader("🖼️ Children's Picture Book Layout Draft")
-                st.markdown("**Illustration & Page Turn Markers**")
-                include_picture_book_cues = st.checkbox(
-                    "Include [ILLUSTRATION] and [PAGE TURN] planning markers",
-                    value=True, key="wbs_picture_book_export_cues",
-                )
-                prepared_picture_book_script = build_picture_book_cue_script(
-                    st.session_state.current_draft_output, include_picture_book_cues)
-                st.caption("Markers are planning suggestions, not a finished page design. "
-                           "Turn them off for a clean text-only manuscript. Neither choice changes saved versions.")
-                if not st.session_state.get("demo_mode"):
-                    st.download_button(
-                        "Download Picture Book Manuscript (.docx)",
-                        data=picture_book_cues_docx_bytes(get_project_title_for_display(), prepared_picture_book_script),
-                        file_name=f"{safe_download_stem(get_project_title_for_display(), 'picture_book')}_manuscript.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        key="wbs_picture_book_cues_download", use_container_width=True,
-                    )
-                st.caption(
-                    "The project type selected in Concept Development automatically controls this output. "
-                    "Create the 32-page / 16-spread layout draft, edit story text, and add illustration direction. "
-                    "Layout creation is local and does not call Gemini."
-                )
-                page_size_options = list(PICTURE_BOOK_PAGE_SIZES.keys())
-                saved_page_size = str(
-                    st.session_state.get("picture_book_page_size")
-                    or DEFAULT_PICTURE_BOOK_PAGE_SIZE
-                )
-                if saved_page_size not in page_size_options:
-                    saved_page_size = DEFAULT_PICTURE_BOOK_PAGE_SIZE
-
-                selected_picture_book_page_size = st.selectbox(
-                    "Picture Book Page Size:",
-                    page_size_options,
-                    index=page_size_options.index(saved_page_size),
-                    key="picture_book_page_size",
-                    help=(
-                        "8.5 x 8.5 uses square pages. 10 x 8 uses wider landscape pages. "
-                        "The selected size controls the on-screen spread proportions and layout-draft export."
-                    ),
-                )
-
-                selected_size_spec = get_picture_book_page_size_spec(
-                    selected_picture_book_page_size
-                )
-                st.caption(
-                    f"Each page: {selected_size_spec['page_width']:g}\" × "
-                    f"{selected_size_spec['page_height']:g}\". "
-                    f"Two-page spread: {selected_size_spec['page_width'] * 2:g}\" × "
-                    f"{selected_size_spec['page_height']:g}\"."
-                )
-
-                current_picture_book_signature = get_text_signature(
-                    st.session_state.current_draft_output
-                )
-                saved_picture_book_signature = st.session_state.get(
-                    "picture_book_layout_source_signature",
-                    "",
-                )
-                layout_is_current = bool(
-                    st.session_state.get("picture_book_layout_spreads")
-                    and saved_picture_book_signature
-                    and saved_picture_book_signature == current_picture_book_signature
-                )
-
-                if (
-                    st.session_state.get("picture_book_layout_spreads")
-                    and not layout_is_current
-                ):
-                    st.warning(
-                        "The manuscript has changed since this layout draft was built. "
-                        "Build the layout again before finalizing it."
-                    )
-
-                generate_layout_label = (
-                    "Rebuild 32-Page Layout — No AI Charge"
-                    if st.session_state.get("picture_book_layout_spreads")
-                    else "Build 32-Page Layout — No AI Charge"
-                )
-
-                if st.button(
-                    generate_layout_label,
-                    key="generate_picture_book_layout_local",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    require_product_access("safety")
-
-                    if not st.session_state.current_draft_output.strip():
-                        st.error("No completed manuscript is available for layout conversion.")
-                        st.stop()
-
-                    normalized_layout = build_picture_book_spreads_locally(
-                        st.session_state.current_draft_output
-                    )
-                    st.session_state.picture_book_layout_spreads = normalized_layout
-                    st.session_state.picture_book_layout_source_signature = current_picture_book_signature
-                    st.session_state.picture_book_layout_preview_id += 1
-                    if not st.session_state.get("demo_mode"):
-                        save_picture_book_layout_to_supabase(normalized_layout, selected_picture_book_page_size)
-                        save_current_project_session_to_supabase()
-                    st.rerun()
-
-                if layout_is_current:
-                    st.info(
-                        "32-page planning structure: 16 editable spreads. "
-                        "Each spread can use a different standard layout template."
-                    )
-
-                    edited_spreads = []
-                    for spread in normalize_picture_book_spreads(
-                        st.session_state.picture_book_layout_spreads
-                    ):
-                        spread_number = spread["spread_number"]
-                        with st.expander(
-                            f"Spread {spread_number} — Pages {spread['pages']}",
-                            expanded=(spread_number == 1),
-                        ):
-                            template = st.selectbox(
-                                "Text / Image Position Template:",
-                                PICTURE_BOOK_LAYOUT_TEMPLATES,
-                                index=PICTURE_BOOK_LAYOUT_TEMPLATES.index(spread["template"])
-                                if spread["template"] in PICTURE_BOOK_LAYOUT_TEMPLATES
-                                else 0,
-                                key=f"picture_book_template_{st.session_state.picture_book_layout_preview_id}_{spread_number}",
-                            )
-                            render_picture_book_template_preview(template, selected_picture_book_page_size)
-
-                            story_text = st.text_area(
-                                "Story Text for This Spread:",
-                                value=spread.get("story_text", ""),
-                                height=130,
-                                key=f"picture_book_text_{st.session_state.picture_book_layout_preview_id}_{spread_number}",
-                            )
-
-                            illustration_direction = st.text_area(
-                                "Illustration Direction:",
-                                value=spread.get("illustration_direction", ""),
-                                height=110,
-                                key=f"picture_book_illustration_{st.session_state.picture_book_layout_preview_id}_{spread_number}",
-                            )
-
-
-                            edited_spreads.append({
-                                "spread_number": spread_number,
-                                "pages": spread["pages"],
-                                "template": template,
-                                "story_text": story_text.strip(),
-                                "illustration_direction": illustration_direction.strip(),
-                            })
-
-                    st.session_state.picture_book_layout_spreads = edited_spreads
-
-                    if st.button(
-                        "Save Picture Book Layout Draft 💾",
-                        key="save_picture_book_layout_edits",
-                        use_container_width=True,
-                    ):
-                        if st.session_state.get("demo_mode"):
-                            full_version_only_notice("Saved Projects")
-                        else:
-                            result = save_picture_book_layout_to_supabase(edited_spreads, selected_picture_book_page_size)
-                            if result:
-                                st.session_state.picture_book_layout_preview_id += 1
-                                save_current_project_session_to_supabase()
-                                st.success("Children's Picture Book layout draft saved.")
-                                st.rerun()
-
-                    picture_book_docx_bytes = build_picture_book_layout_docx_bytes(
-                        get_project_title_for_display(),
-                        edited_spreads,
-                        selected_picture_book_page_size,
-                    )
-                    picture_book_stem = safe_download_stem(
-                        get_project_title_for_display(),
-                        "children_picture_book",
-                    )
-
-                    if st.session_state.get("demo_mode"):
-                        if st.button(
-                            "Download Picture Book Layout Draft (.docx) 🔒",
-                            key="trial_picture_book_layout_download_notice",
-                            type="primary",
-                            use_container_width=True,
-                        ):
-                            full_version_only_notice("Manuscript Printout")
-                    else:
-                        st.download_button(
-                            label="Download Picture Book Layout Draft (.docx)",
-                            data=picture_book_docx_bytes,
-                            file_name=f"{picture_book_stem}_layout_draft.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                            type="primary",
-                            use_container_width=True,
-                        )
-
-            if (
-                st.session_state.get("export_view", False)
-                and st.session_state.get("format_type") == "Audio Book"
-            ):
-                st.markdown("---")
-                st.subheader("🎙️ Audiobook Theatre Production Layout")
-                st.caption(
-                    "The Audio Book project type automatically outputs an Audiobook Theatre Production Script. "
-                    "There is no alternate output-format selector."
-                )
-
-                selected_cue_level = st.selectbox(
-                    "Production Cue Level:",
-                    [
-                        "Clean Voices Only",
-                        "Voices + Minimal SFX",
-                        "Full Audiobook Theatre Cues",
-                    ],
-                    index=[
-                        "Clean Voices Only",
-                        "Voices + Minimal SFX",
-                        "Full Audiobook Theatre Cues",
-                    ].index(
-                        st.session_state.get(
-                            "audiobook_production_cue_level",
-                            "Voices + Minimal SFX",
-                        )
-                        if st.session_state.get(
-                            "audiobook_production_cue_level",
-                            "Voices + Minimal SFX",
-                        ) in [
-                            "Clean Voices Only",
-                            "Voices + Minimal SFX",
-                            "Full Audiobook Theatre Cues",
-                        ]
-                        else "Voices + Minimal SFX"
-                    ),
-                    key="audiobook_production_cue_level_select",
-                )
-
-                current_production_source_signature = get_text_signature(
-                    st.session_state.current_draft_output
-                )
-                saved_production_signature = st.session_state.get(
-                    "audiobook_production_source_signature",
-                    "",
-                )
-                production_script_is_current = bool(
-                    st.session_state.get("audiobook_production_script", "").strip()
-                    and saved_production_signature
-                    and saved_production_signature == current_production_source_signature
-                )
-
-                if (
-                    st.session_state.get("audiobook_production_script", "").strip()
-                    and not production_script_is_current
-                ):
-                    st.warning(
-                        "The manuscript has changed since this production script was generated. "
-                        "Generate it again before downloading or recording."
-                    )
-
-                production_button_label = (
-                    "Refresh Production Script 🎙️"
-                    if st.session_state.get("audiobook_production_script", "").strip()
-                    else "Generate Production Script 🎙️"
-                )
-
-                if st.button(
-                    production_button_label,
-                    key="generate_audiobook_production_script",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    require_product_access("safety")
-
-                    if not st.session_state.current_draft_output.strip():
-                        st.error("No current manuscript is available for production conversion.")
-                        st.stop()
-
-                    with st.spinner("Converting the manuscript into an Audiobook Theatre production layout..."):
-                        try:
-                            production_output = st.session_state.backend.run_rewrite_engine(
-                                source_text=st.session_state.current_draft_output,
-                                rewrite_mode="Direct Script Change / Obey My Instructions Exactly",
-                                scene_choice="Full Manuscript",
-                                custom_instruction=get_audiobook_production_instruction(
-                                    selected_cue_level
-                                ),
-                                target_length="Keep Current Length",
-                                custom_target_word_count=None,
-                                tone_style=st.session_state.tone_style,
-                                author_style=st.session_state.author_style,
-                            )
-                        except Exception as e:
-                            st.error(f"Production layout conversion failed: {e}")
-                            st.stop()
-
-                    if not ai_output_is_usable(production_output):
-                        st.error(
-                            "The production layout conversion did not return usable text. "
-                            "The manuscript was not changed and no production script was saved."
-                        )
-                        st.stop()
-
-                    st.session_state.audiobook_production_script = str(production_output).strip()
-                    st.session_state.audiobook_production_source_signature = (
-                        current_production_source_signature
-                    )
-                    st.session_state.audiobook_production_cue_level = selected_cue_level
-                    st.session_state.audiobook_production_preview_id += 1
-
-                    project_id = get_active_project_id()
-                    if project_id:
-                        save_project_draft_to_supabase(
-                            project_id=project_id,
-                            draft_title="Audiobook Theatre Production Script",
-                            draft_type="audiobook_production_script",
-                            draft_content=st.session_state.audiobook_production_script,
-                        )
-
-                    save_current_project_session_to_supabase()
-                    st.rerun()
-
-                if production_script_is_current:
-                    edited_production_script = st.text_area(
-                        "Review / Edit Production Script:",
-                        value=st.session_state.audiobook_production_script,
-                        height=500,
-                        key=(
-                            "audiobook_production_script_editor_"
-                            f"{st.session_state.audiobook_production_preview_id}"
-                        ),
-                    )
-                    st.session_state.audiobook_production_script = edited_production_script
-                    st.caption(
-                        f"Production Script Words: "
-                        f"{count_words(st.session_state.audiobook_production_script):,}"
-                    )
-
-                    if st.button(
-                        "Save Production Script Edits 💾",
-                        key="save_audiobook_production_edits",
-                        use_container_width=True,
-                    ):
-                        project_id = get_active_project_id()
-                        if project_id:
-                            save_project_draft_to_supabase(
-                                project_id=project_id,
-                                draft_title="Audiobook Theatre Production Script - Edited",
-                                draft_type="audiobook_production_script",
-                                draft_content=st.session_state.audiobook_production_script,
-                            )
-                        save_current_project_session_to_supabase()
-                        st.success("Production script edits saved.")
-
-                    project_stem = safe_download_stem(
-                        get_project_title_for_display(),
-                        "audiobook",
-                    )
-                    production_docx_bytes = build_audiobook_production_docx_bytes(
-                        get_project_title_for_display(),
-                        st.session_state.audiobook_production_script,
-                    )
-
-                    if st.session_state.get("demo_mode"):
-                        if st.button(
-                            "Download Audiobook Theatre Production Script (.docx) 🔒",
-                            key="trial_audiobook_printout_notice",
-                            type="primary",
-                            use_container_width=True,
-                        ):
-                            full_version_only_notice("Manuscript Printout")
-                    else:
-                        st.download_button(
-                            label="Download Final Audiobook Theatre Production Script (.docx)",
-                            data=production_docx_bytes,
-                            file_name=(
-                                f"{project_stem}_audiobook_theatre_production_script.docx"
-                            ),
-                            mime=(
-                                "application/vnd.openxmlformats-officedocument."
-                                "wordprocessingml.document"
-                            ),
-                            type="primary",
-                            use_container_width=True,
-                        )
-
-            if can_use_rewrite:
-                if st.button(
-                    "Proceed to Script Rewrite 🛠️",
-                    key="proceed_to_rewrite_from_export",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    wbs_request_stage_change("Rewrite Engine")
-            else:
-                st.button(
-                    "🔒 Script Rewrite Locked",
-                    key="rewrite_locked_from_export",
-                    disabled=True,
-                    use_container_width=True,
-                )
-
-        except Exception as e:
-            st.error(f"Failed to generate Word document: {e}")
-
-    with col_right:
-        st.subheader("📊 Output Summary")
-
-        compiled_scene_count = len([
-            scene_text
-            for scene_text in st.session_state.get("scene_blocks", {}).values()
-            if str(scene_text or "").strip()
-        ])
-
-        if compiled_scene_count == 0 and str(st.session_state.get("current_draft_output", "")).strip():
-            compiled_scene_count = max(int(st.session_state.get("current_processing_beat", 1) or 1) - 1, 1)
-
-        st.metric(
-            label="Script Blocks Compiled",
-            value=f"{compiled_scene_count}",
-        )
-
-        st.markdown("**Project Memory Cache:**")
-
-        st.text_area(
-            "Saved Project Memory:",
-            value=st.session_state.rolling_lore_book,
-            height=200,
-            key="final_lore_view",
-            disabled=True,
-        )
-
-        st.write("---")
-        st.subheader("🗂️ Saved Versions")
-
-        if st.session_state.get("demo_mode"):
-            st.caption("Saved Versions are available in the full Writer Edition.")
-            if st.button("Open Saved Versions 🔒", key="trial_output_saved_versions_notice", use_container_width=True):
-                full_version_only_notice("Saved Versions")
-        else:
-            saved_version_count = len(get_manuscript_versions_for_current_project())
-            st.caption(f"Saved manuscript versions: {saved_version_count}")
-            st.caption("Use Saved Version Manager in the sidebar when you want to review, restore, download, or delete a saved version.")
-
-        st.write("---")
-
-        if st.button("🔄 Start New Project", use_container_width=True):
-            wbs_clear_new_project_ui_state()
-            st.session_state.project_title = ""
-            st.session_state.current_project_id = None
-            for _key in ("_wbs_loaded_project_id", "_wbs_loaded_project_title", "_wbs_loaded_saved_session_id",
-                         "_wbs_loaded_manuscript_version_id", "wbs_locked_format_id", "_wbs_locked_project_id"):
-                st.session_state.pop(_key, None)
-            st.session_state.project_version_name = "Original"
-            st.session_state.project_stage = "Intake"
-            st.session_state.project_scope = "Standalone Book"
-            st.session_state.series_key = ""
-            st.session_state.series_name = ""
-            st.session_state.series_book_number = 1
-            st.session_state.series_continuity_mode = "Strict"
-            st.session_state.series_reference_ids = []
-            st.session_state.series_canon_notes = ""
-            st.session_state.series_selection_signature = ""
-            st.session_state.pop("series_reference_selector", None)
-            st.session_state.pop("series_choice_selector", None)
-            st.session_state.pop("series_name_input", None)
-            st.session_state.sandbox_slates = None
-            st.session_state.chosen_option = None
-            st.session_state.chosen_option_text = None
-            st.session_state.plot_outline = None
-            st.session_state.current_draft_output = ""
-            st.session_state.rolling_lore_book = ""
-            st.session_state.completed_beats = []
-            st.session_state.scene_blocks = {}
-            st.session_state.current_processing_beat = 1
-            st.session_state.rewritten_manuscript = ""
-            st.session_state.rewrite_applied_message = ""
-            st.session_state.audiobook_production_script = ""
-            st.session_state.audiobook_production_source_signature = ""
-            st.session_state.audiobook_production_preview_id = 0
-            st.session_state.picture_book_layout_spreads = []
-            st.session_state.picture_book_layout_source_signature = ""
-            st.session_state.picture_book_layout_preview_id = 0
-            st.session_state.picture_book_page_size = DEFAULT_PICTURE_BOOK_PAGE_SIZE
-            st.session_state.manuscript_version = 0
-            st.session_state.current_manuscript_save_status = ""
-            st.session_state.current_manuscript_save_stage = ""
-            st.session_state.current_manuscript_save_version = 0
-            st.session_state.export_view = False
-            st.session_state.show_saved_version_manager = False
-            st.rerun()
-
-    if st.session_state.get("export_view", False) and st.session_state.get("show_saved_version_manager", False):
-        if st.session_state.get("demo_mode"):
-            st.markdown("---")
-            st.subheader("🗂️ Saved Version Manager")
-            st.caption("Saved Versions remain visible during the trial and unlock with the full Writer Edition.")
-            if st.button("Open Saved Version Manager 🔒", key="trial_saved_version_manager_page_notice", use_container_width=True):
-                full_version_only_notice("Saved Versions")
-        else:
-            st.markdown("---")
-            st.subheader("🗂️ Saved Version Manager")
-            st.caption(
-                "Review saved manuscript versions here. Nothing changes unless you choose Restore or Delete. "
-                "Delete removes only the selected saved version after confirmation."
-            )
-
-            manager_versions = get_manuscript_versions_for_current_project()
-
-            if not manager_versions:
-                st.info("No saved manuscript versions found yet.")
-            else:
-                manager_items = []
-
-                for version in manager_versions:
-                    project_join = version.get("writersblock_projects") or {}
-                    if isinstance(project_join, dict):
-                        project_title_for_version = project_join.get("project_title")
-                    else:
-                        project_title_for_version = None
-
-                    title = str(
-                        project_title_for_version
-                        or version.get("project_title")
-                        or get_project_title_for_display()
-                    ).strip()
-
-                    version_number = int(version.get("version_number") or 1)
-                    created_at = version.get("created_at")
-                    word_count = count_words(version.get("manuscript_content", ""))
-                    status, stage_label = get_manuscript_version_status_stage(version)
-                    label_text = str(version.get("version_label") or "Saved Version").strip()
-                    display_label = f"{title} — {status} V{version_number} — {word_count} words"
-
-                    manager_items.append({
-                        "label": display_label,
-                        "version": version,
-                        "title": title,
-                        "version_number": version_number,
-                        "word_count": word_count,
-                        "label_text": label_text,
-                    })
-
-                manager_labels = [item["label"] for item in manager_items]
-                manager_lookup = {item["label"]: item for item in manager_items}
-
-                selected_manager_label = st.selectbox(
-                    "Saved versions:",
-                    manager_labels,
-                    key=f"saved_version_manager_selector_{st.session_state.get('current_project_id')}",
-                )
-
-                selected_manager_item = manager_lookup.get(selected_manager_label)
-                selected_manager_version = selected_manager_item["version"] if selected_manager_item else None
-                selected_manager_text = str(selected_manager_version.get("manuscript_content") or "") if selected_manager_version else ""
-
-                st.text_area(
-                    "Selected Version Review:",
-                    value=selected_manager_text,
-                    height=520,
-                    key=f"saved_version_manager_review_box_{st.session_state.get('current_project_id')}",
-                    disabled=True,
-                )
-
-                col_download, col_restore, col_delete = st.columns(3)
-
-                with col_download:
-                    try:
-                        version_doc = Document()
-                        version_doc.add_heading(f"WritersBlock Studios Manuscript - {selected_manager_item['label']}", level=1)
-
-                        for paragraph in selected_manager_text.split("\n\n"):
-                            clean_paragraph = paragraph.strip()
-                            if clean_paragraph:
-                                p = version_doc.add_paragraph(clean_paragraph)
-                                p.paragraph_format.space_after = Pt(8)
-                                p.paragraph_format.line_spacing = 1.15
-
-                        version_buffer = BytesIO()
-                        version_doc.save(version_buffer)
-
-                        st.download_button(
-                            label="Download Selected Version",
-                            data=version_buffer.getvalue(),
-                            file_name=f"saved_version_v{selected_manager_item['version_number']}.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                            use_container_width=True,
-                        )
-                    except Exception as e:
-                        st.error(f"Selected version download unavailable: {e}")
-
-                with col_restore:
-                    restore_confirmed = st.checkbox(
-                        "Confirm restore",
-                        key=f"confirm_restore_selected_version_{st.session_state.get('current_project_id')}",
-                    )
-
-                    if st.button(
-                        "Restore Selected Version",
-                        key=f"restore_selected_saved_version_{st.session_state.get('current_project_id')}",
-                        disabled=not restore_confirmed,
-                        use_container_width=True,
-                    ):
-                        st.session_state.current_draft_output = selected_manager_text
-                        st.session_state.current_project_id = selected_manager_version.get("project_id")
-                        st.session_state.project_title = selected_manager_item.get("title") or get_project_title_for_display()
-                        st.session_state.manuscript_version = int(selected_manager_version.get("version_number") or st.session_state.get("manuscript_version", 0) or 0)
-                        st.session_state.rewritten_manuscript = ""
-                        st.session_state.rewrite_applied_message = "Selected saved version restored as the current manuscript."
-                        save_current_project_session_to_supabase()
-                        st.success("Selected saved version restored as the current manuscript.")
-                        st.rerun()
-
-                with col_delete:
-                    delete_confirmed = st.checkbox(
-                        "I understand this will permanently delete the selected saved version.",
-                        key=f"confirm_delete_selected_version_{st.session_state.get('current_project_id')}",
-                    )
-
-                    if st.button(
-                        "Delete Selected Version",
-                        key=f"delete_selected_saved_version_{st.session_state.get('current_project_id')}",
-                        disabled=not delete_confirmed,
-                        use_container_width=True,
-                    ):
-                        delete_manuscript_version_ids([selected_manager_version.get("id")])
-                        st.success("Selected saved version deleted.")
-                        st.rerun()
+    from core.workflow_runtime import run_workflow
+    run_workflow('editorial_review', globals())
 # ======================================================================================
 # PHASE 6: SCRIPT POLISH
 # ======================================================================================
 if st.session_state.project_stage == "Revision Engine":
-    require_product_access("revision")
-
-    st.header("🧠 Stage 4: Optional Script Polish")
-    render_project_title_banner("step_6_script_polish")
-    st.markdown("##### Review the manuscript for continuity, pacing, tone, and polish opportunities.")
-    st.markdown("---")
-
-    if not st.session_state.current_draft_output.strip():
-        st.warning("No manuscript draft found. Return to Creative Draft and complete drafting first.")
-    else:
-        col_left, col_right = st.columns([2, 1])
-
-        with col_left:
-            st.subheader("📄 Script Under Review")
-
-            st.text_area(
-                "Current Manuscript:",
-                value=st.session_state.current_draft_output,
-                height=500,
-                label_visibility="collapsed",
-                disabled=True,
-            )
-
-        with col_right:
-            st.subheader("🔍 Polish Tools")
-
-            revision_mode = st.selectbox(
-                "Choose Polish Pass:",
-                [
-                    "Continuity Check",
-                    "Pacing Check",
-                    "Tone & Style Check",
-                    "Character Consistency Check",
-                    "Scene Expansion Suggestions",
-                    "Final Polish Pass",
-                ],
-            )
-
-            if st.button("Run Script Polish 🧠", key="run_revision_pass", type="primary", use_container_width=True):
-                require_product_access("revision")
-                with st.spinner("Running polish analysis..."):
-                    if create_bridge_adapter is None:
-                        st.error(
-                            "WritersBlock Model is unavailable. "
-                            f"{WBS_MODEL_IMPORT_ERROR}"
-                        )
-                        st.stop()
-
-                    _wbs_polish_bridge = create_bridge_adapter(
-                        backend=st.session_state.backend
-                    )
-                    _wbs_polish_result = _wbs_polish_bridge.execute(
-                        "Run Script Polish",
-                        st.session_state,
-                        prepared_context={
-                            "effective_format_type": get_effective_format_type(),
-                            "format_development_context": get_full_project_continuity_context(),
-                            "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
-                            "quill_template_context": refresh_quill_template_context(),
-                        },
-                        action_payload={
-                            "revision_mode": revision_mode,
-                            "tone_style": st.session_state.tone_style,
-                            "author_style": st.session_state.author_style,
-                        },
-                    )
-
-                    if not _wbs_polish_result.success:
-                        st.error(
-                            "WritersBlock Model Bridge could not run Script Polish. "
-                            + (_wbs_polish_result.error or "Unknown bridge error.")
-                        )
-                        st.stop()
-
-                    revision_report = _wbs_polish_result.output
-                    st.session_state.revision_report = revision_report
-                    st.session_state["_wbs_agent_bridge_last_operation"] = (
-                        _wbs_polish_result.backend_operation or ""
-                    )
-                    st.session_state["_wbs_agent_bridge_last_success"] = True
-                    st.rerun()
-
-            st.markdown("---")
-
-            if "revision_report" not in st.session_state:
-                st.session_state.revision_report = ""
-
-            st.text_area(
-                "Polish Report:",
-                value=st.session_state.revision_report,
-                height=300,
-                label_visibility="collapsed",
-                disabled=True,
-            )
-
-            if can_use_rewrite:
-                if st.button("Proceed to Script Rewrite 🛠️", key="proceed_to_rewrite_from_revision", type="primary", use_container_width=True):
-                    wbs_request_stage_change("Rewrite Engine")
-            else:
-                st.button("🔒 Script Rewrite Locked", key="rewrite_locked_from_revision", disabled=True, use_container_width=True)
+    from core.workflow_runtime import run_workflow
+    run_workflow('script_polish', globals())
 # ============================================================
 # PHASE 7: SCRIPT REWRITE
 # ============================================================
 elif st.session_state.project_stage == "Rewrite Engine":
-    require_product_access("rewrite")
-
-    st.header("🛠️ Stage 4: Optional Script Rewrite")
-    render_project_title_banner("step_7_script_rewrite")
-    st.markdown("##### Script Rewrite uses the current live manuscript only. Saved versions are available for download, but are not used as the script rewrite source.")
-    st.markdown("---")
-
-    if "rewritten_manuscript" not in st.session_state:
-        st.session_state.rewritten_manuscript = ""
-
-    if "rewrite_preview_id" not in st.session_state:
-        st.session_state.rewrite_preview_id = 0
-
-    if "rewrite_target_length" not in st.session_state:
-        st.session_state.rewrite_target_length = "Keep Current Length"
-
-    manuscript_text = st.session_state.get("current_draft_output", "")
-
-    def split_text_into_scene_chunks(full_text, total_scenes=4):
-        full_text = str(full_text or "").strip()
-        if not full_text:
-            return []
-
-        paragraphs = [p.strip() for p in re.split(r"\n\s*\n", full_text) if p.strip()]
-        if not paragraphs:
-            return [full_text]
-
-        total_scenes = max(1, int(total_scenes or 1))
-        chunk_size = max(1, (len(paragraphs) + total_scenes - 1) // total_scenes)
-
-        chunks = []
-        for i in range(total_scenes):
-            start_idx = i * chunk_size
-            end_idx = min(len(paragraphs), (i + 1) * chunk_size)
-            if start_idx < len(paragraphs):
-                chunks.append("\n\n".join(paragraphs[start_idx:end_idx]).strip())
-
-        return chunks
-
-    def get_scene_beat_text(full_text, beat_number):
-        scene_blocks = st.session_state.get("scene_blocks", {})
-        stored_scene = scene_blocks.get(int(beat_number)) if isinstance(scene_blocks, dict) else None
-        if stored_scene and str(stored_scene).strip():
-            return str(stored_scene).strip()
-
-        chunks = split_text_into_scene_chunks(full_text, 4)
-        idx = int(beat_number) - 1
-        if 0 <= idx < len(chunks):
-            return chunks[idx]
-        return ""
-
-    def replace_scene_beat_text(full_text, beat_number, replacement_text):
-        full_text = str(full_text or "")
-        replacement_text = str(replacement_text or "").strip()
-
-        scene_blocks = st.session_state.get("scene_blocks", {})
-        stored_scene = None
-
-        if isinstance(scene_blocks, dict):
-            stored_scene = scene_blocks.get(int(beat_number))
-
-        if stored_scene and str(stored_scene).strip() and str(stored_scene).strip() in full_text:
-            st.session_state.scene_blocks[int(beat_number)] = replacement_text
-            return full_text.replace(str(stored_scene).strip(), replacement_text, 1)
-
-        current_scene_text = get_scene_beat_text(full_text, beat_number)
-        if current_scene_text and current_scene_text in full_text:
-            if isinstance(scene_blocks, dict):
-                st.session_state.scene_blocks[int(beat_number)] = replacement_text
-            return full_text.replace(current_scene_text, replacement_text, 1)
-
-        return full_text
-
-    def strip_internal_notices(text):
-        text = str(text or "")
-        text = re.sub(r"\n?\[LOCAL NODE 8 FALLBACK NOTE:.*?\]", "", text, flags=re.DOTALL)
-        text = re.sub(r"\n?\[LOCAL .*?FALLBACK NOTE:.*?\]", "", text, flags=re.DOTALL)
-        text = re.sub(r"\n?NODE 8 TEST OUTPUT.*", "", text, flags=re.DOTALL)
-        return text.strip()
-
-    if not manuscript_text.strip():
-        st.warning("No manuscript draft found. Return to Creative Draft and complete drafting first.")
-    else:
-        col_left, col_right = st.columns([2, 1])
-
-        with col_right:
-            st.subheader("🛠️ Script Rewrite Controls")
-
-            rewrite_mode = st.selectbox(
-                "1) Script Rewrite Mode:",
-                [
-                    "Creative Script Rewrite / Improve Scene",
-                    "Direct Script Change / Obey My Instructions Exactly",
-                    "Polish Only / Do Not Change Story",
-                ],
-                key="rewrite_mode_select",
-            )
-
-            scene_choice = st.selectbox(
-                "2) Script Rewrite Location:",
-                [
-                    "Full Manuscript",
-                    "Scene Beat 1",
-                    "Scene Beat 2",
-                    "Scene Beat 3",
-                    "Scene Beat 4",
-                ],
-                key="rewrite_scene_choice",
-            )
-
-            rewrite_target_length = st.selectbox(
-                "3) Target Length:",
-                [
-                    "Keep Current Length",
-                    "Condense for Tighter Pacing",
-                    "Expand to 400 Words",
-                    "Custom Word Count",
-                ],
-                key="rewrite_target_length",
-            )
-
-            custom_target_word_count = None
-
-            if rewrite_target_length == "Custom Word Count":
-                custom_target_word_count = st.number_input(
-                    "Custom Target Word Count:",
-                    min_value=50,
-                    max_value=2500,
-                    value=min(1200, max(50, count_words(st.session_state.current_draft_output))),
-                    step=25,
-                    key="custom_target_word_count",
-                )
-
-            current_project_dialogue_style = get_dialogue_style()
-            rewrite_dialogue_options = [
-                f"Use Current Project Dialogue Style — {get_dialogue_style_display(current_project_dialogue_style)}",
-                *DIALOGUE_STYLE_OPTIONS,
-            ]
-
-            rewrite_dialogue_choice = st.selectbox(
-                "4) Dialogue Style for Rewrite:",
-                rewrite_dialogue_options,
-                index=0,
-                key="rewrite_dialogue_style_choice",
-                format_func=(
-                    lambda option: get_dialogue_style_display(option)
-                    if option in DIALOGUE_STYLE_OPTIONS
-                    else option
-                ),
-                help=(
-                    "Percentages are approximate spoken-dialogue targets. Default preserves the project's "
-                    "current Dialogue Style. Choose another option only when you intentionally want this rewrite "
-                    "to use a different dialogue/narration balance."
-                ),
-            )
-
-            st.caption(
-                f"Current Project Dialogue Style: {get_dialogue_style_display(current_project_dialogue_style)}. "
-                "The selected project type remains locked and controls dialogue formatting."
-            )
-
-            custom_rewrite_instruction = st.text_area(
-                "5) Specific Script Rewrite Direction - Optional:",
-                value="",
-                height=160,
-                placeholder=(
-                    "Example: Keep the same ending, but expand the story with stronger atmosphere, "
-                    "more antique shop detail, more dread, and more of Elias's physical decline."
-                ),
-                key="custom_rewrite_instruction",
-            )
-
-            st.markdown("---")
-            st.info(
-                "Script Rewrite uses only the current live manuscript shown on this page. "
-                "Saved versions are not used as the script rewrite source. "
-                "Dialogue Style defaults to the current project setting unless you deliberately choose a rewrite override above."
-            )
-
-        if scene_choice == "Full Manuscript":
-            selected_source_text = manuscript_text
-        else:
-            beat_number = int(scene_choice.replace("Scene Beat ", ""))
-            selected_source_text = get_scene_beat_text(manuscript_text, beat_number)
-
-        with col_left:
-            st.subheader("📄 Editable Source Text")
-
-            edited_source_text = st.text_area(
-                "Edit selected source text before script rewrite:",
-                value=selected_source_text,
-                height=500,
-                key=f"editable_rewrite_source_{scene_choice.replace(' ', '_')}_{st.session_state.manuscript_version}",
-            )
-
-            st.caption(f"Selected Source Words: {count_words(edited_source_text)}")
-            st.caption("Save a manual change as a new draft version, or run an optional AI rewrite below.")
-            if st.session_state.get("demo_mode"):
-                st.button("💾 Save This Version 🔒", key="rewrite_manual_save_locked", disabled=True, use_container_width=True)
-            elif st.button("💾 Save This Version", key="rewrite_manual_save", use_container_width=True):
-                if not str(edited_source_text or "").strip():
-                    st.error("There is no revised text to save.")
-                else:
-                    if scene_choice == "Full Manuscript":
-                        updated_manuscript = str(edited_source_text).strip()
-                    else:
-                        updated_manuscript = replace_scene_beat_text(
-                            st.session_state.current_draft_output,
-                            int(scene_choice.replace("Scene Beat ", "")),
-                            str(edited_source_text).strip(),
-                        )
-                    if updated_manuscript == st.session_state.current_draft_output:
-                        st.info("No changes to save. Your current manuscript is preserved.")
-                    else:
-                        previous_manuscript = st.session_state.current_draft_output
-                        st.session_state.current_draft_output = updated_manuscript
-                        try:
-                            saved = save_manuscript_checkpoint(
-                                status="DRAFT", stage_label="Script Rewrite Manual Edit",
-                                source_stage="script_rewrite_manual_edit",
-                            )
-                        except Exception as exc:
-                            st.session_state.current_draft_output = previous_manuscript
-                            st.error(f"Version save failed: {exc}")
-                        else:
-                            if saved.get("status") == "saved":
-                                st.success("Edited manuscript saved as a new version. Earlier manuscript versions remain available.")
-                                save_current_project_session_to_supabase()
-                            else:
-                                st.session_state.current_draft_output = previous_manuscript
-                                st.error("The edited manuscript was not saved; the previously active text has been restored.")
-            st.markdown("---")
-
-            if st.button(
-                "Run Script Rewrite 🛠️",
-                key="run_rewrite_engine",
-                type="primary",
-                use_container_width=True,
-            ):
-                require_product_access("rewrite")
-
-                if not edited_source_text.strip():
-                    st.error("No source text selected for script rewrite.")
-                else:
-                    with st.spinner("Running script rewrite..."):
-                        try:
-
-                            effective_custom_rewrite_instruction = custom_rewrite_instruction.strip()
-
-                            # STEP 7 ONLY — natural-language Quill handoff.
-                            # Example: "Use the modified Quill intro in the rewrite."
-                            # Quill may discuss/recommend changes anywhere, but manuscript
-                            # changes remain controlled here in Script Rewrite.
-                            if "quill" in effective_custom_rewrite_instruction.lower():
-                                quill_creative_suggestion = str(
-                                    st.session_state.get(
-                                        "_wbs_quill_last_creative_suggestion", ""
-                                    )
-                                    or ""
-                                ).strip()
-
-                                if not quill_creative_suggestion:
-                                    st.warning(
-                                        "No recent Quill creative revision is available in this session. "
-                                        "Ask Quill for the revision first, then return to Step 7 and run the rewrite."
-                                    )
-                                    st.stop()
-
-                                effective_custom_rewrite_instruction = (
-                                    effective_custom_rewrite_instruction
-                                    + "\n\nQUILL CREATIVE SUGGESTION REFERENCED BY THE WRITER:\n"
-                                    + quill_creative_suggestion
-                                    + "\n\nApply that Quill material only within the selected Script Rewrite Location. "
-                                    "Preserve all other scenes/beats and the balance of the existing manuscript."
-                                )
-
-                            rewrite_instruction_packet = (
-                                get_rewrite_dialogue_instruction(rewrite_dialogue_choice)
-                                + "\n\nADDITIONAL CREATOR REWRITE DIRECTION:\n"
-                                + (
-                                    effective_custom_rewrite_instruction
-                                    if effective_custom_rewrite_instruction
-                                    else "No additional rewrite direction provided."
-                                )
-                            )
-
-                            if create_bridge_adapter is None:
-                                raise RuntimeError(
-                                    "WritersBlock Model is unavailable. "
-                                    + WBS_MODEL_IMPORT_ERROR
-                                )
-
-                            _wbs_rewrite_bridge = create_bridge_adapter(
-                                backend=st.session_state.backend
-                            )
-                            _wbs_rewrite_result = _wbs_rewrite_bridge.execute(
-                                "Rewrite this manuscript",
-                                st.session_state,
-                                prepared_context={
-                                    "effective_format_type": get_effective_format_type(),
-                                    "format_development_context": get_full_project_continuity_context(),
-                                    "quill_format_instructions": st.session_state.get("quill_format_instructions", ""),
-                                    "quill_template_context": refresh_quill_template_context(),
-                                },
-                                action_payload={
-                                    "source_text": edited_source_text,
-                                    "backend_rewrite_mode": rewrite_mode,
-                                    "scene_choice": scene_choice,
-                                    "custom_instruction": rewrite_instruction_packet,
-                                    "target_length": rewrite_target_length,
-                                    "custom_target_word_count": custom_target_word_count,
-                                    "tone_style": st.session_state.tone_style,
-                                    "author_style": st.session_state.author_style,
-                                },
-                            )
-
-                            if not _wbs_rewrite_result.success:
-                                raise RuntimeError(
-                                    _wbs_rewrite_result.error
-                                    or "WritersBlock Model Bridge returned no rewrite."
-                                )
-
-                            st.session_state.rewritten_manuscript = _wbs_rewrite_result.output
-                            st.session_state["_wbs_agent_bridge_last_operation"] = (
-                                _wbs_rewrite_result.backend_operation or ""
-                            )
-                            st.session_state["_wbs_agent_bridge_last_success"] = True
-                            st.session_state.rewrite_preview_id += 1
-
-
-
-                        except Exception as e:
-                            st.session_state.rewritten_manuscript = (
-                                "Script rewrite fallback output.\n\n"
-                                f"Backend error: {e}\n\n"
-                                "The script rewrite request was received, but the AI backend did not return usable text."
-                            )
-                            st.session_state.rewrite_preview_id += 1
-
-                        st.rerun()
-
-            # WBS_SKIP_REWRITE_TO_FINAL_2026_09_07
-            st.caption(
-                "If you are satisfied with the current manuscript, skip rewriting and proceed unchanged. "
-                "No AI rewrite is run and no rewrite credits are used."
-            )
-            if st.button(
-                "SKIP REWRITE — PROCEED TO FINAL OUTPUT ➡️",
-                key="skip_rewrite_to_final_output",
-                type="primary",
-                use_container_width=True,
-            ):
-                st.session_state.rewritten_manuscript = ""
-                st.session_state.rewrite_applied_message = (
-                    "Rewrite skipped. Current manuscript preserved unchanged."
-                )
-                wbs_request_stage_change("Isolation Guardrail", export_view=True)
-
-
-        st.markdown("---")
-        st.subheader("✍️ Script Rewrite Output")
-
-        st.text_area(
-            "Script Rewrite Output:",
-            value=st.session_state.rewritten_manuscript,
-            height=450,
-            label_visibility="collapsed",
-            key=f"rewrite_output_preview_{st.session_state.rewrite_preview_id}",
-        )
-
-        preview_words = count_words(st.session_state.rewritten_manuscript)
-        if st.session_state.rewritten_manuscript.strip():
-            st.caption(f"Script Rewrite Preview Words: {preview_words}")
-
-        if st.session_state.rewrite_applied_message:
-            st.success(st.session_state.rewrite_applied_message)
-
-        preview_is_safe_to_apply = (
-            st.session_state.rewritten_manuscript.strip()
-            and "Script rewrite fallback output" not in st.session_state.rewritten_manuscript
-            and "Backend error:" not in st.session_state.rewritten_manuscript
-        )
-
-        if st.session_state.rewritten_manuscript.strip() and not preview_is_safe_to_apply:
-            st.error("This script rewrite preview could not be used. Please run the script rewrite again.")
-
-        if preview_is_safe_to_apply:
-            if st.button(
-                "Apply Script Rewrite to Full Manuscript ✅",
-                key="apply_rewrite_to_manuscript",
-                type="primary",
-                use_container_width=True,
-            ):
-                cleaned_rewrite_for_manuscript = strip_internal_notices(st.session_state.rewritten_manuscript)
-
-                if scene_choice == "Full Manuscript":
-                    st.session_state.current_draft_output = cleaned_rewrite_for_manuscript
-                    st.session_state.rewrite_applied_message = "Full manuscript replaced with script rewrite version."
-                else:
-                    beat_number = int(scene_choice.replace("Scene Beat ", ""))
-                    st.session_state.current_draft_output = replace_scene_beat_text(
-                        st.session_state.current_draft_output,
-                        beat_number,
-                        cleaned_rewrite_for_manuscript,
-                    )
-                    st.session_state.rewrite_applied_message = f"{scene_choice} script rewrite applied to the full manuscript."
-
-                st.session_state.rewritten_manuscript = ""
-                rewrite_checkpoint = save_manuscript_checkpoint(
-                    status="DRAFT",
-                    stage_label="Script Rewrite",
-                    source_stage="script_rewrite_draft",
-                )
-                st.session_state.rewrite_preview_id += 1
-
-                save_result = save_current_project_session_to_supabase()
-                if save_result:
-                    st.session_state.rewrite_applied_message = (
-                        st.session_state.rewrite_applied_message
-                        + " Project saved to the current accepted state."
-                    )
-                else:
-                    st.session_state.rewrite_applied_message = (
-                        st.session_state.rewrite_applied_message
-                        + " Project session was not saved automatically. Use Save Project Changes As A New Version before leaving."
-                    )
-
-                wbs_request_stage_change("Isolation Guardrail", export_view=True)
-
-        st.markdown("---")
-
-        st.markdown("## 📝 DRAFT OUTPUT")
-        st.caption("The current manuscript remains a draft until it is saved at Step 8 as the FINAL OUTPUT MANUSCRIPT.")
-        if st.session_state.get("demo_mode"):
-            if st.button("💾 SAVE CURRENT DRAFT 🔒", key="save_current_draft_rewrite_trial", use_container_width=True):
-                full_version_only_notice("Saved Versions")
-        else:
-            if st.button(
-                "💾 SAVE CURRENT DRAFT",
-                key="save_current_draft_rewrite",
-                type="primary",
-                use_container_width=True,
-            ):
-                rewrite_draft_result = save_manuscript_checkpoint(
-                    status="DRAFT",
-                    stage_label="Script Rewrite",
-                    source_stage="script_rewrite_draft",
-                )
-                save_current_project_session_to_supabase()
-                if rewrite_draft_result.get("status") == "saved":
-                    st.success(f"DRAFT — Script Rewrite — V{rewrite_draft_result.get('version_number')} saved to version history.")
-                elif rewrite_draft_result.get("status") == "unchanged":
-                    st.info(f"This DRAFT — Script Rewrite — V{rewrite_draft_result.get('version_number')} is already saved.")
-                else:
-                    st.error("Current rewrite-stage draft could not be saved to version history.")
-
-        try:
-            final_doc = Document()
-            final_style = final_doc.styles["Normal"]
-            final_font = final_style.font
-            final_font.name = "Times New Roman"
-            final_font.size = Pt(12)
-
-            final_export_text = strip_internal_notices(st.session_state.current_draft_output)
-
-            for line in final_export_text.split("\n"):
-                clean_line = line.strip()
-                if clean_line:
-                    if "CHAPTER SCENE BEAT" in clean_line:
-                        p = final_doc.add_paragraph()
-                        p.paragraph_format.space_before = Pt(18)
-                        p.paragraph_format.space_after = Pt(6)
-                        run = p.add_run(clean_line)
-                        run.bold = True
-                    elif not clean_line.startswith("="):
-                        p = final_doc.add_paragraph(clean_line)
-                        p.paragraph_format.space_after = Pt(12)
-                        p.paragraph_format.line_spacing = 1.15
-
-            final_buffer = BytesIO()
-            final_doc.save(final_buffer)
-            final_docx_bytes = final_buffer.getvalue()
-
-            if st.session_state.get("demo_mode"):
-                if st.button(
-                    "Download Current Draft (.docx) 📥 🔒",
-                    key="trial_rewrite_manuscript_printout_notice",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    full_version_only_notice("Manuscript Printout")
-            else:
-                st.download_button(
-                    label="Download Current Draft (.docx) 📥",
-                    data=final_docx_bytes,
-                    file_name="manuscript_current_draft.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    type="primary",
-                    use_container_width=True,
-                )
-
-        except Exception as e:
-            st.error(f"Failed to generate revised Word document: {e}")
+    from core.workflow_runtime import run_workflow
+    run_workflow('script_rewrite', globals())
 
 # ==========================================
 # WBS AI AGENT — LATE SHADOW STATE READ

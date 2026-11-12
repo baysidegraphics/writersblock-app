@@ -266,11 +266,14 @@ def _set_personal_startup_welcome(
 def _resolve_kokoro_server_files() -> tuple[Path, Path]:
     """Find local Kokoro models or provision them for hosted Streamlit."""
     configured = str(os.getenv("WBS_QUILL_TTS_DIR", "") or "").strip()
+    cache_root=Path(os.getenv('XDG_CACHE_HOME') or (Path.home()/'.cache'))/'wbs'/'kokoro'
     candidates = []
     if configured:
         candidates.append(Path(configured).expanduser())
     candidates.extend([
+        Path(__file__).resolve().parents[1] / "static" / "quill_tts" / "server",
         Path.cwd() / "static" / "quill_tts" / "server",
+        cache_root,
         Path.cwd() / "WritersBlock Integration-Test" / "static" / "quill_tts" / "server",
     ])
     for folder in candidates:
@@ -279,15 +282,18 @@ def _resolve_kokoro_server_files() -> tuple[Path, Path]:
         if model.is_file() and voices.is_file():
             return model, voices
 
+    if os.name == "nt":
+        raise RuntimeError("Local Kokoro model files are missing; use installed Windows voices.")
+
     # Models cannot be committed to an ordinary GitHub repository (100 MB limit).
-    # Download the smaller official FP16 checkpoint lazily to the running server.
-    folder = candidates[0] if configured else candidates[1]
+    # Download the approved official full-precision checkpoint lazily to the running server.
+    folder = Path(configured).expanduser() if configured else cache_root
     folder.mkdir(parents=True, exist_ok=True)
     model = folder / "kokoro-v1.0.onnx"
     voices = folder / "voices-v1.0.bin"
     base = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
 
-    def fetch(url: str, target: Path, minimum_bytes: int) -> None:
+    def fetch(url: str, target: Path, minimum_bytes: int, expected_sha256: str) -> None:
         if target.is_file() and target.stat().st_size >= minimum_bytes:
             return
         import requests
@@ -301,17 +307,21 @@ def _resolve_kokoro_server_files() -> tuple[Path, Path]:
                             out.write(chunk)
             if temporary.stat().st_size < minimum_bytes:
                 raise RuntimeError(f"Incomplete voice model download: {target.name}")
+            import hashlib
+            with temporary.open('rb') as asset_stream:
+                if hashlib.file_digest(asset_stream,'sha256').hexdigest()!=expected_sha256:
+                    raise RuntimeError('Voice asset integrity verification failed.')
             temporary.replace(target)
         finally:
             temporary.unlink(missing_ok=True)
 
-    fetch(base + "kokoro-v1.0.fp16.onnx", model, 100_000_000)
-    fetch(base + "voices-v1.0.bin", voices, 20_000_000)
+    fetch(base + "kokoro-v1.0.onnx", model, 300_000_000, "beb0d1848dee9a49da392cc3df26958d46cfa35d321edf434f52949153f0df3a")
+    fetch(base + "voices-v1.0.bin", voices, 20_000_000, "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d")
     return model, voices
 
 
 @lru_cache(maxsize=1)
-def _load_kokoro_engine() -> Any:
+def _cached_kokoro_engine() -> Any:
     """Load Kokoro once per Python process so normal Streamlit reruns stay fast."""
     try:
         from kokoro_onnx import Kokoro
@@ -321,8 +331,19 @@ def _load_kokoro_engine() -> Any:
         ) from exc
 
     model_path, voices_path = _resolve_kokoro_server_files()
-    return Kokoro(str(model_path), str(voices_path))
+    engine=Kokoro(str(model_path), str(voices_path))
+    from quill.kokoro_compat import ModelInputs
+    engine.sess=ModelInputs(engine.sess)
+    return engine
 
+
+
+# lru_cache alone permits concurrent cold-start misses. Serialize before cache
+# lookup so simultaneous Cloud sessions cannot overwrite downloads/load twice.
+from threading import RLock
+_KOKORO_LOAD_LOCK=RLock()
+def _load_kokoro_engine():
+    with _KOKORO_LOAD_LOCK:return _cached_kokoro_engine()
 
 def _samples_to_wav_bytes(samples: Any, sample_rate: int) -> bytes:
     """Convert Kokoro float samples to a browser-playable mono WAV."""
@@ -430,7 +451,12 @@ def _generate_quill_voice(text: str, gender: str) -> bytes:
     if not clean_text:
         return b""
 
-    engine = _load_kokoro_engine()
+    try:
+        engine = _load_kokoro_engine()
+    except Exception:
+        if os.name != "nt":raise
+        from quill.windows_voice import synthesize
+        return synthesize(clean_text,gender)
     voice = "af_heart" if str(gender or "Male").lower() == "female" else "am_michael"
 
     samples, sample_rate = engine.create(
@@ -517,10 +543,16 @@ class QuillInterfaceController:
         return self.bridge.prelude()
 
     def brief(self) -> QuillUIPayload:
+        from .modular_context import modular
+        if modular(self.project_state):
+            from .modular_controller import answer
+            return QuillUIPayload(**answer(self.project_state,'What next?'))
         result = self.bridge.guidance("what next?", self.project_state)
         return self._coach_payload(result, source="coach")
 
     def detail(self) -> QuillUIPayload:
+        from .modular_context import modular
+        if modular(self.project_state):return self.brief()
         result = self.bridge.guidance(
             "explain why",
             self.project_state,
@@ -535,6 +567,10 @@ class QuillInterfaceController:
         project_id: Optional[str] = None,
         project_name: Optional[str] = None,
     ) -> QuillUIPayload:
+        from .modular_context import modular
+        if modular(self.project_state):
+            from .modular_controller import answer
+            return QuillUIPayload(**answer(self.project_state,_clean(question) or 'What next?'))
         clean_question = _clean(question)
         if not clean_question:
             return self.brief()
@@ -809,6 +845,8 @@ def _remember_quill_creative_suggestion(
         "workaround_guidance",
         "project_context",
         "working_object_context",
+        "provider_error",
+        "operations",
     }
     if source in blocked_sources or len(response) < 60:
         return
@@ -827,6 +865,8 @@ def _remember_quill_creative_suggestion(
 
 def _revise_existing_quill_concept(state: MutableMapping[str, Any], request: str) -> Optional[QuillUIPayload]:
     """Route explicit concept feedback to the existing editable concept, not stage advice."""
+    from .modular_context import modular
+    if modular(state):return None  # Modular revisions remain explicit Quill proposals.
     if state.get("starting_source_mode") != "Quill Assisted":
         return None
     format_id = str(state.get("active_format_id") or "")
@@ -929,6 +969,11 @@ def render_quill_studio_coach(
 
     st = st_module
     state = st.session_state
+    from .modular_context import modular,prepare
+    if modular(state):
+        prepare(state)
+        if credit_manager is not None:state['_wbs_quill_credit_manager']=credit_manager
+        if usage_logger is not None:state['_wbs_quill_usage_logger']=usage_logger
     initialize_quill_state(state)
 
     active_name = _clean(display_name) or _clean(state.get(DISPLAY_NAME_KEY, ""))
@@ -952,6 +997,8 @@ def render_quill_studio_coach(
         state[LAST_SPOKEN_KEY] = ""
         state[PRELUDE_SEEN_KEY] = True
 
+    if modular(state):
+        st.markdown('<style>div[data-testid="stColumn"]:has(> div > div .wbs-quill-v18-marker){max-height:calc(100dvh - 7.25rem)!important;overflow-y:auto!important;} div[data-testid="stColumn"]:has(> div > div .wbs-quill-v18-marker) .wbs-quill-v11-chat{height:clamp(90px,20vh,220px)!important;} </style>',unsafe_allow_html=True)
     active_bridge = bridge or QuillRuntimeBridge(agent=agent, display_name=active_name)
     controller = QuillInterfaceController(active_bridge, state)
 
@@ -981,6 +1028,9 @@ def render_quill_studio_coach(
         div[data-testid="stColumn"]:has(.wbs-quill-v18-marker) {{
             position: fixed !important;
             top: 6.5rem !important;
+            max-height: calc(100dvh - 7.25rem) !important;
+            overflow-y: auto !important;
+            overscroll-behavior: contain;
             right: 1.25rem !important;
             width: 330px !important;
             min-width: 330px !important;
@@ -1000,6 +1050,10 @@ def render_quill_studio_coach(
             box-shadow: none !important;
             background: transparent !important;
         }}
+
+        div[data-testid="stColumn"]:has(.wbs-quill-v18-marker) label p,
+        div[data-testid="stColumn"]:has(.wbs-quill-v18-marker) [data-testid="stCaptionContainer"],
+        div[data-testid="stColumn"]:has(.wbs-quill-v18-marker) summary p {{ color: #F3F4F6 !important; }}
 
         /* Collapsed Quill tab — intentionally very small so it does not cover work. */
         div[data-testid="stColumn"]:has(.wbs-quill-v18-collapsed-marker) {{
@@ -1125,6 +1179,8 @@ def render_quill_studio_coach(
             min-height: 30px !important;
             background: #22262D !important;
             color: #FFFFFF !important;
+            -webkit-text-fill-color: #FFFFFF !important;
+            opacity: 1 !important;
             border: 1px solid #4A5360 !important;
             border-radius: 7px !important;
             box-shadow: none !important;
@@ -1217,10 +1273,12 @@ def render_quill_studio_coach(
 
         div[data-testid="stColumn"]:has(.wbs-quill-v18-marker) textarea {{
             min-height: 128px !important;
-            max-height: 180px !important;
+            max-height: none !important;
             resize: vertical !important;
             background: #1F2228 !important;
             color: #FFFFFF !important;
+            -webkit-text-fill-color: #FFFFFF !important;
+            opacity: 1 !important;
             border: 1px solid #4A5360 !important;
             font-size: .82rem !important;
             line-height: 1.35 !important;
@@ -1297,17 +1355,27 @@ def render_quill_studio_coach(
             unsafe_allow_html=True,
         )
 
+        if state.get('_wbs_quill_test_mode'):
+            from quill.test_connection import render as render_test_connection
+            render_test_connection(st,state)
+
         # Row 1: full-width capability reference so the complete label is visible.
         if hasattr(st, "popover"):
             with st.popover("WHAT CAN QUILL DO?", use_container_width=True):
                 st.markdown(
                     """
-**Quill can collaborate with you on:**
+**Quill — Your Frontline Editor-in-Chief**
+
+**Creative/editorial and complete WBS operational assistance:**
 
 - Plot direction and alternate story paths
 - Character development, motivation, and interaction
 - Conflict, tension, stakes, and scene ideas
-- Dialogue choices and character voice- Pacing, structure, and scene order
+- Dialogue choices and character voice
+- Pacing, structure, and scene order
+- Actual WBS controls, all six stages, saving and revisions
+- Manuscript editing, image insertion, Integrity Review and exports
+- Troubleshooting current project requirements without bypassing approvals
 - Continuity and story logic
 - Tone, atmosphere, and style
 - Twists, reveals, endings, and “what if?” ideas
@@ -1349,7 +1417,8 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                 state[VOICE_ENABLED_KEY] = new_voice_state
 
                 if new_voice_state:
-                    state[LAST_SPOKEN_KEY] = str(state.get(LAST_RESPONSE_KEY, "") or "")
+                    state[LAST_SPOKEN_KEY] = ""
+                    state["_wbs_quill_voice_replay"] = True
                 else:
                     state[VOICE_STOP_KEY] = True
                 st.rerun()
@@ -1387,6 +1456,7 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                 unsafe_allow_html=True,
             )
 
+        st.caption('Your Frontline Editor-in-Chief')
         st.markdown(
             '<div class="wbs-quill-v11-prompt">What would you like to ask?</div>',
             unsafe_allow_html=True,
@@ -1516,42 +1586,12 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                 unsafe_allow_html=True,
             )
 
-        # Auto-read only new Quill responses when the speaker is ON.
-        if bool(state.get(VOICE_ENABLED_KEY, False)):
-            latest_quill_text = ""
-            latest_quill_source = ""
-            for message in reversed(history):
-                if _clean(message.get("role", "")) == "assistant":
-                    latest_quill_text = str(message.get("content", "") or "").strip()
-                    latest_quill_source = _clean(message.get("source", ""))
-                    break
+        from quill.voice_playback import render as render_voice
+        render_voice(st,state,_generate_quill_voice)
 
-            if (
-                latest_quill_text
-                and latest_quill_text != str(state.get(LAST_SPOKEN_KEY, "") or "")
-            ):
-                # Mark this response before synthesis so a failure does not cause
-                # repeated model work on every unrelated Streamlit rerun.
-                state[LAST_SPOKEN_KEY] = latest_quill_text
-                try:
-                    voice_audio = _generate_quill_voice(
-                        latest_quill_text,
-                        str(state.get(VOICE_GENDER_KEY, "Male") or "Male"),
-                    )
-                    if voice_audio:
-                        state[VOICE_ERROR_KEY] = ""
-                        st.audio(
-                            voice_audio,
-                            format="audio/wav",
-                            autoplay=True,
-                        )
-                except Exception as exc:
-                    state[VOICE_ERROR_KEY] = str(exc)
-
-        voice_error = str(state.get(VOICE_ERROR_KEY, "") or "").strip()
-        if voice_error and bool(state.get(VOICE_ENABLED_KEY, False)):
-            st.caption(f"Quill voice: {voice_error}")
-
+        if modular(state):
+            from .proposal_controls import render as proposal_controls
+            proposal_controls(st,state)
         with st.form(
             key=f"{QUILL_STATE_PREFIX}chat_form",
             clear_on_submit=True,
@@ -1565,6 +1605,8 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
             submitted = st.form_submit_button("SEND")
 
         if submitted and _clean(question):
+            from .modular_context import scope as quill_scope
+            submission_scope=quill_scope(state) if modular(state) else None
             user_text = _clean(question)
             history = list(state.get(CHAT_HISTORY_KEY, []) or [])
 
@@ -1588,7 +1630,7 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
             state[CHAT_HISTORY_KEY] = history
 
             quill_credit_charge = None
-            if credit_manager is not None and credit_user_id:
+            if not modular(state) and credit_manager is not None and credit_user_id:
                 try:
                     quill_credit_charge = credit_manager.spend(
                         str(credit_user_id),
@@ -1649,7 +1691,7 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                             next_action="",
                         )
 
-                if usage_logger is not None:
+                if not modular(state) and usage_logger is not None:
                     try:
                         usage_logger(
                             "quill_question",
@@ -1671,6 +1713,8 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                         pass
                 raise
 
+            if modular(state) and quill_scope(state)!=submission_scope:
+                st.rerun()
             _remember_quill_creative_suggestion(state, user_text, payload)
             history.append({"role": "assistant", "content": payload.text, "source": payload.source})
             state[CHAT_HISTORY_KEY] = history
