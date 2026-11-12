@@ -291,7 +291,7 @@ def _resolve_kokoro_server_files() -> tuple[Path, Path]:
     folder.mkdir(parents=True, exist_ok=True)
     model = folder / "kokoro-v1.0.onnx"
     voices = folder / "voices-v1.0.bin"
-    base = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
+    base = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/"
 
     def fetch(url: str, target: Path, minimum_bytes: int, expected_sha256: str) -> None:
         if target.is_file() and target.stat().st_size >= minimum_bytes:
