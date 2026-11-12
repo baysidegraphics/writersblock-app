@@ -2,6 +2,7 @@
 from pathlib import Path
 import runpy
 from unittest.mock import patch
+from staging_preview.logo import render as render_staging_logo
 
 
 def forbidden_client(*args, **kwargs):
@@ -10,5 +11,5 @@ def forbidden_client(*args, **kwargs):
 
 # Fixture constructs per-session in-memory records and uses actual format workflows.
 # Patch scope is restored on Streamlit reruns/exits. No credential file is loaded.
-with patch('supabase.create_client', side_effect=forbidden_client), patch('google.genai.Client', side_effect=forbidden_client):
+with patch('supabase.create_client', side_effect=forbidden_client), patch('google.genai.Client', side_effect=forbidden_client), patch('quill.wbs_quill_streamlit_ui._render_quill_logo', render_staging_logo):
     runpy.run_path(str(Path(__file__).parent/'staging_preview'/'preview.py'), run_name='__main__')
