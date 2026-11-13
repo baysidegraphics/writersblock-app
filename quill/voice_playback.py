@@ -37,3 +37,6 @@ def render(st,state,synthesize):
                     audio_uri="data:audio/wav;base64,"+base64.b64encode(cache["data"]).decode("ascii")
                     st.audio(audio_uri,format="audio/wav",autoplay=changed or replay)
                 st.caption("Complete response · local speech. If Chrome blocks autoplay, click Play on the audio control. Voice is optional.")
+
+        voice_error=str(state.get(VOICE_ERROR_KEY) or "")
+        if voice_error:st.caption("Quill voice: "+voice_error)
