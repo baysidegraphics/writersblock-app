@@ -136,7 +136,7 @@ if '_staging_context' not in st.session_state:
         for component in ('title', 'manuscript', 'integrity'):
             call_format_helper('wbs_stage4_save_final_acceptance', context, component)
     st.session_state.backend = LocalBackend()
-    st.session_state[VOICE_ENABLED_KEY] = False
+    st.session_state[VOICE_ENABLED_KEY] = True
     if st.query_params.get('voice_test') in {'Male', 'Female'}:
         from quill.modular_context import prepare
         prepare(st.session_state)
