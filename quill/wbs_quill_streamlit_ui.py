@@ -1386,6 +1386,41 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                     """
                 )
 
+        # Row 3: collapse control centered directly under the speaker.
+        collapse_space, collapse_button = st.columns(
+            [3.63, 1.87],
+            vertical_alignment="center",
+        )
+        with collapse_button:
+            if st.button(
+                ">",
+                key="wbs_quill_collapse_v32",
+                help="Collapse Quill",
+                use_container_width=False,
+            ):
+                state[COLLAPSED_KEY] = True
+                st.rerun()
+        # Row 4: Quill mark left, Ask QUILL centered in the remaining header area.
+        logo_col, title_col, title_space = st.columns(
+            [2.50, 1.20, 1.80],
+            vertical_alignment="center",
+        )
+
+        with logo_col:
+            _render_quill_logo(st, width=118)
+
+        with title_col:
+            st.markdown(
+                '<div class="wbs-quill-v11-title">Ask QUILL</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.caption('Your Frontline Editor-in-Chief')
+        st.markdown(
+            '<div class="wbs-quill-v11-prompt">What would you like to ask?</div>',
+            unsafe_allow_html=True,
+        )
+
         # Row 2: Male/Female centered over the owl area; speaker at far right.
         voice_choices, voice_speaker = st.columns(
             [3.63, 1.87],
@@ -1427,40 +1462,20 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
             _browser_stop_speech()
             state[VOICE_STOP_KEY] = False
 
-        # Row 3: collapse control centered directly under the speaker.
-        collapse_space, collapse_button = st.columns(
-            [3.63, 1.87],
-            vertical_alignment="center",
-        )
-        with collapse_button:
-            if st.button(
-                ">",
-                key="wbs_quill_collapse_v32",
-                help="Collapse Quill",
-                use_container_width=False,
+        st.markdown("<style>.st-key-wbs_quill_question_entry{position:sticky!important;top:0;z-index:100;background:var(--background-color,#fff);padding:6px 0;}</style>",unsafe_allow_html=True)
+        with st.container(key="wbs_quill_question_entry"):
+            with st.form(
+                key=f"{QUILL_STATE_PREFIX}chat_form",
+                clear_on_submit=True,
             ):
-                state[COLLAPSED_KEY] = True
-                st.rerun()
-        # Row 4: Quill mark left, Ask QUILL centered in the remaining header area.
-        logo_col, title_col, title_space = st.columns(
-            [2.50, 1.20, 1.80],
-            vertical_alignment="center",
-        )
+                question = st.text_input(
+                    "Message Quill",
+                    placeholder="Type your question here… then press Enter",
+                    max_chars=4000,
+                    label_visibility="collapsed",
+                )
+                submitted = st.form_submit_button("SEND")
 
-        with logo_col:
-            _render_quill_logo(st, width=118)
-
-        with title_col:
-            st.markdown(
-                '<div class="wbs-quill-v11-title">Ask QUILL</div>',
-                unsafe_allow_html=True,
-            )
-
-        st.caption('Your Frontline Editor-in-Chief')
-        st.markdown(
-            '<div class="wbs-quill-v11-prompt">What would you like to ask?</div>',
-            unsafe_allow_html=True,
-        )
 
         # A loaded/saved project is already an active WritersBlock context.
         # Never reinterpret a project question as first-use name entry.
@@ -1592,18 +1607,6 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
         if modular(state):
             from .proposal_controls import render as proposal_controls
             proposal_controls(st,state)
-        with st.form(
-            key=f"{QUILL_STATE_PREFIX}chat_form",
-            clear_on_submit=True,
-        ):
-            question = st.text_input(
-                "Message Quill",
-                placeholder="Type your question here… then press Enter",
-                max_chars=4000,
-                label_visibility="collapsed",
-            )
-            submitted = st.form_submit_button("SEND")
-
         if submitted and _clean(question):
             from .modular_context import scope as quill_scope
             submission_scope=quill_scope(state) if modular(state) else None
