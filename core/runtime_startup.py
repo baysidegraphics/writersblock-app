@@ -28,4 +28,5 @@ def customer_backend(state,secrets,environ=None,client_factory=None):
     if not isinstance(state.get('backend'),GeminiWriterBackend) or state.get('_wbs_gemini_configuration')!=fingerprint:
         state['backend']=GeminiWriterBackend(api_key=value,client_factory=client_factory)
         state['_wbs_gemini_configuration']=fingerprint
+    state['backend'].require_live_generation=True
     return state['backend']
