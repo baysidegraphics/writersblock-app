@@ -93,6 +93,21 @@ def render_scene_test(st, writer):
             if category in allowed:st.caption('Recorded error category: '+category)
         elif '_staging_live_scene_status' in st.session_state and st.session_state['_staging_live_scene_status'].startswith('FAIL'):
             st.caption('The earlier attempt did not retain provider diagnostics; its exact rejection cannot be recovered from this receipt.')
+    # Read the EXISTING receipts only. No provider request or allowance mutation.
+    with st.expander('Recorded AI request diagnostics - read only',expanded=True):
+        for kind in ('scene','quill'):
+            saved=receipt.with_name(AUTHORIZATION+'-'+kind+'.json')
+            try:record=json.loads(saved.read_text(encoding='utf-8'))
+            except (OSError,ValueError):record={}
+            from quill.provider_errors import STATUSES,REASONS
+            allowed=STATUSES|REASONS|{'CONNECTION_ERROR','CONNECTION_TIMEOUT','READ_TIMEOUT','CLIENT_ERROR','SERVER_ERROR','REQUEST_GUARD','OTHER_ERROR','NON_JSON_HTTP_ERROR','AUTH_METHOD_UNSUPPORTED','REQUEST_FIELD_INVALID','MODEL_ACCESS_RESTRICTED','FREE_TIER_UNAVAILABLE'}
+            safe={'operation':kind,'attempt_consumed':record.get('attempt_consumed') is True}
+            if type(record.get('http_status')) is int:safe['http_status']=record['http_status']
+            if record.get('error_category') in allowed:safe['error_category']=record['error_category']
+            if record.get('status') in ('FAIL','RESPONSE_RECEIVED'):safe['status']=record['status']
+            if type(record.get('has_text')) is bool:safe['has_text']=record['has_text']
+            if 'error_category' not in safe and 'http_status' not in safe:safe['diagnostic']='No HTTP status or category retained in this receipt'
+            st.json(safe)
     status=st.session_state.get('_staging_live_scene_status')
     if status:
         if status.startswith('PASS'):
