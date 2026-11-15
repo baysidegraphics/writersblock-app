@@ -5,6 +5,12 @@ from unittest.mock import patch
 from staging_preview.logo import render as render_staging_logo
 from staging_preview.kokoro_diagnostics import synthesize as staging_synthesize
 from staging_preview import live_ai
+# Refresh only a stale Python gateway import; preserve all session data/receipts.
+from importlib import reload
+if getattr(live_ai, 'GATEWAY_REVISION', '') != 'quill-only-acceptance-20261115':
+    live_ai = reload(live_ai)
+if live_ai.GATEWAY_REVISION != 'quill-only-acceptance-20261115':
+    raise RuntimeError('The staging Quill-only gateway update has not loaded; no provider request is permitted.')
 
 def forbidden_client(*args, **kwargs):
     raise PermissionError("Staging does not permit remote database clients.")
