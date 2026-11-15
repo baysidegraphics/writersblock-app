@@ -79,5 +79,5 @@ def answer(state,question):
     if topics:return '\n\n'.join(g[topic] for topic in dict.fromkeys(topics))
     # Exact installed labels can be explained without inventing operations.
     matches=[label for values in catalog(state).values() for label in values if len(label)>3 and label.lower() in q]
-    if matches:return 'Installed control: '+matches[0]+'. '+g['troubleshoot']+'\nAsk about saving, editing, plot selection, image insertion, integrity or export for its exact workflow.'
+    if matches and re.search(r'\b(button|control|dropdown|drop-down|setting|option|field|menu|click)\b',q):return 'Installed control: '+matches[0]+'. '+g['troubleshoot']+'\nAsk about saving, editing, plot selection, image insertion, integrity or export for its exact workflow.'
     return None
