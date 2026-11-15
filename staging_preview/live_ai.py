@@ -47,3 +47,30 @@ def backend(state,secrets):
         client=real_sdk_client(api_key=kwargs['api_key'],vertexai=False,http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1),timeout=30000))
         return SimpleNamespace(models=LimitedModels(client.models,folder))
     return customer_backend(scratch,{'GEMINI_API_KEY':key},environ={},client_factory=factory)
+
+
+def render_scene_test(st, writer):
+    """Stage-3-only owner control; result is not author manuscript content."""
+    receipt=Path.home()/'.cache'/'wbs'/'live-acceptance'/(AUTHORIZATION+'-scene.json')
+    used=receipt.exists()
+    st.markdown('### Staging Live Scene Test')
+    st.caption('One real Gemini scene request only, within the approved combined $1 allowance. No retries. The result is not saved to your chapter. Quill retains its separate one-request allowance.')
+    if st.button('Test ONE Real Gemini Scene',key='_staging_live_scene_test',disabled=used):
+        try:
+            text=writer.execute_recursive_draft_chunk(
+                'Write a brief fictional scene: a gardener finds a blue notebook, asks a neighbor about it, and decides to return it. About 120 words. Invented test characters only.',
+                'Synthetic staging acceptance only. No real people or historical claims.',
+                'Novel / Prose / Novella','Warm and clear')
+            if not str(text or '').strip():raise ValueError('Empty scene')
+            st.session_state['_staging_live_scene_result']=str(text)
+            st.session_state['_staging_live_scene_status']='PASS: real scene response received; chapter text unchanged.'
+        except Exception:
+            st.session_state['_staging_live_scene_status']='FAIL: scene request did not produce a usable result. No retry was made; chapter text is unchanged.'
+        st.rerun()
+    if used:st.caption('The one scene attempt has been consumed. This control cannot send another request.')
+    status=st.session_state.get('_staging_live_scene_status')
+    if status:
+        if status.startswith('PASS'):
+            st.success(status)
+            st.text_area('Live Gemini scene test result (not saved to chapter)',value=st.session_state.get('_staging_live_scene_result',''),height=260,disabled=True)
+        else:st.error(status)
