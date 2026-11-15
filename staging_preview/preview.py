@@ -15,7 +15,7 @@ for path in (ROOT, ROOT / 'staging_preview'):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 st.set_page_config(page_title='WBS Local Isolated Staging', layout='wide')
-st.warning('TEMPORARY SYNTHETIC PREVIEW — no Supabase or production connection. Saving and revisions remain in this browser session only. Synthetic test data resets on server restart, session loss or reconnect. Gemini and Quill AI responses are simulated; Kokoro speech remains available.')
+st.warning('PRIVATE LIVE AI ACCEPTANCE: synthetic in-memory projects only; data resets on restart. One real scene and one real Quill request use the commercial backend. No retries or other generation operations. Kokoro is unchanged.')
 from synthetic_projects import project, install_exports
 from offline_app import APP_TREE
 from test_extension_journeys import install_services
@@ -135,7 +135,7 @@ if '_staging_context' not in st.session_state:
         call_format_helper('wbs_stage4_accept_and_save', context)
         for component in ('title', 'manuscript', 'integrity'):
             call_format_helper('wbs_stage4_save_final_acceptance', context, component)
-    st.session_state.backend = LocalBackend()
+    st.session_state.backend = None
     st.session_state[VOICE_ENABLED_KEY] = True
     if st.query_params.get('voice_test') in {'Male', 'Female'}:
         from quill.modular_context import prepare
@@ -152,6 +152,11 @@ if '_staging_context' not in st.session_state:
     st.session_state['_staging_context'] = context
     st.session_state['_staging_db'] = db
     st.session_state['_staging_original'] = copy.deepcopy(saved)
+from staging_preview.live_ai import backend as live_backend
+try:
+    st.session_state.backend = live_backend(st.session_state, st.secrets)
+except ValueError as error:
+    st.error(str(error)); st.stop()
 context = st.session_state['_staging_context']
 db = st.session_state['_staging_db']
 context['_wbs_scene_total_views'] = []
@@ -161,13 +166,13 @@ def synthetic_integrity(text):
         raise RuntimeError('Injected synthetic integrity outage')
     from core.integrity_review import numbered_context
     annotated = numbered_context(st.session_state)
-    return 'OVERALL STATUS: PASS\nSYNTHETIC MOCK ONLY — format boundaries reviewed offline.\n' + annotated
+    return 'OVERALL STATUS: PASS\nSYNTHETIC MOCK ONLY â€” format boundaries reviewed offline.\n' + annotated
 context['run_project_integrity_final_review'] = synthetic_integrity
 context['render_project_integrity_report_html'] = lambda report, **kw: '<pre>' + __import__('html').escape(report) + '</pre>'
 context['project_integrity_review_applies'] = lambda *a: True
 from synthetic_projects import install_app_definitions
 install_app_definitions(context, {'persist_project_integrity_in_current_version'})
-st.caption('LOCAL ISOLATED STAGING · synthetic session · in-memory database · mocked AI · no real authentication · RUN ' + os.environ.get('WBS_LOCAL_STAGING_RUN', 'AppTest'))
+st.caption('LOCAL ISOLATED STAGING Â· synthetic session Â· in-memory database Â· REAL bounded Gemini/Quill Â· no real authentication Â· RUN ' + os.environ.get('WBS_LOCAL_STAGING_RUN', 'AppTest'))
 
 def render_quill(**kwargs):
     bridge = kwargs.get('bridge')
