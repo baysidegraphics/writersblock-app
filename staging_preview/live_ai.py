@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from google import genai
 from google.genai import types
-SDK_CLIENT=genai.Client
+from google.genai.client import Client as SDK_CLIENT
 LOCK=threading.Lock()
 AUTHORIZATION='wbs-final-live-20261115'
 
@@ -43,6 +43,7 @@ def backend(state,secrets):
     scratch=state.setdefault('_wbs_acceptance_backend_state',{})
     folder=Path.home()/'.cache'/'wbs'/'live-acceptance'
     def factory(**kwargs):
-        client=SDK_CLIENT(api_key=kwargs['api_key'],vertexai=False,http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1),timeout=30000))
+        from google.genai.client import Client as real_sdk_client
+        client=real_sdk_client(api_key=kwargs['api_key'],vertexai=False,http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1),timeout=30000))
         return SimpleNamespace(models=LimitedModels(client.models,folder))
     return customer_backend(scratch,{'GEMINI_API_KEY':key},environ={},client_factory=factory)
