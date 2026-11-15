@@ -247,4 +247,7 @@ stage = st.session_state.project_stage
 name = {'Intake': 'concept_development', 'Sandbox': 'plot_architecture', 'Plot Architect': 'scene_scripting', 'Publisher Assessment': 'publisher_assessment'}.get(stage, 'final_manuscript' if st.session_state.get('export_view') else 'editorial_review')
 if name == 'final_manuscript' and st.query_params.get('legacy_final') == '1':
     name = 'editorial_review'
+if name == 'scene_scripting':
+    from staging_preview.live_ai import render_scene_test
+    render_scene_test(st, st.session_state.backend)
 run_workflow(name, context)
