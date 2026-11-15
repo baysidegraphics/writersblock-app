@@ -8,9 +8,10 @@ from google.genai import types
 from google.genai.client import Client as SDK_CLIENT
 LOCK=threading.Lock()
 AUTHORIZATION='wbs-final-live-20261115'
-LIVE_REQUESTS_SUSPENDED=True  # Acceptance stopped at first failure; no more live calls.
+LIVE_REQUESTS_SUSPENDED=False  # Explicit ONE Quill-only acceptance authorization, maximum $0.25.
+QUILL_ONLY_AUTHORIZATION='wbs-quill-only-acceptance-20261115'
 ACCEPTANCE_ID='wbs-coordinated-acceptance-20261115'
-GATEWAY_REVISION='coordinated-acceptance-stopped-20261115'
+GATEWAY_REVISION='quill-only-acceptance-20261115'
 from contextvars import ContextVar
 DIAGNOSTIC=ContextVar('wbs_single_diagnostic',default=False)
 
@@ -28,17 +29,12 @@ class LimitedModels:
         if LIVE_REQUESTS_SUSPENDED:
             raise PermissionError("Live provider calls are suspended pending explicit final acceptance approval.")
         kind=operation()
-        if kind not in ('scene','quill'):
-            raise PermissionError('Only the coordinated scene and conditional Quill acceptance are authorized.')
-        request_id=ACCEPTANCE_ID
+        if kind!='quill':
+            raise PermissionError('Only ONE Quill request is authorized. Scene and diagnostic requests are forbidden.')
+        request_id=QUILL_ONLY_AUTHORIZATION
         system=getattr(config,'system_instruction',None) if config is not None else None
         if system is not None and (not isinstance(system,str) or len(system.encode('utf-8'))>1024):
             raise PermissionError('Acceptance system instruction exceeds its approved budget.')
-        if kind=='quill':
-            try:scene=json.loads((self._folder/(request_id+'-scene.json')).read_text(encoding='utf-8'))
-            except (OSError,ValueError):scene={}
-            if scene.get('scene_acceptance_passed') is not True:
-                raise PermissionError('Quill acceptance is blocked until the scene succeeds.')
         if model!='gemini-2.5-flash' or extra or not isinstance(contents,str) or len(contents.encode('utf-8'))>64000:
             raise PermissionError('Live acceptance request exceeds its approved scope or input limit.')
         # Fail before any request if quota was already used, including a failed request.
@@ -79,6 +75,13 @@ class LimitedModels:
         # Record response shape only, never generated prose, prompts or credentials.
         diagnostic={'operation':kind,'attempt_consumed':True,'status':'RESPONSE_RECEIVED',
                     'has_text':bool(str(getattr(result,'text','') or '').strip())}
+        diagnostic['model_requested']=model
+        version=str(getattr(result,'model_version','') or '')
+        import re
+        if re.fullmatch(r'gemini-[A-Za-z0-9_.-]{1,100}',version):diagnostic['model_version']=version
+        usage=getattr(result,'usage_metadata',None)
+        if usage is not None:
+            diagnostic['usage_tokens']={k:int(getattr(usage,k,0) or 0) for k in ('prompt_token_count','candidates_token_count','thoughts_token_count','total_token_count')}
         (self._folder/(request_id+'-'+kind+'.json')).write_text(json.dumps(diagnostic),encoding='utf-8')
         return result
 
@@ -108,10 +111,10 @@ def render_scene_test(st, writer):
     transport=getattr(getattr(owner,'_api_client',None),'_httpx_client',None)
     ready=owner is not None and transport is not None and not transport.is_closed
     st.caption('Client lifecycle: '+('READY - SDK owner retained; HTTP transport open.' if ready else 'NOT READY - client ownership/transport requires correction.'))
-    st.caption('Coordinated acceptance STOPPED: scene passed, Quill returned local operational guidance instead of AI. All further provider requests are suspended.')
+    st.caption('Current authorization: ONE real Quill editorial response, maximum $0.25. Scene and diagnostic requests remain blocked. No previous allowance is reset.')
     st.markdown('### Staging Live Scene Test')
     st.caption('One real scene and, only if successful, one real Quill response. Maximum combined $0.25. No retries or fallback. Results do not replace saved chapter text.')
-    if st.button('Test ONE Real Gemini Scene',key='_staging_live_scene_test',disabled=used or LIVE_REQUESTS_SUSPENDED):
+    if st.button('Test ONE Real Gemini Scene',key='_staging_live_scene_test',disabled=True):
         try:
             text=writer.execute_recursive_draft_chunk(
                 'Write a brief fictional scene: a gardener finds a blue notebook, asks a neighbor about it, and decides to return it. About 120 words. Invented test characters only.',
@@ -156,6 +159,7 @@ def render_scene_test(st, writer):
             if 'error_category' not in safe and 'http_status' not in safe:safe['diagnostic']='No HTTP status or category retained in this receipt'
             st.json(safe)
     render_final_diagnostic(st, writer)
+    render_quill_only_receipt(st)
     status=st.session_state.get('_staging_acceptance_scene_status')
     if status:
         if status.startswith('PASS'):
@@ -181,3 +185,13 @@ def render_final_diagnostic(st,writer):
         except (OSError,ValueError):data={'status':'RECEIPT_UNREADABLE'}
         safe={k:data[k] for k in ('operation','attempt_consumed','status','http_status','error_category','exception_type','http_response_present','local_error_detail','failure_frames','has_text') if k in data}
         st.json(safe)
+
+
+def render_quill_only_receipt(st):
+    file=Path.home()/'.cache'/'wbs'/'live-acceptance'/(QUILL_ONLY_AUTHORIZATION+'-quill.json')
+    if file.exists():
+        try:data=json.loads(file.read_text(encoding='utf-8'))
+        except (OSError,ValueError):return
+        st.markdown('### Quill-only acceptance receipt')
+        fields=('operation','attempt_consumed','status','has_text','model_requested','model_version','usage_tokens','http_status','error_category','exception_type','local_error_detail')
+        st.json({k:data[k] for k in fields if k in data})
