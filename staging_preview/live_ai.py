@@ -8,9 +8,9 @@ from google.genai import types
 from google.genai.client import Client as SDK_CLIENT
 LOCK=threading.Lock()
 AUTHORIZATION='wbs-final-live-20261115'
-LIVE_REQUESTS_SUSPENDED=False  # Explicit coordinated acceptance authorization: two bounded requests.
+LIVE_REQUESTS_SUSPENDED=True  # Acceptance stopped at first failure; no more live calls.
 ACCEPTANCE_ID='wbs-coordinated-acceptance-20261115'
-GATEWAY_REVISION='coordinated-acceptance-20261115'
+GATEWAY_REVISION='coordinated-acceptance-stopped-20261115'
 from contextvars import ContextVar
 DIAGNOSTIC=ContextVar('wbs_single_diagnostic',default=False)
 
@@ -108,7 +108,7 @@ def render_scene_test(st, writer):
     transport=getattr(getattr(owner,'_api_client',None),'_httpx_client',None)
     ready=owner is not None and transport is not None and not transport.is_closed
     st.caption('Client lifecycle: '+('READY - SDK owner retained; HTTP transport open.' if ready else 'NOT READY - client ownership/transport requires correction.'))
-    st.caption('Authorized coordinated acceptance: one scene, then one Quill only after scene success; maximum combined $0.25. Previous allowances remain consumed.')
+    st.caption('Coordinated acceptance STOPPED: scene passed, Quill returned local operational guidance instead of AI. All further provider requests are suspended.')
     st.markdown('### Staging Live Scene Test')
     st.caption('One real scene and, only if successful, one real Quill response. Maximum combined $0.25. No retries or fallback. Results do not replace saved chapter text.')
     if st.button('Test ONE Real Gemini Scene',key='_staging_live_scene_test',disabled=used or LIVE_REQUESTS_SUSPENDED):
