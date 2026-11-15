@@ -8,6 +8,7 @@ from google.genai import types
 from google.genai.client import Client as SDK_CLIENT
 LOCK=threading.Lock()
 AUTHORIZATION='wbs-final-live-20261115'
+LIVE_REQUESTS_SUSPENDED=True  # Owner instruction: no more provider calls before fresh approval.
 from contextvars import ContextVar
 DIAGNOSTIC=ContextVar('wbs_single_diagnostic',default=False)
 
@@ -22,6 +23,8 @@ def operation():
 class LimitedModels:
     def __init__(self,models,folder):self._models=models;self._folder=folder
     def generate_content(self,*,model,contents,config=None,**extra):
+        if LIVE_REQUESTS_SUSPENDED:
+            raise PermissionError("Live provider calls are suspended pending explicit final acceptance approval.")
         kind=operation()
         if model!='gemini-2.5-flash' or extra or not isinstance(contents,str) or len(contents.encode('utf-8'))>64000:
             raise PermissionError('Live acceptance request exceeds its approved scope or input limit.')
@@ -88,9 +91,14 @@ def render_scene_test(st, writer):
     """Stage-3-only owner control; result is not author manuscript content."""
     receipt=Path.home()/'.cache'/'wbs'/'live-acceptance'/(AUTHORIZATION+'-scene.json')
     used=receipt.exists()
+    owner=getattr(writer.client,'_sdk_client',None)
+    transport=getattr(getattr(owner,'_api_client',None),'_httpx_client',None)
+    ready=owner is not None and transport is not None and not transport.is_closed
+    st.caption('Client lifecycle: '+('READY - SDK owner retained; HTTP transport open.' if ready else 'NOT READY - client ownership/transport requires correction.'))
+    st.caption('Provider requests: SUSPENDED pending explicit final acceptance approval. No allowance is reset.')
     st.markdown('### Staging Live Scene Test')
     st.caption('One real Gemini scene request only, within the approved combined $1 allowance. No retries. The result is not saved to your chapter. Quill retains its separate one-request allowance.')
-    if st.button('Test ONE Real Gemini Scene',key='_staging_live_scene_test',disabled=used):
+    if st.button('Test ONE Real Gemini Scene',key='_staging_live_scene_test',disabled=used or LIVE_REQUESTS_SUSPENDED):
         try:
             text=writer.execute_recursive_draft_chunk(
                 'Write a brief fictional scene: a gardener finds a blue notebook, asks a neighbor about it, and decides to return it. About 120 words. Invented test characters only.',
@@ -144,7 +152,7 @@ def render_final_diagnostic(st,writer):
     receipt=Path.home()/'.cache'/'wbs'/'live-acceptance'/(AUTHORIZATION+'-diagnostic-20261115.json')
     st.markdown('### Final Authorized Gemini Diagnostic')
     st.caption('Separate one-request authorization, maximum $0.25; 128 output tokens, no retry or fallback. Prior scene/Quill allowances are not reset.')
-    if st.button('Run ONE Authorized Gemini Diagnostic',key='_staging_final_diagnostic',disabled=receipt.exists()):
+    if st.button('Run ONE Authorized Gemini Diagnostic',key='_staging_final_diagnostic',disabled=receipt.exists() or LIVE_REQUESTS_SUSPENDED):
         token=DIAGNOSTIC.set(True)
         try:
             writer.client.models.generate_content(model='gemini-2.5-flash',contents='Reply with exactly: WBS connection verified.')
