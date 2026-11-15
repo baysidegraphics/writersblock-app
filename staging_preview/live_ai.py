@@ -8,7 +8,9 @@ from google.genai import types
 from google.genai.client import Client as SDK_CLIENT
 LOCK=threading.Lock()
 AUTHORIZATION='wbs-final-live-20261115'
-LIVE_REQUESTS_SUSPENDED=True  # Owner instruction: no more provider calls before fresh approval.
+LIVE_REQUESTS_SUSPENDED=False  # Explicit coordinated acceptance authorization: two bounded requests.
+ACCEPTANCE_ID='wbs-coordinated-acceptance-20261115'
+GATEWAY_REVISION='coordinated-acceptance-20261115'
 from contextvars import ContextVar
 DIAGNOSTIC=ContextVar('wbs_single_diagnostic',default=False)
 
@@ -26,13 +28,24 @@ class LimitedModels:
         if LIVE_REQUESTS_SUSPENDED:
             raise PermissionError("Live provider calls are suspended pending explicit final acceptance approval.")
         kind=operation()
+        if kind not in ('scene','quill'):
+            raise PermissionError('Only the coordinated scene and conditional Quill acceptance are authorized.')
+        request_id=ACCEPTANCE_ID
+        system=getattr(config,'system_instruction',None) if config is not None else None
+        if system is not None and (not isinstance(system,str) or len(system.encode('utf-8'))>1024):
+            raise PermissionError('Acceptance system instruction exceeds its approved budget.')
+        if kind=='quill':
+            try:scene=json.loads((self._folder/(request_id+'-scene.json')).read_text(encoding='utf-8'))
+            except (OSError,ValueError):scene={}
+            if scene.get('scene_acceptance_passed') is not True:
+                raise PermissionError('Quill acceptance is blocked until the scene succeeds.')
         if model!='gemini-2.5-flash' or extra or not isinstance(contents,str) or len(contents.encode('utf-8'))>64000:
             raise PermissionError('Live acceptance request exceeds its approved scope or input limit.')
         # Fail before any request if quota was already used, including a failed request.
         with LOCK:
             self._folder.mkdir(parents=True,exist_ok=True)
             try:
-                with (self._folder/(AUTHORIZATION+'-'+kind+'.json')).open('x',encoding='utf-8') as receipt:
+                with (self._folder/(request_id+'-'+kind+'.json')).open('x',encoding='utf-8') as receipt:
                     json.dump({'operation':kind,'attempt_consumed':True,'utc':datetime.now(timezone.utc).isoformat()},receipt)
             except FileExistsError:raise PermissionError('This live acceptance request allowance was already consumed.') from None
         bounded=types.GenerateContentConfig(max_output_tokens=128 if kind=='diagnostic-20261115' else 1024,thinking_config=types.ThinkingConfig(thinking_budget=0),http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)))
@@ -60,13 +73,13 @@ class LimitedModels:
             # Locations only, never exception messages, source lines or frame locals.
             import traceback
             diagnostic['failure_frames']=[{'file':Path(f.filename).name,'line':f.lineno,'function':f.name} for f in traceback.extract_tb(error.__traceback__)[-8:]]
-            (self._folder/(AUTHORIZATION+'-'+kind+'.json')).write_text(json.dumps(diagnostic),encoding='utf-8')
+            (self._folder/(request_id+'-'+kind+'.json')).write_text(json.dumps(diagnostic),encoding='utf-8')
             print('WBS_LIVE_AI_DIAGNOSTIC '+json.dumps(diagnostic),flush=True)
             raise
         # Record response shape only, never generated prose, prompts or credentials.
         diagnostic={'operation':kind,'attempt_consumed':True,'status':'RESPONSE_RECEIVED',
                     'has_text':bool(str(getattr(result,'text','') or '').strip())}
-        (self._folder/(AUTHORIZATION+'-'+kind+'.json')).write_text(json.dumps(diagnostic),encoding='utf-8')
+        (self._folder/(request_id+'-'+kind+'.json')).write_text(json.dumps(diagnostic),encoding='utf-8')
         return result
 
 def backend(state,secrets):
@@ -76,28 +89,28 @@ def backend(state,secrets):
     from core.runtime_startup import customer_backend
     scratch=state.setdefault('_wbs_acceptance_backend_state',{})
     previous=scratch.get('backend')
-    if previous is not None and getattr(getattr(previous,'client',None),'_sdk_client',None) is None:
+    if previous is not None and (getattr(getattr(previous,'client',None),'_sdk_client',None) is None or getattr(previous.client,'_gateway_revision',None)!=GATEWAY_REVISION):
         # Replace only the old orphaned wrapper. Never touch request receipts.
         scratch.pop('backend',None)
     folder=Path.home()/'.cache'/'wbs'/'live-acceptance'
     def factory(**kwargs):
         from google.genai.client import Client as real_sdk_client
         client=real_sdk_client(api_key=kwargs['api_key'],vertexai=False,http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1),timeout=30000))
-        return SimpleNamespace(models=LimitedModels(client.models,folder),_sdk_client=client)
+        return SimpleNamespace(models=LimitedModels(client.models,folder),_sdk_client=client,_gateway_revision=GATEWAY_REVISION)
     return customer_backend(scratch,{'GEMINI_API_KEY':key},environ={},client_factory=factory)
 
 
 def render_scene_test(st, writer):
     """Stage-3-only owner control; result is not author manuscript content."""
-    receipt=Path.home()/'.cache'/'wbs'/'live-acceptance'/(AUTHORIZATION+'-scene.json')
+    receipt=Path.home()/'.cache'/'wbs'/'live-acceptance'/(ACCEPTANCE_ID+'-scene.json')
     used=receipt.exists()
     owner=getattr(writer.client,'_sdk_client',None)
     transport=getattr(getattr(owner,'_api_client',None),'_httpx_client',None)
     ready=owner is not None and transport is not None and not transport.is_closed
     st.caption('Client lifecycle: '+('READY - SDK owner retained; HTTP transport open.' if ready else 'NOT READY - client ownership/transport requires correction.'))
-    st.caption('Provider requests: SUSPENDED pending explicit final acceptance approval. No allowance is reset.')
+    st.caption('Authorized coordinated acceptance: one scene, then one Quill only after scene success; maximum combined $0.25. Previous allowances remain consumed.')
     st.markdown('### Staging Live Scene Test')
-    st.caption('One real Gemini scene request only, within the approved combined $1 allowance. No retries. The result is not saved to your chapter. Quill retains its separate one-request allowance.')
+    st.caption('One real scene and, only if successful, one real Quill response. Maximum combined $0.25. No retries or fallback. Results do not replace saved chapter text.')
     if st.button('Test ONE Real Gemini Scene',key='_staging_live_scene_test',disabled=used or LIVE_REQUESTS_SUSPENDED):
         try:
             text=writer.execute_recursive_draft_chunk(
@@ -105,10 +118,13 @@ def render_scene_test(st, writer):
                 'Synthetic staging acceptance only. No real people or historical claims.',
                 'Novel / Prose / Novella','Warm and clear')
             if not str(text or '').strip():raise ValueError('Empty scene')
-            st.session_state['_staging_live_scene_result']=str(text)
-            st.session_state['_staging_live_scene_status']='PASS: real scene response received; chapter text unchanged.'
+            record=json.loads(receipt.read_text(encoding='utf-8'))
+            record['scene_acceptance_passed']=True
+            receipt.write_text(json.dumps(record),encoding='utf-8')
+            st.session_state['_staging_acceptance_scene_result']=str(text)
+            st.session_state['_staging_acceptance_scene_status']='PASS: real scene response received; chapter text unchanged.'
         except Exception:
-            st.session_state['_staging_live_scene_status']='FAIL: scene request did not produce a usable result. No retry was made; chapter text is unchanged.'
+            st.session_state['_staging_acceptance_scene_status']='FAIL: scene request did not produce a usable result. No retry was made; chapter text is unchanged.'
         st.rerun()
     if used:
         st.caption('The one scene attempt has been consumed. This control cannot send another request.')
@@ -122,7 +138,7 @@ def render_scene_test(st, writer):
             from quill.provider_errors import STATUSES,REASONS
             allowed=STATUSES|REASONS|{'CONNECTION_ERROR','CONNECTION_TIMEOUT','READ_TIMEOUT','CLIENT_ERROR','SERVER_ERROR','REQUEST_GUARD','OTHER_ERROR','NON_JSON_HTTP_ERROR','AUTH_METHOD_UNSUPPORTED','REQUEST_FIELD_INVALID','MODEL_ACCESS_RESTRICTED','FREE_TIER_UNAVAILABLE'}
             if category in allowed:st.caption('Recorded error category: '+category)
-        elif '_staging_live_scene_status' in st.session_state and st.session_state['_staging_live_scene_status'].startswith('FAIL'):
+        elif '_staging_acceptance_scene_status' in st.session_state and st.session_state['_staging_acceptance_scene_status'].startswith('FAIL'):
             st.caption('The earlier attempt did not retain provider diagnostics; its exact rejection cannot be recovered from this receipt.')
     # Read the EXISTING receipts only. No provider request or allowance mutation.
     with st.expander('Recorded AI request diagnostics - read only',expanded=True):
@@ -140,11 +156,11 @@ def render_scene_test(st, writer):
             if 'error_category' not in safe and 'http_status' not in safe:safe['diagnostic']='No HTTP status or category retained in this receipt'
             st.json(safe)
     render_final_diagnostic(st, writer)
-    status=st.session_state.get('_staging_live_scene_status')
+    status=st.session_state.get('_staging_acceptance_scene_status')
     if status:
         if status.startswith('PASS'):
             st.success(status)
-            st.text_area('Live Gemini scene test result (not saved to chapter)',value=st.session_state.get('_staging_live_scene_result',''),height=260,disabled=True)
+            st.text_area('Live Gemini scene test result (not saved to chapter)',value=st.session_state.get('_staging_acceptance_scene_result',''),height=260,disabled=True)
         else:st.error(status)
 
 
@@ -152,7 +168,7 @@ def render_final_diagnostic(st,writer):
     receipt=Path.home()/'.cache'/'wbs'/'live-acceptance'/(AUTHORIZATION+'-diagnostic-20261115.json')
     st.markdown('### Final Authorized Gemini Diagnostic')
     st.caption('Separate one-request authorization, maximum $0.25; 128 output tokens, no retry or fallback. Prior scene/Quill allowances are not reset.')
-    if st.button('Run ONE Authorized Gemini Diagnostic',key='_staging_final_diagnostic',disabled=receipt.exists() or LIVE_REQUESTS_SUSPENDED):
+    if st.button('Run ONE Authorized Gemini Diagnostic',key='_staging_final_diagnostic',disabled=True):
         token=DIAGNOSTIC.set(True)
         try:
             writer.client.models.generate_content(model='gemini-2.5-flash',contents='Reply with exactly: WBS connection verified.')
