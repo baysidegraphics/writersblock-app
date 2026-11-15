@@ -72,11 +72,15 @@ def backend(state,secrets):
     # Exact protected server setting only: no environment/parent credential discovery.
     from core.runtime_startup import customer_backend
     scratch=state.setdefault('_wbs_acceptance_backend_state',{})
+    previous=scratch.get('backend')
+    if previous is not None and getattr(getattr(previous,'client',None),'_sdk_client',None) is None:
+        # Replace only the old orphaned wrapper. Never touch request receipts.
+        scratch.pop('backend',None)
     folder=Path.home()/'.cache'/'wbs'/'live-acceptance'
     def factory(**kwargs):
         from google.genai.client import Client as real_sdk_client
         client=real_sdk_client(api_key=kwargs['api_key'],vertexai=False,http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1),timeout=30000))
-        return SimpleNamespace(models=LimitedModels(client.models,folder))
+        return SimpleNamespace(models=LimitedModels(client.models,folder),_sdk_client=client)
     return customer_backend(scratch,{'GEMINI_API_KEY':key},environ={},client_factory=factory)
 
 
