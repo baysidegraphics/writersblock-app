@@ -38,6 +38,12 @@ class LimitedModels:
         except Exception as error:
             from quill.provider_errors import safe_error_summary
             diagnostic={'operation':kind,'attempt_consumed':True,'status':'FAIL',**safe_error_summary(error)}
+            known={'TypeError','AttributeError','ValueError','RuntimeError','PermissionError','AssertionError','ClientError','ServerError','ConnectError','ConnectTimeout','ReadTimeout','ValidationError'}
+            diagnostic['exception_type']=type(error).__name__ if type(error).__name__ in known else 'OtherException'
+            diagnostic['http_response_present']=getattr(error,'response',None) is not None
+            # Locations only, never exception messages, source lines or frame locals.
+            import traceback
+            diagnostic['failure_frames']=[{'file':Path(f.filename).name,'line':f.lineno,'function':f.name} for f in traceback.extract_tb(error.__traceback__)[-8:]]
             (self._folder/(AUTHORIZATION+'-'+kind+'.json')).write_text(json.dumps(diagnostic),encoding='utf-8')
             print('WBS_LIVE_AI_DIAGNOSTIC '+json.dumps(diagnostic),flush=True)
             raise
