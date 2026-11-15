@@ -21,7 +21,12 @@ class GeminiWriterBackend(PlotMixin, ScenesMixin, RevisionMixin, PictureBookMixi
         Constructing the SDK client does not generate content.
         """
         self.api_key = self._load_api_key() if api_key is None else str(api_key).strip()
-        self.client = (client_factory or genai.Client)(api_key=self.api_key) if self.api_key else None
+        options = {'api_key': self.api_key}
+        if client_factory is None:
+            # A commercial action is one provider attempt, never an implicit retry.
+            options['http_options'] = types.HttpOptions(
+                retry_options=types.HttpRetryOptions(attempts=1))
+        self.client = (client_factory or genai.Client)(**options) if self.api_key else None
         self.model_name = "gemini-2.5-flash"
 
 
@@ -50,3 +55,10 @@ class GeminiWriterBackend(PlotMixin, ScenesMixin, RevisionMixin, PictureBookMixi
         return env_key
 
 
+
+    def _fallback_draft_chunk(self, current_beat_text, rolling_lore, tone_style, error):
+        # Commercial requests must never substitute invented local prose for AI.
+        # The original engine remains unchanged for explicitly isolated fixtures.
+        if getattr(self, "require_live_generation", False):
+            raise RuntimeError("Writing service generation failed. No replacement story was generated; saved writing is unchanged.") from None
+        return super()._fallback_draft_chunk(current_beat_text, rolling_lore, tone_style, error)
