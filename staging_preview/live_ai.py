@@ -8,8 +8,11 @@ from google.genai import types
 from google.genai.client import Client as SDK_CLIENT
 LOCK=threading.Lock()
 AUTHORIZATION='wbs-final-live-20261115'
+from contextvars import ContextVar
+DIAGNOSTIC=ContextVar('wbs_single_diagnostic',default=False)
 
 def operation():
+    if DIAGNOSTIC.get():return 'diagnostic-20261115'
     for frame in inspect.stack(context=0):
         module=str(frame.frame.f_globals.get('__name__',''))
         if module in ('quill.provider','core.extended_quill'):return 'quill'
@@ -29,7 +32,7 @@ class LimitedModels:
                 with (self._folder/(AUTHORIZATION+'-'+kind+'.json')).open('x',encoding='utf-8') as receipt:
                     json.dump({'operation':kind,'attempt_consumed':True,'utc':datetime.now(timezone.utc).isoformat()},receipt)
             except FileExistsError:raise PermissionError('This live acceptance request allowance was already consumed.') from None
-        bounded=types.GenerateContentConfig(max_output_tokens=1024,thinking_config=types.ThinkingConfig(thinking_budget=0),http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)))
+        bounded=types.GenerateContentConfig(max_output_tokens=128 if kind=='diagnostic-20261115' else 1024,thinking_config=types.ThinkingConfig(thinking_budget=0),http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)))
         if config is not None:
             bounded.temperature=getattr(config,'temperature',None)
             bounded.system_instruction=getattr(config,'system_instruction',None)
@@ -41,6 +44,16 @@ class LimitedModels:
             known={'TypeError','AttributeError','ValueError','RuntimeError','PermissionError','AssertionError','ClientError','ServerError','ConnectError','ConnectTimeout','ReadTimeout','ValidationError'}
             diagnostic['exception_type']=type(error).__name__ if type(error).__name__ in known else 'OtherException'
             diagnostic['http_response_present']=getattr(error,'response',None) is not None
+            # Safe structural exception detail: identifiers only, no values/messages.
+            import re
+            message=str(error)
+            field=re.search(r"unexpected keyword argument ['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]",message)
+            missing=re.search(r"has no attribute ['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]",message)
+            if field:diagnostic['local_error_detail']='UNEXPECTED_KEYWORD:'+field.group(1)
+            elif missing:diagnostic['local_error_detail']='MISSING_ATTRIBUTE:'+missing.group(1)
+            elif 'Cannot send a request, as the client has been closed' in message:diagnostic['local_error_detail']='HTTP_CLIENT_CLOSED'
+            elif 'SSL' in message or 'CERTIFICATE_VERIFY_FAILED' in message:diagnostic['local_error_detail']='TLS_FAILURE'
+            elif 'api keys are not supported' in message.lower():diagnostic['error_category']='AUTH_METHOD_UNSUPPORTED'
             # Locations only, never exception messages, source lines or frame locals.
             import traceback
             diagnostic['failure_frames']=[{'file':Path(f.filename).name,'line':f.lineno,'function':f.name} for f in traceback.extract_tb(error.__traceback__)[-8:]]
@@ -114,9 +127,29 @@ def render_scene_test(st, writer):
             if type(record.get('has_text')) is bool:safe['has_text']=record['has_text']
             if 'error_category' not in safe and 'http_status' not in safe:safe['diagnostic']='No HTTP status or category retained in this receipt'
             st.json(safe)
+    render_final_diagnostic(st, writer)
     status=st.session_state.get('_staging_live_scene_status')
     if status:
         if status.startswith('PASS'):
             st.success(status)
             st.text_area('Live Gemini scene test result (not saved to chapter)',value=st.session_state.get('_staging_live_scene_result',''),height=260,disabled=True)
         else:st.error(status)
+
+
+def render_final_diagnostic(st,writer):
+    receipt=Path.home()/'.cache'/'wbs'/'live-acceptance'/(AUTHORIZATION+'-diagnostic-20261115.json')
+    st.markdown('### Final Authorized Gemini Diagnostic')
+    st.caption('Separate one-request authorization, maximum $0.25; 128 output tokens, no retry or fallback. Prior scene/Quill allowances are not reset.')
+    if st.button('Run ONE Authorized Gemini Diagnostic',key='_staging_final_diagnostic',disabled=receipt.exists()):
+        token=DIAGNOSTIC.set(True)
+        try:
+            writer.client.models.generate_content(model='gemini-2.5-flash',contents='Reply with exactly: WBS connection verified.')
+        except Exception:
+            pass  # Safe evidence was already recorded by LimitedModels.
+        finally:DIAGNOSTIC.reset(token)
+        st.rerun()
+    if receipt.exists():
+        try:data=json.loads(receipt.read_text(encoding='utf-8'))
+        except (OSError,ValueError):data={'status':'RECEIPT_UNREADABLE'}
+        safe={k:data[k] for k in ('operation','attempt_consumed','status','http_status','error_category','exception_type','http_response_present','local_error_detail','failure_frames','has_text') if k in data}
+        st.json(safe)
