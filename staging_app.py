@@ -1,7 +1,7 @@
 """Disconnected private owner-acceptance screen; staging only.
 
-Reads only the two approved database settings for offline format validation.
-No database clients, AI clients or commercial app execution.
+Reads approved database settings and the private default owner email.
+Only explicit owner Auth actions connect; no legacy-data or AI operations.
 The verified 314-file commercial application remains unchanged beside this loader.
 """
 from pathlib import Path
@@ -11,13 +11,13 @@ import os
 import httpx
 
 import streamlit as st
-from core.authentication import AuthenticationError, public_client_key, validate_endpoint
+from core.authentication import AuthenticationError, AuthController, public_client_key, validate_endpoint, session_controller
 
 st.set_page_config(page_title="WBS R2 — Owner Acceptance", page_icon="📚")
 st.title("WritersBlock Studios")
 st.subheader("R2 — Private Owner Acceptance")
 st.success("The staging startup screen is ready.")
-st.info("Customer-data access, registration, linking, saving and AI requests remain disabled.")
+st.info("Legacy account access, linking, manuscript saving and AI requests remain disabled.")
 def configuration_categories(url, key):
     """Return fixed categories only. Never return input values or exception text."""
     result = {"SUPABASE_URL": "MISSING", "SUPABASE_KEY": "MISSING", "PROJECT_IDENTITY": "NOT_CHECKED"}
@@ -109,21 +109,113 @@ except (AuthenticationError, KeyError, FileNotFoundError, TypeError, ValueError)
 finally:
     # Do not keep references in the module's returned run state or UI diagnostics.
     configured_url = configured_key = None
-st.caption("One read-only Auth settings check is owner-authorized. It does not start the writing application.")
-if st.button("Run approved read-only connection check", key="r2_single_auth_settings_check"):
-    result = run_readonly_auth_check(
-        st.secrets.get("SUPABASE_URL", ""), st.secrets.get("SUPABASE_KEY", ""),
-        Path.home() / ".cache" / "wbs" / "owner-acceptance",
-    )
-    st.session_state["r2_auth_settings_safe_result"] = result
-if "r2_auth_settings_safe_result" in st.session_state:
-    safe_result = st.session_state["r2_auth_settings_safe_result"]
-    st.text("HTTP_STATUS: " + str(safe_result["http_status"]))
-    st.text("RESULT_CATEGORY: " + safe_result["category"])
+st.caption("The previously authorized read-only connection check is complete. No further check will run automatically.")
+
+
+def render_owner_registration():
+    """Private staging only; reuse approved Auth, never call a legacy-data RPC."""
+    try:
+        owner_email = AuthController._registration_email(st.secrets.get("WBS_OWNER_EMAIL", ""))
+    except (AuthenticationError, KeyError, FileNotFoundError, TypeError, ValueError):
+        st.warning("OWNER_EMAIL_SETUP_REQUIRED: Set the private staging WBS_OWNER_EMAIL value. Registration remains disabled.")
+        return
+    try:
+        endpoint = validate_endpoint(st.secrets.get("SUPABASE_URL", ""))
+        if endpoint != "https://svikvmuuvqpvndsmnutf.supabase.co":
+            raise AuthenticationError()
+        auth = session_controller(st.session_state, endpoint, st.secrets.get("SUPABASE_KEY", ""))
+    except (AuthenticationError, KeyError, FileNotFoundError, TypeError, ValueError):
+        st.error("Owner authentication configuration is unavailable. No registration was attempted.")
+        return
+
+    # Widget state is private to this browser session. Clear sensitive fields before
+    # rebuilding widgets, as in the approved commercial authentication UI.
+    if st.session_state.pop("_r2_owner_clear_sensitive", False):
+        for name in ("r2_owner_password", "r2_owner_password_again", "r2_owner_code", "r2_owner_login_password"):
+            st.session_state.pop(name, None)
+    notice = st.session_state.pop("_r2_owner_notice", None)
+    if notice:
+        (st.error if notice[0] else st.success)(notice[1])
+    # Configuration changes cannot reuse a registration/session belonging to a
+    # different owner. No email literal is stored in public source or logs.
+    previous_owner = st.session_state.get("_r2_owner_configured_email")
+    if previous_owner is not None and previous_owner != owner_email:
+        auth.sign_out()
+        st.error("Owner configuration changed. Open a fresh private session before continuing.")
+        return
+    st.session_state["_r2_owner_configured_email"] = owner_email
+    st.subheader("Owner registration and email confirmation")
+    st.caption("Only the configured owner can register here. No trial, license, credit or legacy account link is created.")
+    if auth.subject:
+        try:
+            auth.verify()
+            if auth.email != owner_email:
+                raise AuthenticationError()
+            st.success("Owner password session verified. Account linking remains disabled.")
+            st.caption("The existing Auth session is reused on reruns. Password verification is required again after logout or expiration.")
+            return
+        except AuthenticationError:
+            st.warning("Your Auth session is unavailable or expired. Sign in again; it will not be bypassed.")
+
+    receipt = Path.home() / ".cache" / "wbs" / "owner-acceptance" / "single-owner-registration-20261116.json"
+    with st.form("r2_owner_registration_form", clear_on_submit=True):
+        st.text_input("Owner email", value=owner_email, disabled=True, key="r2_owner_registration_email")
+        password = st.text_input("Create password (at least 12 characters)", type="password", key="r2_owner_password")
+        repeated = st.text_input("Confirm password", type="password", key="r2_owner_password_again")
+        register = st.form_submit_button("Register owner once", disabled=receipt.exists())
+    if register:
+        try:
+            if password != repeated:
+                raise AuthenticationError("The passwords do not match.")
+            AuthController._new_password(password)
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            # Consume the authorized signup before network I/O. Unknown failures
+            # must be reviewed; never repeat signup automatically after an error.
+            with receipt.open("x", encoding="utf-8") as handle:
+                json.dump({"state": "owner_signup_attempt_started"}, handle)
+            auth.register_password(owner_email, password)
+            st.session_state["_r2_owner_notice"] = (False, "Owner registration submitted. Check your email for the confirmation code. Existing WBS accounts remain unchanged.")
+        except FileExistsError:
+            st.session_state["_r2_owner_notice"] = (True, "The authorized registration attempt is already recorded. Do not repeat signup.")
+        except AuthenticationError as error:
+            st.session_state["_r2_owner_notice"] = (True, str(error))
+        except OSError:
+            st.session_state["_r2_owner_notice"] = (True, "The single-registration receipt could not be secured. Registration was not started.")
+        finally:
+            st.session_state["_r2_owner_clear_sensitive"] = True
+        st.rerun()
+    with st.form("r2_owner_confirmation_form", clear_on_submit=True):
+        st.text_input("Registration email", value=owner_email, disabled=True, key="r2_owner_confirmation_email")
+        code = st.text_input("Email confirmation code", type="password", key="r2_owner_code")
+        confirm = st.form_submit_button("Confirm owner email")
+    if confirm:
+        try:
+            auth.confirm_registration(owner_email, code)
+            st.session_state["_r2_owner_notice"] = (False, "Owner email confirmed. Sign in with your password. No legacy account has been linked.")
+        except AuthenticationError as error:
+            st.session_state["_r2_owner_notice"] = (True, str(error))
+        finally:
+            st.session_state["_r2_owner_clear_sensitive"] = True
+        st.rerun()
+    with st.form("r2_owner_password_login_form", clear_on_submit=True):
+        st.text_input("Sign-in email", value=owner_email, disabled=True, key="r2_owner_login_email")
+        login_password = st.text_input("Password", type="password", key="r2_owner_login_password")
+        login = st.form_submit_button("Sign in as owner")
+    if login:
+        try:
+            auth.sign_in_password(owner_email, login_password)
+            st.session_state["_r2_owner_notice"] = (False, "Owner signed in. Existing account linking remains disabled.")
+        except AuthenticationError as error:
+            st.session_state["_r2_owner_notice"] = (True, str(error))
+        finally:
+            st.session_state["_r2_owner_clear_sensitive"] = True
+        st.rerun()
+
+
+render_owner_registration()
 st.write(
-    "Your commercial application files remain unchanged. Registration, account linking, "
-    "manuscript access, saving and AI requests remain unavailable until database access "
-    "is separately approved and configured."
+    "Your commercial application files and all legacy accounts remain unchanged. "
+    "Account linking, manuscript access, saving and AI requests remain unavailable."
 )
 if not Path(__file__).resolve().with_name("app.py").is_file():
     st.error("The commercial entrypoint is missing. Do not proceed with acceptance.")
