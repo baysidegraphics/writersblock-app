@@ -1,10 +1,23 @@
-"""Existing private staging entrypoint; run the unchanged R2 commercial app.
+"""Disconnected private owner-acceptance screen; staging only.
 
-Access is controlled by the verified Streamlit private-app sharing restriction.
-This loader adds no Secrets flag, synthetic backend or authentication bypass.
-Exclude it from the final production promotion.
+No Secrets, credentials, database clients, AI clients or commercial app execution.
+The verified 314-file commercial application remains unchanged beside this loader.
 """
 from pathlib import Path
-import runpy
 
-runpy.run_path(str(Path(__file__).resolve().with_name("app.py")), run_name="__main__")
+import streamlit as st
+
+st.set_page_config(page_title="WBS R2 — Owner Acceptance", page_icon="📚")
+st.title("WritersBlock Studios")
+st.subheader("R2 — Private Owner Acceptance")
+st.success("The staging startup screen is ready.")
+st.info("Database access is not enabled. No database connection has been attempted.")
+st.write(
+    "Your commercial application files remain unchanged. Registration, account linking, "
+    "manuscript access, saving and AI requests remain unavailable until database access "
+    "is separately approved and configured."
+)
+if not Path(__file__).resolve().with_name("app.py").is_file():
+    st.error("The commercial entrypoint is missing. Do not proceed with acceptance.")
+st.caption("This is a disconnected readiness screen, not the running writing application.")
+st.stop()
