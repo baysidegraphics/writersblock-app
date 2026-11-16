@@ -109,6 +109,21 @@ QUILL_LOGO_CANDIDATES = (
 
 def _render_quill_logo(st: Any, *, width: int) -> None:
     """Render Quill with the surrounding dark image background made transparent."""
+    # Reuse the approved staging owl delivery in the commercial renderer.
+    # Inline PNG avoids a separate Cloud media request; source handling stays intact.
+    target=st
+    class EmbeddedTarget:
+        def image(self,image,**kwargs):
+            import base64
+            from io import BytesIO
+            if isinstance(image,(str,Path)):
+                with Image.open(image) as source:output=source.copy()
+            else:output=image
+            buffer=BytesIO();output.save(buffer,format='PNG')
+            encoded=base64.b64encode(buffer.getvalue()).decode('ascii')
+            target.markdown('<img alt="Quill owl" src="data:image/png;base64,'+encoded+'" style="width:'+str(int(width))+'px;max-width:100%;height:auto">',unsafe_allow_html=True)
+        def __getattr__(self,name):return getattr(target,name)
+    st=EmbeddedTarget()
     for logo_path in QUILL_LOGO_CANDIDATES:
         if not logo_path.exists():
             continue
