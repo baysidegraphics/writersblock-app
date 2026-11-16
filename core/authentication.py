@@ -7,6 +7,8 @@ import base64
 from copy import deepcopy
 import json
 import hashlib
+import re
+import time
 from uuid import UUID
 from urllib.parse import urlsplit
 
@@ -53,6 +55,9 @@ class AuthController:
         self._email=None
         self.access_check=None
         self._disabled=False
+        self._recovery_subject=None
+        self._recovery_email=None
+        self._recovery_started=None
 
     @property
     def owner_id(self): return self._owner
@@ -68,6 +73,22 @@ class AuthController:
 
     def _clear_identity(self):
         self._subject=self._owner=self._account=self._email=None
+
+    def _clear_recovery(self):
+        self._recovery_subject=self._recovery_email=self._recovery_started=None
+
+    @staticmethod
+    def _registration_email(email):
+        value=str(email or '').strip().lower()
+        if len(value)>254 or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',value):
+            raise AuthenticationError('Enter a valid email address.')
+        return value
+
+    @staticmethod
+    def _new_password(password):
+        if not isinstance(password,str) or len(password)<12 or not password.strip():
+            raise AuthenticationError('Choose a password of at least 12 characters.')
+        return password  # Never trim, log or store a customer's password.
 
     def verify(self):
         """Refresh through the SDK, then validate the bearer at the Auth server.
@@ -93,6 +114,7 @@ class AuthController:
             return subject
         except Exception:
             self._clear_identity()
+            self._disabled=True
             raise AuthenticationError('Sign in with a confirmed account to continue.') from None
 
     def refresh_account(self):
@@ -131,6 +153,7 @@ class AuthController:
 
     def sign_in_password(self,email,password):
         self._clear_identity()
+        self._clear_recovery()
         self._disabled=True
         try:
             response=self._client.auth.sign_in_with_password({'email':email.strip().lower(),'password':password})
@@ -140,22 +163,104 @@ class AuthController:
             self._disabled=True
             raise AuthenticationError('Sign-in failed. Check your credentials and confirmed email.') from None
 
-    def request_email_code(self,email):
+    def register_password(self,email,password):
+        email=self._registration_email(email)
+        password=self._new_password(password)
+        self.sign_out()
         try:
-            self._client.auth.sign_in_with_otp({'email':email.strip().lower(),'options':{'should_create_user':True}})
+            response=self._client.auth.sign_up({'email':email,'password':password})
+            # Fail closed if the host has disabled confirmation: registration
+            # must not silently become an authenticated customer workspace.
+            if field(response,'session') is not None:
+                self.sign_out()
+                raise AuthenticationError('Registration requires email confirmation to be enabled.')
+        except AuthenticationError:
+            raise
         except Exception:
-            raise AuthenticationError('The sign-in email could not be sent. Please retry later.') from None
+            self.sign_out()
+            raise AuthenticationError('Registration could not be completed. Please try again later.') from None
 
-    def verify_email_code(self,email,code):
-        self._clear_identity()
-        self._disabled=True
+    def resend_confirmation(self,email):
+        email=self._registration_email(email)
         try:
-            response=self._client.auth.verify_otp({'email':email.strip().lower(),'token':code.strip(),'type':'email'})
+            self._client.auth.resend({'type':'signup','email':email})
+        except Exception:
+            raise AuthenticationError('The confirmation email could not be sent. Please try again later.') from None
+
+    def confirm_registration(self,email,code):
+        email=self._registration_email(email)
+        self.sign_out()
+        try:
+            response=self._client.auth.verify_otp({'email':email,'token':str(code or '').strip(),'type':'signup'})
             self._accept_signin(response,email)
         except Exception:
-            self._clear_identity()
+            raise AuthenticationError('The confirmation code is invalid or expired.') from None
+        finally:
+            # Confirmation proves email ownership; password login is still
+            # required. No account link, license or trial is created here.
+            self.sign_out()
+
+    def request_password_recovery(self,email):
+        email=self._registration_email(email)
+        self.sign_out()
+        try:
+            self._client.auth.reset_password_email(email)
+        except Exception:
+            raise AuthenticationError('The recovery email could not be sent. Please try again later.') from None
+
+    def verify_recovery_code(self,email,code):
+        email=self._registration_email(email)
+        self.sign_out()
+        try:
+            response=self._client.auth.verify_otp({'email':email,'token':str(code or '').strip(),'type':'recovery'})
+            issued=field(field(response,'session'),'access_token')
+            if not issued or issued!=field(self._client.auth.get_session(),'access_token'):
+                raise AuthenticationError()
+            user=field(self._client.auth.get_user(issued),'user')
+            subject=str(UUID(str(field(user,'id'))))
+            if not field(user,'email_confirmed_at') or str(field(user,'email') or '').strip().lower()!=email:
+                raise AuthenticationError()
+            self._recovery_subject=subject
+            self._recovery_email=email
+            self._recovery_started=time.monotonic()
+            # Recovery tokens can only change the password through this flow.
+            # The normal owner/data boundary remains disabled throughout.
             self._disabled=True
-            raise AuthenticationError('The sign-in code is invalid or expired.') from None
+        except Exception:
+            self.sign_out()
+            raise AuthenticationError('The recovery code is invalid or expired.') from None
+
+    @property
+    def recovery_pending(self):
+        return self._recovery_subject is not None
+
+    def complete_password_recovery(self,password):
+        password=self._new_password(password)
+        try:
+            if (not self._recovery_subject or self._recovery_started is None
+                    or not 0<=time.monotonic()-self._recovery_started<600):
+                raise AuthenticationError()
+            token=field(self._client.auth.get_session(),'access_token')
+            user=field(self._client.auth.get_user(token),'user') if token else None
+            if (str(field(user,'id'))!=self._recovery_subject
+                    or str(field(user,'email') or '').strip().lower()!=self._recovery_email
+                    or not field(user,'email_confirmed_at')):
+                raise AuthenticationError()
+            result=self._client.auth.update_user({'password':password})
+            if str(field(field(result,'user'),'id'))!=self._recovery_subject:
+                raise AuthenticationError()
+        except Exception:
+            self.sign_out()
+            raise AuthenticationError('The password reset could not be confirmed. Request a new recovery code or try signing in.') from None
+        try:
+            self._client.auth.sign_out({'scope':'global'})
+        except Exception:
+            self.sign_out()
+            raise AuthenticationError('Your password was updated, but other sessions could not be signed out. Sign in again and contact support.') from None
+        finally:
+            self._clear_identity()
+            self._clear_recovery()
+            self._disabled=True
 
     def start_trial(self,email):
         self.verify()
@@ -175,6 +280,7 @@ class AuthController:
             pass
         finally:
             self._clear_identity()
+            self._clear_recovery()
             self._disabled=True
 
     def owned_client(self, observer=None, checkpoint_state=None):

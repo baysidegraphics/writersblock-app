@@ -103,7 +103,7 @@ WRITER_EDITION_FOUNDING_50_LABEL = "$69 one-time"
 WRITER_EDITION_PRICE_LABEL = WRITER_EDITION_REGULAR_LABEL
 TRIAL_DAYS = 7
 FOUNDING_50_ACTIVE = True
-PURCHASE_URL = ""  # Private staging: real checkout disabled.
+PURCHASE_URL = "https://buy.stripe.com/bJeeVeckVeui86Vdwn5Vu0a"  # Paste the direct Stripe Payment Link here when created.
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
@@ -129,7 +129,7 @@ supabase = _wbs_auth.owned_client(_observe_saved_project_rows, checkpoint_state=
 # The public WritersBlock website passes the first-party Affitor click ID into
 # the Streamlit app as ?affitor_click_id=... . Keep it in session state across
 # Streamlit reruns, then bind it to the stable WritersBlock user ID after signup.
-AFFITOR_LEAD_ENDPOINT = "https://example.invalid/staging-affiliate-disabled"
+AFFITOR_LEAD_ENDPOINT = "https://api.affitor.com/api/v1/track/lead"
 
 
 def _clean_affitor_click_id(value):

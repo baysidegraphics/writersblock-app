@@ -35,13 +35,40 @@ def render_auth_access(st,auth,context):
         _render_auth_panel(st,auth,context,panel)
 
 
+def _matching_password(password,confirmation):
+    if password != confirmation:
+        raise AuthenticationError('The passwords do not match.')
+    return password
+
+
+_SECRET_WIDGETS=(
+    'wbs_auth_password','wbs_auth_registration_password','wbs_auth_registration_confirm',
+    'wbs_auth_confirmation_code','wbs_auth_recovery_code',
+    'wbs_auth_new_password','wbs_auth_new_password_confirm','wbs_auth_email_code',
+)
+
+
+def _password_notice(st,message,error=False):
+    # Clear secrets before widgets are constructed on the next run. This avoids
+    # mutating instantiated widget state or keeping passwords after submission.
+    st.session_state['_wbs_auth_clear_secret_widgets']=True
+    st.session_state['_wbs_auth_password_notice']=(error,message)
+    st.rerun()
+
+
 def _render_auth_panel(st,auth,context,panel):
+    if st.session_state.pop('_wbs_auth_clear_secret_widgets',False):
+        for key in _SECRET_WIDGETS:
+            st.session_state.pop(key,None)
+    notice=st.session_state.pop('_wbs_auth_password_notice',None)
+    if notice:
+        (st.error if notice[0] else st.success)(notice[1])
     license_valid=context['is_license_access_valid']
     trial_valid=context['is_demo_access_valid']
-    st.caption('Sign in to your confirmed account. Your existing license, projects and versions stay attached to that account.')
-    method=st.radio('Sign-in method',['Email code','Password'],key='wbs_auth_method')
+    st.caption('Use your registered email and password. Confirm your email before signing in. Your existing projects, license and trial stay attached to your account.')
+    method=st.radio('Account access',['Sign in','Register','Confirm email','Forgot password','Reset password'],key='wbs_auth_password_flow')
     try:
-        if method=='Password':
+        if method=='Sign in':
             with st.form('wbs_password_signin',clear_on_submit=True):
                 email=st.text_input('Account email',key='wbs_auth_password_email')
                 password=st.text_input('Password',type='password',key='wbs_auth_password')
@@ -51,28 +78,59 @@ def _render_auth_panel(st,auth,context,panel):
                 panel.empty()
                 bind_workspace(st.session_state,auth)
                 sync_access_state(st.session_state,auth,license_valid,trial_valid)
+                st.session_state['_wbs_auth_clear_secret_widgets']=True
                 st.rerun()
-        else:
-            with st.form('wbs_email_signin',clear_on_submit=True):
-                email=st.text_input('Account email',key='wbs_auth_code_email')
-                send=st.form_submit_button('Send sign-in code')
-            if send:
-                auth.request_email_code(email)
-                st.session_state['_wbs_auth_pending_email']=email.strip().lower()
-                st.success('If available, a sign-in email has been sent. Enter the code from that email.')
-            pending=st.session_state.get('_wbs_auth_pending_email')
-            if pending:
-                with st.form('wbs_verify_email_code',clear_on_submit=True):
-                    code=st.text_input('Email sign-in code',type='password',key='wbs_auth_email_code')
-                    verify=st.form_submit_button('Verify and sign in')
-                if verify:
-                    auth.verify_email_code(pending,code)
-                    panel.empty()
-                    bind_workspace(st.session_state,auth)
-                    sync_access_state(st.session_state,auth,license_valid,trial_valid)
+        elif method=='Register':
+            with st.form('wbs_password_registration',clear_on_submit=True):
+                email=st.text_input('Email',key='wbs_auth_registration_email')
+                password=st.text_input('Create password (at least 12 characters)',type='password',key='wbs_auth_registration_password')
+                confirmation=st.text_input('Confirm password',type='password',key='wbs_auth_registration_confirm')
+                submitted=st.form_submit_button('Register')
+            if submitted:
+                auth.register_password(email,_matching_password(password,confirmation))
+                _password_notice(st,'If registration is available, a confirmation email has been sent. Choose Confirm email and enter its code. Registration does not activate or change a license.')
+        elif method=='Confirm email':
+            with st.form('wbs_signup_confirmation',clear_on_submit=True):
+                email=st.text_input('Registration email',key='wbs_auth_confirmation_email')
+                code=st.text_input('Email confirmation code',type='password',key='wbs_auth_confirmation_code')
+                confirm=st.form_submit_button('Confirm email')
+                resend=st.form_submit_button('Resend confirmation')
+            if confirm:
+                auth.confirm_registration(email,code)
+                _password_notice(st,'Email confirmed. Choose Sign in and enter your email and password.')
+            elif resend:
+                auth.resend_confirmation(email)
+                _password_notice(st,'If eligible, a confirmation email has been sent.')
+        elif method=='Forgot password':
+            with st.form('wbs_password_recovery_request',clear_on_submit=True):
+                email=st.text_input('Registered email',key='wbs_auth_recovery_request_email')
+                submitted=st.form_submit_button('Send recovery email')
+            if submitted:
+                auth.request_password_recovery(email)
+                _password_notice(st,'If eligible, a recovery email has been sent. Choose Reset password and enter its code.')
+        elif method=='Reset password':
+            if not auth.recovery_pending:
+                with st.form('wbs_password_recovery_verify',clear_on_submit=True):
+                    email=st.text_input('Recovery email',key='wbs_auth_recovery_email')
+                    code=st.text_input('Recovery code',type='password',key='wbs_auth_recovery_code')
+                    submitted=st.form_submit_button('Verify recovery code')
+                if submitted:
+                    auth.verify_recovery_code(email,code)
+                    st.session_state['_wbs_auth_clear_secret_widgets']=True
+                    st.rerun()
+            else:
+                with st.form('wbs_password_recovery_update',clear_on_submit=True):
+                    password=st.text_input('New password (at least 12 characters)',type='password',key='wbs_auth_new_password')
+                    confirmation=st.text_input('Confirm new password',type='password',key='wbs_auth_new_password_confirm')
+                    submitted=st.form_submit_button('Update password')
+                if submitted:
+                    auth.complete_password_recovery(_matching_password(password,confirmation))
+                    _password_notice(st,'Password updated. Choose Sign in and enter your new password.')
+                if st.button('Cancel recovery',key='wbs_auth_cancel_recovery'):
+                    auth.sign_out()
                     st.rerun()
         if auth.subject:
-            st.caption('Signed in. Existing purchases require their approved account link; signing in does not activate or alter a license.')
+            st.caption('Your sign-in is verified. Signing in does not activate a license or reassign an existing account by email.')
             if st.button('Start / Resume 7-Day Trial',key='activate_demo_access',use_container_width=True):
                 auth.start_trial(auth.email)
                 panel.empty()
@@ -84,4 +142,4 @@ def _render_auth_panel(st,auth,context,panel):
                 st.session_state.clear()
                 st.rerun()
     except AuthenticationError as error:
-        st.error(str(error))
+        _password_notice(st,str(error),error=True)
