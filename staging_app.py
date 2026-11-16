@@ -7,6 +7,8 @@ The verified 314-file commercial application remains unchanged beside this loade
 from pathlib import Path
 import base64
 import json
+import os
+import httpx
 
 import streamlit as st
 from core.authentication import AuthenticationError, public_client_key, validate_endpoint
@@ -15,7 +17,7 @@ st.set_page_config(page_title="WBS R2 — Owner Acceptance", page_icon="📚")
 st.title("WritersBlock Studios")
 st.subheader("R2 — Private Owner Acceptance")
 st.success("The staging startup screen is ready.")
-st.info("Database access is not enabled. No database connection has been attempted.")
+st.info("Customer-data access, registration, linking, saving and AI requests remain disabled.")
 def configuration_categories(url, key):
     """Return fixed categories only. Never return input values or exception text."""
     result = {"SUPABASE_URL": "MISSING", "SUPABASE_KEY": "MISSING", "PROJECT_IDENTITY": "NOT_CHECKED"}
@@ -43,6 +45,54 @@ def configuration_categories(url, key):
             result["SUPABASE_KEY"] = "INVALID_OR_PRIVILEGED_KEY_FORMAT"
     return result
 
+
+def run_readonly_auth_check(url, key, receipt_directory, client_factory=None):
+    """One approved GET; persist attempt before sending, never read a response body."""
+    try:
+        checks = configuration_categories(url, key)
+        if checks["SUPABASE_URL"] != "PASS" or checks["SUPABASE_KEY"] != "PASS_PUBLIC_KEY_FORMAT" or checks["PROJECT_IDENTITY"] == "WRONG_PROJECT_CLAIM":
+            return {"http_status": None, "category": "CONFIGURATION_NOT_READY"}
+        endpoint = validate_endpoint(url) + "/auth/v1/settings"
+        public = public_client_key(key)
+        directory = Path(receipt_directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        receipt = directory / "r2-authorized-auth-settings-one-get-20261116.json"
+        try:
+            descriptor = os.open(receipt, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                stored = json.loads(receipt.read_text(encoding="utf-8"))
+                return {"http_status": stored.get("http_status"), "category": stored.get("category", "ATTEMPT_ALREADY_CONSUMED")}
+            except (OSError, ValueError):
+                return {"http_status": None, "category": "ATTEMPT_ALREADY_CONSUMED"}
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump({"http_status": None, "category": "ATTEMPT_STARTED_NO_RESULT"}, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        result = {"http_status": None, "category": "CONNECTION_FAILED_NO_RETRY"}
+        try:
+            factory = client_factory or httpx.Client
+            with factory(timeout=15.0, follow_redirects=False, transport=httpx.HTTPTransport(retries=0)) as client:
+                with client.stream("GET", endpoint, headers={"apikey": public}) as response:
+                    status = int(response.status_code)
+                    category = (
+                        "AUTH_SETTINGS_REACHABLE_KEY_ACCEPTED" if status == 200
+                        else "KEY_REJECTED" if status == 401
+                        else "ACCESS_DENIED" if status == 403
+                        else "REDIRECT_REFUSED" if 300 <= status < 400
+                        else "RATE_LIMITED_NO_RETRY" if status == 429
+                        else "SERVICE_ERROR_NO_RETRY" if status >= 500
+                        else "HTTP_ERROR_NO_RETRY"
+                    )
+                    result = {"http_status": status, "category": category}
+        except (httpx.HTTPError, OSError, ValueError):
+            pass
+        # Only status/category persist. No key, headers, body or exception text.
+        receipt.write_text(json.dumps(result), encoding="utf-8")
+        return result
+    except (AuthenticationError, OSError, TypeError, ValueError):
+        return {"http_status": None, "category": "CHECK_NOT_STARTED_LOCAL_ERROR"}
+
 try:
     configured_url = st.secrets.get("SUPABASE_URL", "")
     configured_key = st.secrets.get("SUPABASE_KEY", "")
@@ -59,6 +109,17 @@ except (AuthenticationError, KeyError, FileNotFoundError, TypeError, ValueError)
 finally:
     # Do not keep references in the module's returned run state or UI diagnostics.
     configured_url = configured_key = None
+st.caption("One read-only Auth settings check is owner-authorized. It does not start the writing application.")
+if st.button("Run approved read-only connection check", key="r2_single_auth_settings_check"):
+    result = run_readonly_auth_check(
+        st.secrets.get("SUPABASE_URL", ""), st.secrets.get("SUPABASE_KEY", ""),
+        Path.home() / ".cache" / "wbs" / "owner-acceptance",
+    )
+    st.session_state["r2_auth_settings_safe_result"] = result
+if "r2_auth_settings_safe_result" in st.session_state:
+    safe_result = st.session_state["r2_auth_settings_safe_result"]
+    st.text("HTTP_STATUS: " + str(safe_result["http_status"]))
+    st.text("RESULT_CATEGORY: " + safe_result["category"])
 st.write(
     "Your commercial application files remain unchanged. Registration, account linking, "
     "manuscript access, saving and AI requests remain unavailable until database access "
@@ -66,5 +127,5 @@ st.write(
 )
 if not Path(__file__).resolve().with_name("app.py").is_file():
     st.error("The commercial entrypoint is missing. Do not proceed with acceptance.")
-st.caption("This is a disconnected readiness screen, not the running writing application.")
+st.caption("This is a readiness screen, not the running writing application. Do not request another check after a hosting restart.")
 st.stop()
