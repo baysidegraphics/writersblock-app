@@ -264,6 +264,25 @@ def render_owner_registration():
             st.session_state["_r2_owner_phase"] = "signed_in"
             st.success("Signed In — owner identity verified. Account linking remains disabled.")
             st.caption("Your verified session is reused on ordinary reruns. Logout or an unusable/expired session requires sign-in again.")
+            if st.session_state.get('_r2_interface_subject') != auth.subject:
+                st.session_state['_r2_interface_subject'] = auth.subject
+                st.session_state['_r2_interface_open'] = False
+            if st.session_state.get('_r2_interface_open'):
+                st.warning('PRIVATE READ-ONLY ACCEPTANCE: Saving, approval, deletion, AI, voice generation and payments are disabled. No changes are saved.')
+                if st.button('Back to read-only account', key='r2_close_interface'):
+                    st.session_state['_r2_interface_open'] = False
+                    st.rerun()
+                from staging_owner_interface import run_interface, AcceptanceBlocked
+                try:
+                    run_interface(st, auth, owner_email, Path(__file__).resolve().with_name('app.py'))
+                except AcceptanceBlocked:
+                    st.error('ACCEPTANCE_ACTION_BLOCKED: This operation requires separate authorization. No database write or provider request was sent.')
+                except Exception:
+                    st.error('ACCEPTANCE_INTERFACE_UNAVAILABLE: Return to the read-only account. No permissions were expanded.')
+                st.stop()
+            if st.button('Open commercial interface — read-only acceptance', key='r2_open_interface'):
+                st.session_state['_r2_interface_open'] = True
+                st.rerun()
             render_readonly_owner_view(auth, owner_email)
             if st.button("Sign out", key="r2_owner_sign_out"):
                 auth.sign_out()
