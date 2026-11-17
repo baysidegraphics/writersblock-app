@@ -17,7 +17,7 @@ st.set_page_config(page_title="WBS R2 — Owner Acceptance", page_icon="📚")
 st.title("WritersBlock Studios")
 st.subheader("R2 — Private Owner Acceptance")
 st.success("The staging startup screen is ready.")
-st.info("Legacy account access, linking, manuscript saving and AI requests remain disabled.")
+st.info("Owner-linked records may be opened read-only. Account linking, editing, saving, deletion, payments and AI requests remain disabled.")
 def configuration_categories(url, key):
     """Return fixed categories only. Never return input values or exception text."""
     result = {"SUPABASE_URL": "MISSING", "SUPABASE_KEY": "MISSING", "PROJECT_IDENTITY": "NOT_CHECKED"}
@@ -135,6 +135,92 @@ def confirm_owner_email(auth, email, code):
         raise AuthenticationError("Email confirmation could not be verified. No signed-in access was granted.") from None
 
 
+def readonly_owner_rows(auth, owner_email, table, project_id=None, row_id=None):
+    """SELECT-only facade over the unchanged JWT/ownership boundary."""
+    from core.persistence import OwnedClient, OwnershipError
+    columns = {
+        "writersblock_projects": "id,project_title,project_type,current_stage,project_status",
+        "writersblock_project_drafts": "id,project_id,draft_title,draft_type,version_number,updated_at",
+        "writersblock_manuscript_versions": "id,project_id,version_number,version_label,source_stage,created_at",
+    }
+    if table not in columns:
+        raise OwnershipError("Unapproved read-only table")
+    if table != "writersblock_projects" and not project_id:
+        raise OwnershipError("Selected project required")
+    if row_id:
+        columns["writersblock_project_drafts"] += ",draft_content"
+        columns["writersblock_manuscript_versions"] += ",manuscript_content"
+    def verified_read_owner():
+        account = auth.refresh_account()  # Auth get_user + read-only mapped-account RPC.
+        if auth.email != owner_email or str(account.get("id", "")) != str(auth.owner_id or ""):
+            raise OwnershipError("Read-only identity binding unavailable")
+        return auth.owner_id
+    verified_read_owner()
+    # Read review does not grant a paid writing entitlement or alter the commercial
+    # controller's license callback. RLS and refreshed mapping still enforce ownership.
+    boundary = OwnedClient(auth._client, lambda: auth.owner_id, authorize=verified_read_owner)
+    rows = []
+    for start in range(0, 10000, 200):
+        query = boundary.table(table).select(columns[table])
+        if project_id:
+            query = query.eq("project_id", str(project_id))
+        if row_id:
+            query = query.eq("id", str(row_id))
+        page = query.order("id").range(start, start + 199).execute().data or []
+        rows.extend(page)
+        if row_id or len(page) < 200:
+            return rows
+    raise OwnershipError("Read-only listing is too large; no partial-list claim")
+
+
+def render_readonly_owner_view(auth, owner_email):
+    st.subheader("Existing account and writing — read only")
+    st.caption("Only your linked records are read. Editing, saving, deletion, AI and payment controls are unavailable.")
+    subject = auth.subject
+    if st.session_state.get("_r2_readonly_subject") != subject:
+        st.session_state["_r2_readonly_subject"] = subject
+        st.session_state["_r2_readonly_open"] = False
+    if not st.session_state.get("_r2_readonly_open"):
+        if st.button("Open my linked account — read only", key="r2_open_linked_readonly"):
+            st.session_state["_r2_readonly_open"] = True
+            st.rerun()
+        return
+    try:
+        projects = readonly_owner_rows(auth, owner_email, "writersblock_projects")
+        st.success("Linked owner access verified. Read-only ownership filters are active.")
+        if not projects:
+            st.info("No projects are saved under this linked account. No other legacy account will be substituted.")
+            return
+        index = st.selectbox("Saved project", range(len(projects)),
+            format_func=lambda i: str(projects[i].get("project_title") or "Untitled project") + " · " + str(i + 1),
+            key="r2_readonly_project_choice")
+        project = projects[index]
+        st.caption(str(project.get("project_type") or "Saved writing format"))
+        for table, label, content_key in (
+            ("writersblock_project_drafts", "Saved drafts", "draft_content"),
+            ("writersblock_manuscript_versions", "Saved manuscript versions", "manuscript_content"),
+        ):
+            st.markdown("**" + label + "**")
+            records = readonly_owner_rows(auth, owner_email, table, project["id"])
+            if not records:
+                st.info("No " + label.lower() + " are saved for this project.")
+                continue
+            choice = st.selectbox(label, range(len(records)),
+                format_func=lambda i, items=records: "V" + str(items[i].get("version_number", ""))
+                    + " — " + str(items[i].get("draft_title") or items[i].get("version_label") or "Saved record")
+                    + " · " + str(i + 1),
+                key="r2_readonly_" + table + "_" + str(project["id"]))
+            selected = records[choice]
+            content = readonly_owner_rows(auth, owner_email, table, project["id"], selected["id"])
+            if len(content) != 1:
+                raise AuthenticationError()
+            st.caption("Original saved text. Project-session snapshots may contain structured JSON; no text is regenerated or rewritten.")
+            st.text(str(content[0].get(content_key) or ""))
+    except Exception:
+        st.session_state["_r2_readonly_open"] = False
+        st.error("READ_ONLY_ACCESS_UNAVAILABLE: No records were changed. Verify the current session and owner mapping; no other account will be used.")
+
+
 def render_owner_registration():
     """Private staging only; reuse approved Auth, never call a legacy-data RPC."""
     try:
@@ -178,6 +264,7 @@ def render_owner_registration():
             st.session_state["_r2_owner_phase"] = "signed_in"
             st.success("Signed In — owner identity verified. Account linking remains disabled.")
             st.caption("Your verified session is reused on ordinary reruns. Logout or an unusable/expired session requires sign-in again.")
+            render_readonly_owner_view(auth, owner_email)
             if st.button("Sign out", key="r2_owner_sign_out"):
                 auth.sign_out()
                 st.session_state["_r2_owner_phase"] = "signin"
@@ -261,7 +348,7 @@ def render_owner_registration():
 render_owner_registration()
 st.write(
     "Your commercial application files and all legacy accounts remain unchanged. "
-    "Account linking, manuscript access, saving and AI requests remain unavailable."
+    "Only explicitly opened owner-linked records may be viewed. Account linking, editing, saving and AI requests remain unavailable."
 )
 if not Path(__file__).resolve().with_name("app.py").is_file():
     st.error("The commercial entrypoint is missing. Do not proceed with acceptance.")
