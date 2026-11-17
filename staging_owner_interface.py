@@ -5,6 +5,7 @@ files or process-global SDK/module objects. Database access remains SELECT-only.
 """
 import ast
 import hashlib
+import json
 from pathlib import Path
 
 APP_SHA256 = '3559ca04947c985688b0f3c8c7f7694e04ce4f31362773d2ea73fe3df0490614'
@@ -53,7 +54,13 @@ class ReadDatabase:
         if name not in {'writersblock_projects', 'writersblock_project_drafts',
                         'writersblock_manuscript_versions'}:
             raise AcceptanceBlocked('Table unavailable in acceptance.')
-        return ReadQuery(self._auth.owned_client().table(name))
+        from core.persistence import OwnedClient
+        # Read-only acceptance is authorized by the verified owner mapping, not
+        # by a purchased writing entitlement. The commercial write client and
+        # its entitlement callback are never reused or changed here.
+        boundary = OwnedClient(self._auth._auth._client,
+            lambda: self._auth.owner_id, authorize=self._auth.require_owner)
+        return ReadQuery(boundary.table(name))
 
     def __getattr__(self, name):
         return blocked
@@ -62,6 +69,7 @@ class ReadDatabase:
 class ReadAuth:
     def __init__(self, auth, owner_email):
         self._auth, self._email = auth, owner_email
+        self._access_check = None
 
     def refresh_account(self):
         row = self._auth.refresh_account()
@@ -71,18 +79,18 @@ class ReadAuth:
 
     def require_owner(self):
         self.refresh_account()
-        return self._auth.require_owner()
+        return self._auth.owner_id
 
     def owned_client(self, *args, **kwargs):
-        return ReadDatabase(self._auth)
+        return ReadDatabase(self)
 
     @property
     def access_check(self):
-        return self._auth.access_check
+        return self._access_check
 
     @access_check.setter
     def access_check(self, check):
-        self._auth.access_check = check
+        self._access_check = check
 
     def __getattr__(self, name):
         if name in {'subject', 'email', 'owner_id', 'account', 'verify'}:
@@ -157,6 +165,7 @@ class InterfaceImports(ast.NodeTransformer):
     """Replace only integration imports in this private execution namespace."""
     REPLACEMENTS = {
         'core.authentication': {'session_controller': '_r2_controller'},
+        'core.auth_ui': {'sync_access_state': '_r2_sync', 'render_auth_access': '_r2_noop'},
         'core.runtime_startup': {'customer_backend': '_r2_backend', 'load_local_environment': '_r2_noop'},
         'quill': {'render_quill_for_current_stage': '_r2_quill'},
         'wbs_streamlit_adapter': {'create_bridge_adapter': '_r2_noop'},
@@ -185,6 +194,8 @@ class InterfaceImports(ast.NodeTransformer):
     def visit_FunctionDef(self, node):
         if node.name == 'track_affitor_lead':
             node.body = [ast.Return(value=ast.Constant(False))]
+        if node.name in {'access_allows', 'require_product_access', 'enforce_evaluation_session'}:
+            node.body = [ast.Return(value=ast.Call(func=ast.Name(id='_r2_verify_read', ctx=ast.Load()), args=[], keywords=[]))]
         return self.generic_visit(node)
 
 
@@ -194,6 +205,45 @@ def run_interface(ui, auth, owner_email, app_path):
         raise AcceptanceBlocked('Commercial source hash mismatch; interface not opened.')
     owner = ReadAuth(auth, owner_email)
     owner.refresh_account()
+    database = ReadDatabase(owner)
+    def read_rows(table, **filters):
+        result = []
+        for start in range(0, 10000, 200):
+            query = database.table(table).select('*')
+            for name, value in filters.items():
+                query = query.eq(name, str(value))
+            page = query.order('id').range(start, start + 199).execute().data or []
+            result.extend(page)
+            if len(page) < 200:
+                return result
+        raise AcceptanceBlocked('Listing limit reached; partial access not presented.')
+    projects = read_rows('writersblock_projects')
+    if not projects:
+        ui.info('No projects belong to this verified linked owner. No other account was substituted.')
+        return
+    with ui.sidebar:
+        ui.success('Verified linked owner — read-only acceptance')
+        project_id = ui.selectbox('Existing project', [str(p['id']) for p in projects],
+            format_func=lambda value: next(str(p.get('project_title') or 'Untitled project') for p in projects if str(p['id']) == value),
+            key='_r2_inspect_project')
+        revisions = read_rows('writersblock_project_drafts', project_id=project_id, draft_type='project_session')
+        if not revisions:
+            ui.warning('This project has no saved workflow snapshot. Saved manuscript text remains available in the account viewer.')
+            return
+        revision_ids = [str(row['id']) for row in revisions]
+        if ui.session_state.get('_r2_inspect_revision') not in revision_ids:
+            ui.session_state.pop('_r2_inspect_revision', None)
+        row_id = ui.selectbox('Existing saved revision', revision_ids,
+            format_func=lambda value: next('V' + str(row.get('version_number', '')) + ' — ' + str(row.get('draft_title') or 'Saved revision') + ' · ' + str(i + 1)
+                for i, row in enumerate(revisions) if str(row['id']) == value), key='_r2_inspect_revision')
+        stages = ['1. Concept Development', '2. Plot Architecture', '3. Scene Scripting',
+                  '4. Editorial Review', '5. Publisher Assessment', '6. Final Manuscript']
+        stage = ui.selectbox('Read-only stage inspection', stages, key='_r2_inspect_stage')
+        ui.caption('Inspection does not approve stages, activate a license or save changes. Unapproved outputs may show their existing approval warning.')
+    selected = next(row for row in revisions if str(row['id']) == row_id)
+    saved = json.loads(selected.get('draft_content') or '{}')
+    if not isinstance(saved, dict) or str(saved.get('current_project_id') or project_id) != project_id:
+        raise AcceptanceBlocked('Saved project identity mismatch.')
     # Do not reuse an initialized provider left by any earlier staging session.
     ui.session_state['backend'] = None
     ui.session_state.pop('_wbs_quill_test_backend', None)
@@ -203,9 +253,52 @@ def run_interface(ui, auth, owner_email, app_path):
     def quill(*args, **kwargs):
         ui.subheader('Quill — Your Frontline Editor-in-Chief')
         ui.caption('AI requests and voice generation are disabled during read-only acceptance.')
+    def sync_read_account(state, *args):
+        owner.refresh_account()
+        # These are real commercial entitlement flags, never fabricated for
+        # acceptance. Owner inspection has a separate SELECT-only authorization.
+        state['licensed_mode'] = False
+        state['demo_mode'] = False
+        return True
+    def verify_read():
+        owner.require_owner()
+        return True
     namespace = {'__name__': '__main__', '__file__': str(Path(app_path).resolve()),
         '_r2_ui': ReadUI(ui), '_r2_controller': lambda *args, **kwargs: owner,
         '_r2_backend': no_backend, '_r2_noop': lambda *args, **kwargs: None,
-        '_r2_quill': quill}
-    tree = ast.fix_missing_locations(InterfaceImports().visit(ast.parse(source)))
+        '_r2_quill': quill, '_r2_sync': sync_read_account, '_r2_verify_read': verify_read,
+        '_active_version_number': selected.get('version_number')}
+    tree = ast.parse(source)
+    # Suppress the commercial account/license/sidebar interaction block. Keep
+    # its definitions and constants; the private selectors above replace its UI.
+    start = next(n.lineno for n in tree.body if isinstance(n, ast.Assign)
+                 and any(isinstance(t, ast.Name) and t.id == '_startup_access_active' for t in n.targets))
+    filtered = []
+    for node in tree.body:
+        dispatch = isinstance(node, ast.If) and any(
+            isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+            and child.func.id == 'run_workflow' for child in ast.walk(node))
+        if dispatch or (node.lineno >= start and isinstance(node, (ast.If, ast.With, ast.Expr))):
+            continue
+        filtered.append(node)
+    tree.body = filtered
+    tree = ast.fix_missing_locations(InterfaceImports().visit(tree))
     exec(compile(tree, str(app_path), 'exec'), namespace)
+    state = ui.session_state
+    identity = (owner.subject, project_id, row_id,
+                hashlib.sha256(str(selected.get('draft_content') or '').encode()).hexdigest())
+    if (state.get('_r2_inspection_loaded') != identity
+            or str(state.get('current_project_id') or '') != project_id
+            or str(state.get('_wbs_active_saved_session_row_id') or '') != row_id):
+        if not namespace['load_saved_project_session_to_state'](selected):
+            raise AcceptanceBlocked('The exact saved workflow snapshot could not be restored.')
+        state['_r2_inspection_loaded'] = identity
+    # This changes only the private viewing route, never saved progress,
+    # approval records, revision identity or manuscript contents.
+    index = stages.index(stage)
+    state['project_stage'] = ['Intake', 'Sandbox', 'Plot Architect',
+                              'Isolation Guardrail', 'Publisher Assessment', 'Isolation Guardrail'][index]
+    state['export_view'] = index == 5
+    from core.workflow_runtime import run_workflow
+    run_workflow(['concept_development', 'plot_architecture', 'scene_scripting',
+                  'editorial_review', 'publisher_assessment', 'final_manuscript'][index], namespace)
