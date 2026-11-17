@@ -272,7 +272,7 @@ def render_owner_registration():
                 if st.button('Back to read-only account', key='r2_close_interface'):
                     st.session_state['_r2_interface_open'] = False
                     st.rerun()
-                from staging_owner_interface import run_interface, AcceptanceBlocked
+                from staging_commercial_acceptance import run_interface, AcceptanceBlocked
                 try:
                     run_interface(st, auth, owner_email, Path(__file__).resolve().with_name('app.py'))
                 except AcceptanceBlocked:
