@@ -199,6 +199,80 @@ class InterfaceImports(ast.NodeTransformer):
         return self.generic_visit(node)
 
 
+def workflow_records(drafts, project_id):
+    """Find actual saved snapshots by content, not only a newer draft_type label.
+
+    Never convert plain manuscripts or per-scene saves into invented sessions.
+    Validation runs on a copy; the original row/content/ID/version is retained.
+    """
+    from copy import deepcopy
+    from wbs_format_guard import prepare_saved_snapshot, SavedFormatError
+    result = []
+    for row in drafts:
+        try:
+            value = row.get('draft_content')
+            payload = json.loads(value) if isinstance(value, str) else deepcopy(value)
+            if not isinstance(payload, dict):
+                continue
+            if not any(key in payload for key in ('story_seed', 'plot_outline', 'scene_blocks',
+                                                  'current_draft_output', 'format_template_values')):
+                continue
+            prepare_saved_snapshot(deepcopy(payload), project_id)
+            result.append(row)
+        except (ValueError, TypeError, SavedFormatError):
+            continue
+    return result
+
+
+def saved_record_label(item, number):
+    table, row, content_key = item
+    kind = row.get('draft_type') if content_key == 'draft_content' else row.get('source_stage')
+    title = row.get('draft_title') or row.get('version_label') or 'Saved record'
+    return (str(number + 1) + '. ' + str(title) + ' — ' + str(kind or 'Unclassified')
+            + ' · stored version_number: ' + str(row.get('version_number', '')))
+
+
+def show_saved_records(ui, project_id, drafts, manuscripts, stage_index, project):
+    """Expose exact stored evidence without reconstructing missing stages."""
+    records = [('writersblock_project_drafts', row, 'draft_content') for row in drafts]
+    records += [('writersblock_manuscript_versions', row, 'manuscript_content') for row in manuscripts]
+    snapshots = workflow_records(drafts, project_id)
+    with ui.expander('Saved record inventory', expanded=not bool(snapshots)):
+        ui.caption('Read-only queries use the linked owner and selected project ID. Same-titled projects stay separate. No records are reassigned or regenerated.')
+        ui.text('writersblock_project_drafts: ' + str(len(drafts)))
+        ui.text('writersblock_manuscript_versions: ' + str(len(manuscripts)))
+        ui.text('Recognized saved workflow snapshots: ' + str(len(snapshots)))
+        ui.text('Stored project stage: ' + str(project.get('current_stage') or 'Not recorded'))
+        ui.text('External storage reference recorded: ' + ('Yes' if project.get('storage_path') else 'No'))
+        ui.caption('External storage is not opened. Only existing database records are inspected.')
+        counts = {}
+        for table, row, key in records:
+            kind = str((row.get('draft_type') if key == 'draft_content' else row.get('source_stage')) or '')
+            label = table + ' / ' + (kind or 'Unclassified')
+            counts[label] = counts.get(label, 0) + 1
+        for label, count in sorted(counts.items()):
+            ui.text(label + ': ' + str(count))
+        if records:
+            selected = ui.selectbox('Inspect any original saved record', range(len(records)),
+                format_func=lambda n: saved_record_label(records[n], n), key='_r2_record_' + project_id)
+            table, row, key = records[selected]
+            ui.caption('Original content from ' + table + '.' + key + '. Stored record numbers are not changed or deduplicated.')
+            value = row.get(key)
+            ui.text(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2) if value is not None else '')
+    kinds = [
+        {'concept', 'concept_development', 'intake', 'premise'},
+        {'sandbox', 'plot_architecture', 'plot_outline', 'plot_architect', 'plot'},
+        {'scene_draft', 'scene_scripting', 'drafting', 'drafting_engine', 'audiobook_production_script'},
+        {'script_lock_draft', 'script_lock_revision', 'script_rewrite_draft',
+         'script_rewrite_manual_edit', 'rewrite_engine', 'editorial_review', 'integrity_review'},
+        {'publisher_assessment', 'publisher_review'},
+        {'final_output', 'final_output_conversion', 'existing_manuscript_import'},
+    ][stage_index]
+    matches = [item for item in records if str((item[1].get('draft_type') if item[2] == 'draft_content'
+                                               else item[1].get('source_stage')) or '').lower() in kinds]
+    return matches
+
+
 def run_interface(ui, auth, owner_email, app_path):
     source = Path(app_path).read_bytes()
     if hashlib.sha256(source).hexdigest() != APP_SHA256:
@@ -224,22 +298,40 @@ def run_interface(ui, auth, owner_email, app_path):
     with ui.sidebar:
         ui.success('Verified linked owner — read-only acceptance')
         project_id = ui.selectbox('Existing project', [str(p['id']) for p in projects],
-            format_func=lambda value: next(str(p.get('project_title') or 'Untitled project') for p in projects if str(p['id']) == value),
+            format_func=lambda value: next(str(p.get('project_title') or 'Untitled project') + ' · Project ' + str(i + 1)
+                                          for i, p in enumerate(projects) if str(p['id']) == value),
             key='_r2_inspect_project')
-        revisions = read_rows('writersblock_project_drafts', project_id=project_id, draft_type='project_session')
-        if not revisions:
-            ui.warning('This project has no saved workflow snapshot. Saved manuscript text remains available in the account viewer.')
-            return
+        # Legacy WBS saves stage drafts separately and stores manuscript versions
+        # in another table. A project_session-only filter hides these records.
+        drafts = read_rows('writersblock_project_drafts', project_id=project_id)
+        manuscripts = read_rows('writersblock_manuscript_versions', project_id=project_id)
+        revisions = workflow_records(drafts, project_id)
         revision_ids = [str(row['id']) for row in revisions]
         if ui.session_state.get('_r2_inspect_revision') not in revision_ids:
             ui.session_state.pop('_r2_inspect_revision', None)
-        row_id = ui.selectbox('Existing saved revision', revision_ids,
-            format_func=lambda value: next('V' + str(row.get('version_number', '')) + ' — ' + str(row.get('draft_title') or 'Saved revision') + ' · ' + str(i + 1)
-                for i, row in enumerate(revisions) if str(row['id']) == value), key='_r2_inspect_revision')
+        row_id = None
+        if revisions:
+            row_id = ui.selectbox('Existing saved revision', revision_ids,
+                format_func=lambda value: next('V' + str(row.get('version_number', '')) + ' — ' + str(row.get('draft_title') or 'Saved revision') + ' · ' + str(i + 1)
+                    for i, row in enumerate(revisions) if str(row['id']) == value), key='_r2_inspect_revision')
         stages = ['1. Concept Development', '2. Plot Architecture', '3. Scene Scripting',
                   '4. Editorial Review', '5. Publisher Assessment', '6. Final Manuscript']
         stage = ui.selectbox('Read-only stage inspection', stages, key='_r2_inspect_stage')
         ui.caption('Inspection does not approve stages, activate a license or save changes. Unapproved outputs may show their existing approval warning.')
+    stage_index = stages.index(stage)
+    stage_records = show_saved_records(ui, project_id, drafts, manuscripts, stage_index,
+                                      next(p for p in projects if str(p['id']) == project_id))
+    if not revisions:
+        ui.warning('No complete workflow snapshot was found among this project’s saved drafts. Existing stage records and manuscripts are still accessible; missing workflow fields will not be invented.')
+        ui.header(stage)
+        if stage_records:
+            for item in stage_records:
+                ui.subheader(saved_record_label(item, drafts.index(item[1]) if item[2] == 'draft_content' else manuscripts.index(item[1])))
+                value = item[1].get(item[2])
+                ui.text(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2) if value is not None else '')
+        else:
+            ui.info('No separately saved record is labelled for this stage. Inspect any original saved record in the inventory above; this does not mean manuscript text was deleted.')
+        return
     selected = next(row for row in revisions if str(row['id']) == row_id)
     saved = json.loads(selected.get('draft_content') or '{}')
     if not isinstance(saved, dict) or str(saved.get('current_project_id') or project_id) != project_id:
