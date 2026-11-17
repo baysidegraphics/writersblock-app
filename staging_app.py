@@ -15,9 +15,10 @@ from core.authentication import AuthenticationError, AuthController, public_clie
 
 st.set_page_config(page_title="WBS R2 — Owner Acceptance", page_icon="📚")
 st.title("WritersBlock Studios")
-st.subheader("R2 — Private Owner Acceptance")
-st.success("The staging startup screen is ready.")
-st.info("Owner-linked records may be opened read-only. Account linking, editing, saving, deletion, payments and AI requests remain disabled.")
+_show_setup = st.session_state.get('_r2_owner_phase') != 'signed_in'
+if _show_setup:
+    st.subheader("R2 — Private Owner Acceptance")
+    st.info("Private staging only. Saving, deletion, payments and AI requests remain disabled.")
 def configuration_categories(url, key):
     """Return fixed categories only. Never return input values or exception text."""
     result = {"SUPABASE_URL": "MISSING", "SUPABASE_KEY": "MISSING", "PROJECT_IDENTITY": "NOT_CHECKED"}
@@ -97,11 +98,12 @@ try:
     configured_url = st.secrets.get("SUPABASE_URL", "")
     configured_key = st.secrets.get("SUPABASE_KEY", "")
     checks = configuration_categories(configured_url, configured_key)
-    for name, category in checks.items():
-        st.text(name + ": " + category)
+    if _show_setup:
+        for name, category in checks.items():
+            st.text(name + ": " + category)
     if checks["SUPABASE_URL"] == "PASS" and checks["SUPABASE_KEY"] == "PASS_PUBLIC_KEY_FORMAT" and checks["PROJECT_IDENTITY"] != "WRONG_PROJECT_CLAIM":
-        st.success("WritersBlock Database target and publishable/anon key format checks passed.")
-        st.caption("Key validity, provider acceptance and account access are not verified by offline format checks.")
+        if _show_setup:
+            st.success("WritersBlock Database target and publishable/anon key format checks passed.")
     else:
         st.error("Configuration check failed. Use only the category lines above to identify the correction.")
 except (AuthenticationError, KeyError, FileNotFoundError, TypeError, ValueError):
@@ -109,7 +111,8 @@ except (AuthenticationError, KeyError, FileNotFoundError, TypeError, ValueError)
 finally:
     # Do not keep references in the module's returned run state or UI diagnostics.
     configured_url = configured_key = None
-st.caption("The previously authorized read-only connection check is complete. No further check will run automatically.")
+if _show_setup:
+    st.caption("The previously authorized read-only connection check is complete. No further check will run automatically.")
 
 
 def confirm_owner_email(auth, email, code):
@@ -253,8 +256,9 @@ def render_owner_registration():
         st.error("Owner configuration changed. Open a fresh private session before continuing.")
         return
     st.session_state["_r2_owner_configured_email"] = owner_email
-    st.subheader("Owner access")
-    st.caption("Register → Confirm Email → Signed In. No legacy account link or entitlement change is performed.")
+    if not auth.subject:
+        st.subheader("Owner access")
+        st.caption("Register → Confirm Email → Signed In. No legacy account link or entitlement change is performed.")
     if auth.subject:
         try:
             auth.verify()
@@ -262,28 +266,13 @@ def render_owner_registration():
                 auth.sign_out()
                 raise AuthenticationError()
             st.session_state["_r2_owner_phase"] = "signed_in"
-            st.success("Signed In — owner identity verified. Account linking remains disabled.")
-            st.caption("Your verified session is reused on ordinary reruns. Logout or an unusable/expired session requires sign-in again.")
-            if st.session_state.get('_r2_interface_subject') != auth.subject:
-                st.session_state['_r2_interface_subject'] = auth.subject
-                st.session_state['_r2_interface_open'] = False
-            if st.session_state.get('_r2_interface_open'):
-                st.warning('PRIVATE READ-ONLY ACCEPTANCE: Saving, approval, deletion, AI, voice generation and payments are disabled. No changes are saved.')
-                if st.button('Back to read-only account', key='r2_close_interface'):
-                    st.session_state['_r2_interface_open'] = False
-                    st.rerun()
-                from staging_commercial_acceptance import run_interface, AcceptanceBlocked
-                try:
-                    run_interface(st, auth, owner_email, Path(__file__).resolve().with_name('app.py'))
-                except AcceptanceBlocked:
-                    st.error('ACCEPTANCE_ACTION_BLOCKED: This operation requires separate authorization. No database write or provider request was sent.')
-                except Exception:
-                    st.error('ACCEPTANCE_INTERFACE_UNAVAILABLE: Return to the read-only account. No permissions were expanded.')
-                st.stop()
-            if st.button('Open commercial interface — read-only acceptance', key='r2_open_interface'):
-                st.session_state['_r2_interface_open'] = True
-                st.rerun()
-            render_readonly_owner_view(auth, owner_email)
+            from staging_commercial_acceptance import run_interface, AcceptanceBlocked
+            try:
+                run_interface(st, auth, owner_email, Path(__file__).resolve().with_name('app.py'))
+            except AcceptanceBlocked:
+                st.error('ACCEPTANCE_ACTION_BLOCKED: No database write or provider request was sent.')
+            except Exception:
+                st.error('ACCEPTANCE_INTERFACE_UNAVAILABLE: No permissions were expanded.')
             if st.button("Sign out", key="r2_owner_sign_out"):
                 auth.sign_out()
                 st.session_state["_r2_owner_phase"] = "signin"
@@ -365,11 +354,10 @@ def render_owner_registration():
 
 
 render_owner_registration()
-st.write(
-    "Your commercial application files and all legacy accounts remain unchanged. "
-    "Only explicitly opened owner-linked records may be viewed. Account linking, editing, saving and AI requests remain unavailable."
-)
+if _show_setup:
+    st.write("Your commercial application files and all legacy accounts remain unchanged. Account linking, saving and AI requests remain unavailable.")
 if not Path(__file__).resolve().with_name("app.py").is_file():
     st.error("The commercial entrypoint is missing. Do not proceed with acceptance.")
-st.caption("This is a readiness screen, not the running writing application. Do not request another check after a hosting restart.")
+if _show_setup:
+    st.caption("Private owner-acceptance setup. No writing application opens before project selection.")
 st.stop()
