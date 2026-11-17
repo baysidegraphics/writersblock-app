@@ -11,7 +11,7 @@ import os
 import httpx
 
 import streamlit as st
-from core.authentication import AuthenticationError, AuthController, public_client_key, validate_endpoint, session_controller
+from core.authentication import AuthenticationError, AuthController, public_client_key, validate_endpoint, session_controller, field
 
 st.set_page_config(page_title="WBS R2 — Owner Acceptance", page_icon="📚")
 st.title("WritersBlock Studios")
@@ -112,6 +112,29 @@ finally:
 st.caption("The previously authorized read-only connection check is complete. No further check will run automatically.")
 
 
+def confirm_owner_email(auth, email, code):
+    """Staging-only confirmation: retain ONLY a server-verified returned session."""
+    email = AuthController._registration_email(email)
+    auth.sign_out()
+    try:
+        response = auth._client.auth.verify_otp({"email": email, "token": str(code or "").strip(), "type": "signup"})
+        if field(response, "session") is None:
+            user = field(response, "user")
+            if not field(user, "email_confirmed_at") or str(field(user, "email", "")).strip().lower() != email:
+                raise AuthenticationError()
+            # Confirmation succeeded but supplied no usable login session.
+            # The only available continuation is normal password sign-in.
+            auth.sign_out()
+            return False
+        # Reuse the commercial token/session comparison and authenticated
+        # get_user verification; this also checks confirmed email and owner.
+        auth._accept_signin(response, email)
+        return True
+    except Exception:
+        auth.sign_out()
+        raise AuthenticationError("Email confirmation could not be verified. No signed-in access was granted.") from None
+
+
 def render_owner_registration():
     """Private staging only; reuse approved Auth, never call a legacy-data RPC."""
     try:
@@ -144,72 +167,95 @@ def render_owner_registration():
         st.error("Owner configuration changed. Open a fresh private session before continuing.")
         return
     st.session_state["_r2_owner_configured_email"] = owner_email
-    st.subheader("Owner registration and email confirmation")
-    st.caption("Only the configured owner can register here. No trial, license, credit or legacy account link is created.")
+    st.subheader("Owner access")
+    st.caption("Register → Confirm Email → Signed In. No legacy account link or entitlement change is performed.")
     if auth.subject:
         try:
             auth.verify()
             if auth.email != owner_email:
+                auth.sign_out()
                 raise AuthenticationError()
-            st.success("Owner password session verified. Account linking remains disabled.")
-            st.caption("The existing Auth session is reused on reruns. Password verification is required again after logout or expiration.")
+            st.session_state["_r2_owner_phase"] = "signed_in"
+            st.success("Signed In — owner identity verified. Account linking remains disabled.")
+            st.caption("Your verified session is reused on ordinary reruns. Logout or an unusable/expired session requires sign-in again.")
+            if st.button("Sign out", key="r2_owner_sign_out"):
+                auth.sign_out()
+                st.session_state["_r2_owner_phase"] = "signin"
+                st.rerun()
             return
         except AuthenticationError:
+            st.session_state["_r2_owner_phase"] = "signin"
             st.warning("Your Auth session is unavailable or expired. Sign in again; it will not be bypassed.")
 
     receipt = Path.home() / ".cache" / "wbs" / "owner-acceptance" / "single-owner-registration-20261116.json"
-    with st.form("r2_owner_registration_form", clear_on_submit=True):
-        st.text_input("Owner email", value=owner_email, disabled=True, key="r2_owner_registration_email")
-        password = st.text_input("Create password (at least 12 characters)", type="password", key="r2_owner_password")
-        repeated = st.text_input("Confirm password", type="password", key="r2_owner_password_again")
-        register = st.form_submit_button("Register owner once", disabled=receipt.exists())
-    if register:
-        try:
-            if password != repeated:
-                raise AuthenticationError("The passwords do not match.")
-            AuthController._new_password(password)
-            receipt.parent.mkdir(parents=True, exist_ok=True)
-            # Consume the authorized signup before network I/O. Unknown failures
-            # must be reviewed; never repeat signup automatically after an error.
-            with receipt.open("x", encoding="utf-8") as handle:
-                json.dump({"state": "owner_signup_attempt_started"}, handle)
-            auth.register_password(owner_email, password)
-            st.session_state["_r2_owner_notice"] = (False, "Owner registration submitted. Check your email for the confirmation code. Existing WBS accounts remain unchanged.")
-        except FileExistsError:
-            st.session_state["_r2_owner_notice"] = (True, "The authorized registration attempt is already recorded. Do not repeat signup.")
-        except AuthenticationError as error:
-            st.session_state["_r2_owner_notice"] = (True, str(error))
-        except OSError:
-            st.session_state["_r2_owner_notice"] = (True, "The single-registration receipt could not be secured. Registration was not started.")
-        finally:
-            st.session_state["_r2_owner_clear_sensitive"] = True
-        st.rerun()
-    with st.form("r2_owner_confirmation_form", clear_on_submit=True):
-        st.text_input("Registration email", value=owner_email, disabled=True, key="r2_owner_confirmation_email")
-        code = st.text_input("Email confirmation code", type="password", key="r2_owner_code")
-        confirm = st.form_submit_button("Confirm owner email")
-    if confirm:
-        try:
-            auth.confirm_registration(owner_email, code)
-            st.session_state["_r2_owner_notice"] = (False, "Owner email confirmed. Sign in with your password. No legacy account has been linked.")
-        except AuthenticationError as error:
-            st.session_state["_r2_owner_notice"] = (True, str(error))
-        finally:
-            st.session_state["_r2_owner_clear_sensitive"] = True
-        st.rerun()
-    with st.form("r2_owner_password_login_form", clear_on_submit=True):
-        st.text_input("Sign-in email", value=owner_email, disabled=True, key="r2_owner_login_email")
-        login_password = st.text_input("Password", type="password", key="r2_owner_login_password")
-        login = st.form_submit_button("Sign in as owner")
-    if login:
-        try:
-            auth.sign_in_password(owner_email, login_password)
-            st.session_state["_r2_owner_notice"] = (False, "Owner signed in. Existing account linking remains disabled.")
-        except AuthenticationError as error:
-            st.session_state["_r2_owner_notice"] = (True, str(error))
-        finally:
-            st.session_state["_r2_owner_clear_sensitive"] = True
-        st.rerun()
+    phase = st.session_state.get("_r2_owner_phase", "confirm" if receipt.exists() else "register")
+    if phase == "signed_in":
+        phase = "signin"
+    if phase == "register":
+        st.markdown("**1. Register**")
+        with st.form("r2_owner_registration_form", clear_on_submit=True):
+            st.text_input("Owner email", value=owner_email, disabled=True, key="r2_owner_registration_email")
+            password = st.text_input("Create password (at least 12 characters)", type="password", key="r2_owner_password")
+            repeated = st.text_input("Confirm password", type="password", key="r2_owner_password_again")
+            register = st.form_submit_button("Register owner once", disabled=receipt.exists())
+        if register:
+            try:
+                if password != repeated:
+                    raise AuthenticationError("The passwords do not match.")
+                AuthController._new_password(password)
+                receipt.parent.mkdir(parents=True, exist_ok=True)
+                with receipt.open("x", encoding="utf-8") as handle:
+                    json.dump({"state": "owner_signup_attempt_started"}, handle)
+                auth.register_password(owner_email, password)
+                st.session_state["_r2_owner_phase"] = "confirm"
+                st.session_state["_r2_owner_notice"] = (False, "Registration submitted. Enter the email confirmation code below.")
+            except FileExistsError:
+                st.session_state["_r2_owner_notice"] = (True, "The authorized registration attempt is already recorded. Do not repeat signup.")
+            except AuthenticationError as error:
+                st.session_state["_r2_owner_notice"] = (True, str(error))
+            except OSError:
+                st.session_state["_r2_owner_notice"] = (True, "The registration receipt could not be secured. Registration was not started.")
+            finally:
+                st.session_state["_r2_owner_clear_sensitive"] = True
+            st.rerun()
+        if st.button("Already registered? Sign in", key="r2_owner_existing_login"):
+            st.session_state["_r2_owner_phase"] = "signin"
+            st.rerun()
+    elif phase == "confirm":
+        st.markdown("**2. Confirm Email**")
+        with st.form("r2_owner_confirmation_form", clear_on_submit=True):
+            st.text_input("Registration email", value=owner_email, disabled=True, key="r2_owner_confirmation_email")
+            code = st.text_input("Email confirmation code", type="password", key="r2_owner_code")
+            confirm = st.form_submit_button("Confirm owner email")
+        if confirm:
+            try:
+                signed_in = confirm_owner_email(auth, owner_email, code)
+                st.session_state["_r2_owner_phase"] = "signed_in" if signed_in else "signin"
+                st.session_state["_r2_owner_notice"] = (False, "Email confirmed. Owner session verified." if signed_in else "Email confirmed. No usable session was returned; sign in with your password.")
+            except AuthenticationError as error:
+                st.session_state["_r2_owner_notice"] = (True, str(error))
+            finally:
+                st.session_state["_r2_owner_clear_sensitive"] = True
+            st.rerun()
+        if st.button("Already confirmed? Sign in", key="r2_owner_confirmed_login"):
+            st.session_state["_r2_owner_phase"] = "signin"
+            st.rerun()
+    else:
+        st.markdown("**Sign in**")
+        with st.form("r2_owner_password_login_form", clear_on_submit=True):
+            st.text_input("Sign-in email", value=owner_email, disabled=True, key="r2_owner_login_email")
+            login_password = st.text_input("Password", type="password", key="r2_owner_login_password")
+            login = st.form_submit_button("Sign in as owner")
+        if login:
+            try:
+                auth.sign_in_password(owner_email, login_password)
+                st.session_state["_r2_owner_phase"] = "signed_in"
+                st.session_state["_r2_owner_notice"] = (False, "Owner signed in. Existing account linking remains disabled.")
+            except AuthenticationError as error:
+                st.session_state["_r2_owner_notice"] = (True, str(error))
+            finally:
+                st.session_state["_r2_owner_clear_sensitive"] = True
+            st.rerun()
 
 
 render_owner_registration()
