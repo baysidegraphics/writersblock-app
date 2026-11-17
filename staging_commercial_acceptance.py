@@ -78,6 +78,15 @@ class CommercialImports(InterfaceImports):
         return self.generic_visit(node)
 
     def visit_FunctionDef(self, node):
+        if node.name == 'wbs_stage2_render_regenerate_novel_plots':
+            # The frozen Stage 2 renderers call this compatibility hook even
+            # outside Novel/Novella. Do not dispatch a sibling-owned helper.
+            node.body.insert(0, ast.If(test=ast.Compare(
+                left=ast.Call(func=ast.Attribute(value=ast.Attribute(
+                    value=ast.Name(id='st',ctx=ast.Load()),attr='session_state',ctx=ast.Load()),
+                    attr='get',ctx=ast.Load()),args=[ast.Constant('active_format_id')],keywords=[]),
+                ops=[ast.NotEq()],comparators=[ast.Constant('novel_prose_novella')]),
+                body=[ast.Return(value=ast.Constant(None))],orelse=[]))
         if node.name == 'wbs_request_stage_change':
             node.body = [ast.Return(value=ast.Call(
                 func=ast.Name(id='_r2_navigate', ctx=ast.Load()),
