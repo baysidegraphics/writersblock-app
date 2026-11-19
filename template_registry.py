@@ -1,5 +1,5 @@
 """
-Central registry for all ten WritersBlock format templates.
+Central registry for all twelve WritersBlock format templates.
 
 The application should store the selected `format_id` in project/session state.
 That same value controls both the center-page template and Quill's format rules.
@@ -27,6 +27,11 @@ from format_quill.quill_full_novel_blueprint import QUILL_INSTRUCTIONS as FULL_N
 from format_quill.quill_podcast_script import QUILL_INSTRUCTIONS as PODCAST_SCRIPT_QUILL
 from format_quill.quill_standard_manuscript import QUILL_INSTRUCTIONS as STANDARD_MANUSCRIPT_QUILL
 
+from templates.template_biography_memoir import TEMPLATE as BIOGRAPHY_MEMOIR_TEMPLATE
+from format_quill.quill_biography_memoir import QUILL_INSTRUCTIONS as BIOGRAPHY_MEMOIR_QUILL
+from templates.template_childrens_interactive_educational import TEMPLATE as CHILDRENS_INTERACTIVE_EDUCATIONAL_TEMPLATE
+from format_quill.quill_childrens_interactive_educational import QUILL_INSTRUCTIONS as CHILDRENS_INTERACTIVE_EDUCATIONAL_QUILL
+
 FORMAT_REGISTRY = {
     'short_story': (SHORT_STORY_TEMPLATE, SHORT_STORY_QUILL),
     'novel_prose_novella': (NOVEL_PROSE_NOVELLA_TEMPLATE, NOVEL_PROSE_NOVELLA_QUILL),
@@ -38,6 +43,8 @@ FORMAT_REGISTRY = {
     'full_novel_blueprint': (FULL_NOVEL_BLUEPRINT_TEMPLATE, FULL_NOVEL_BLUEPRINT_QUILL),
     'podcast_script': (PODCAST_SCRIPT_TEMPLATE, PODCAST_SCRIPT_QUILL),
     'standard_manuscript': (STANDARD_MANUSCRIPT_TEMPLATE, STANDARD_MANUSCRIPT_QUILL),
+    'biography_memoir': (BIOGRAPHY_MEMOIR_TEMPLATE, BIOGRAPHY_MEMOIR_QUILL),
+    'childrens_interactive_educational': (CHILDRENS_INTERACTIVE_EDUCATIONAL_TEMPLATE, CHILDRENS_INTERACTIVE_EDUCATIONAL_QUILL),
 }
 
 FORMAT_OPTIONS = [
@@ -51,6 +58,8 @@ FORMAT_OPTIONS = [
     ('full_novel_blueprint', 'Full Novel Blueprint'),
     ('podcast_script', 'Podcast Script'),
     ('standard_manuscript', 'Standard Manuscript'),
+    ('biography_memoir', 'Biography / Autobiography / Memoir'),
+    ('childrens_interactive_educational', "Children's Interactive Educational Books"),
 ]
 
 def get_template(format_id: str):

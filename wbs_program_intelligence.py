@@ -64,6 +64,7 @@ INTERNAL_STAGE_NAMES: Tuple[str, ...] = tuple(dict.fromkeys(stage.internal_stage
 
 PROJECT_TYPES: Tuple[str, ...] = (
     "Novel / Prose",
+    "Standard Manuscript",
     "Short Story",
     "Novella",
     "Audio Book",
@@ -77,6 +78,7 @@ PROJECT_TYPES: Tuple[str, ...] = (
 
 FINAL_OUTPUT_FORMATS: Tuple[str, ...] = (
     "Novel / Prose",
+    "Standard Manuscript",
     "Short Story",
     "Novella",
     "Screenplay Outline",
@@ -90,6 +92,7 @@ FINAL_OUTPUT_FORMATS: Tuple[str, ...] = (
 
 FINAL_OUTPUT_DISPLAY_LABELS: Dict[str, str] = {
     "Novel / Prose": "Novel / Prose",
+    "Standard Manuscript": "Standard Manuscript",
     "Short Story": "Short Story",
     "Novella": "Novella",
     "Screenplay Outline": "Screenplay",
@@ -328,6 +331,10 @@ def stage_spec(step: int) -> StageSpec:
 
 def resolve_step(internal_stage: str, *, export_view: Optional[bool] = None) -> StageSpec:
     internal = str(internal_stage or "").strip()
+    # Optional report stage added by the modular application. Keep every
+    # historical stage number intact; this shares the existing report mode.
+    if internal == "Publisher Assessment":
+        return StageSpec(6, "Publisher Assessment", internal)
     candidates = [spec for spec in STAGES if spec.internal_stage == internal]
     if not candidates:
         raise ValueError(f"Unsupported WritersBlock internal stage: {internal_stage}")

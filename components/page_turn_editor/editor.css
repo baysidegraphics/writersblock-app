@@ -1,0 +1,7 @@
+.wbs-page-editor {position:relative;border:1px solid #888;border-radius:6px;background:#171717;height:420px;}
+.wbs-page-editor textarea,.wbs-page-ink {box-sizing:border-box;position:absolute;inset:0;width:100%;height:100%;margin:0;padding:12px;border:0;font:16px/1.6 monospace;letter-spacing:normal;tab-size:4;white-space:pre-wrap;overflow-wrap:break-word;}
+.wbs-page-ink {z-index:1;overflow:hidden;color:#fff;pointer-events:none;}
+.wbs-page-editor textarea {z-index:2;resize:none;color:transparent;-webkit-text-fill-color:transparent;caret-color:white;background:transparent;}
+.wbs-page-editor textarea::selection {background:rgba(80,130,210,.4);color:transparent;}
+.wbs-page-turn-token {color:#ff4b4b;}
+.wbs-page-count {font-size:13px;margin-top:8px;max-height:90px;overflow:auto;}
