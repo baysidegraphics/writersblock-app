@@ -17,6 +17,16 @@ class CommercialUI(ReadUI):
     # All project switches go through the explicit Projects opening gate.
     NAVIGATION = ReadUI.NAVIGATION - {'sidebar_load_saved_item'}
     def __getattr__(self, name):
+        if name == 'info':
+            def info(message, *args, **kwargs):
+                import streamlit as st
+                direction = str(st.session_state.get('chosen_option') or '').strip()
+                if (message == 'The selected Plot Architecture is ready. Generate its scene structure when you choose; scenes will not be scripted automatically.'
+                        and direction.casefold() in {'', 'none'}):
+                    message = ('No Plot Architecture direction is selected. Return to Stage 2 to inspect the available directions. '
+                               'This read-only preview cannot generate or save writing.')
+                return self._ui.info(message, *args, **kwargs)
+            return info
         if name == 'sidebar':
             return CommercialUI(self._ui.sidebar)
         if name in {'container', 'expander', 'form', 'popover', 'empty', 'tabs', 'columns'}:
