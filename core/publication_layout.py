@@ -301,9 +301,9 @@ def render_final(context):
         st.warning('Save the adjusted image layout before downloading.');return
     from core.text import safe_download_stem
     stem=safe_download_stem(state.get('project_title') or 'manuscript')
-    if fmt in __import__('core.inline_images',fromlist=['SUPPORTED']).SUPPORTED:
+    if fmt=='short_story' or fmt in __import__('core.inline_images',fromlist=['SUPPORTED']).SUPPORTED:
         from core.image_pdf import download
-        download(st,build_docx(saved),stem,'publication_image')
+        download(st,build_docx(saved),stem,'publication_image',preserve_paragraph_layout=fmt=='short_story')
     st.download_button('Download Formatted Manuscript (.docx)',data=build_docx(saved),file_name=stem+'.docx',mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document',key='publication_docx')
     text=state.get('current_draft_output') or ''
     from core.manuscript_structure import configured

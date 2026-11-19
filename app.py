@@ -434,6 +434,7 @@ def wbs_merge_live_concept_widgets_into_snapshot(snapshot, fmt):
 
 def get_project_session_snapshot():
     snapshot_keys = [
+        "wbs_navigation_checkpoint",
         "project_stage",
         "story_seed",
         "wbs_project_original_concept",
@@ -1571,7 +1572,9 @@ def load_saved_project_session_to_state(saved_session_row):
     milestones = {"Intake": 1, "Sandbox": 2, "Plot Architect": 3,
                   "Drafting": 4, "Drafting Engine": 4, "Isolation Guardrail": 4,
                   "Revision Engine": 4, "Rewrite Engine": 4}
-    saved_max = milestones.get(saved_stage, 1)
+    from core.workflow_checkpoint import saved_level
+    saved_max = max(milestones.get(saved_stage, 1),
+                    saved_level(snapshot, load_project_id, saved_session_row.get("id"), restored_format_id))
     if str(snapshot.get("current_draft_output") or "").strip():
         saved_max = max(saved_max, 4)
     if saved_export or str(snapshot.get("final_output_text") or "").strip():
@@ -6785,6 +6788,8 @@ def wbs_stage2_verify_regen_source():
 
 
 def wbs_stage2_render_regenerate_novel_plots():
+    if st.session_state.get('active_format_id') != 'novel_prose_novella':
+        return
     from core.workflow_runtime import call_format_helper
     return call_format_helper('wbs_stage2_render_regenerate_novel_plots', globals())
 
@@ -7808,6 +7813,15 @@ def wbs_complete_stage_change():
         return
     target = pending["target"]
     previous = pending["source"]
+    try:
+        from core.workflow_checkpoint import persist
+        persist(st.session_state, supabase, get_current_user_id(), get_active_project_id(),
+                st.session_state.get("_wbs_active_saved_session_row_id"), target,
+                bool(pending["export_view"]))
+    except Exception:
+        st.session_state["wbs_pending_stage_change"] = pending
+        st.error("Stage progress could not be saved. Your current stage and writing are preserved. Reload if another session saved this revision.")
+        return
     # Review navigation must not clear or regenerate any developed content.
     # Downstream invalidation belongs to an explicit edit/generation action.
     st.session_state.project_stage = target

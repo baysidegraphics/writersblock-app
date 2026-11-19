@@ -39,6 +39,8 @@ LEGACY_FORMAT_IDS.update({
 # Reused for loads from older project-session snapshots that omitted newer keys.
 # No keys connected to access, licensing, authentication, or secrets belong here.
 PROJECT_RESTORE_DEFAULTS = {
+    "wbs_navigation_checkpoint": {},
+    "wbs_stage4_final_acceptance": {},
     "project_stage": "Intake",
     "story_seed": "",
     "wbs_project_original_concept": "",

@@ -8,7 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 
-APP_SHA256 = '3559ca04947c985688b0f3c8c7f7694e04ce4f31362773d2ea73fe3df0490614'
+APP_SHA256 = '18bcd14dce6bf4b426dd7a7a2144a03160986ff824e16a8be422cb770d026a19'
 
 
 class AcceptanceBlocked(PermissionError):

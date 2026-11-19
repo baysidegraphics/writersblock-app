@@ -22,17 +22,19 @@ def _font_family_paths(family):
 def available():
     return importlib.util.find_spec('reportlab') is not None or bool(os.environ.get('WBS_TEST_PDF_WORKER'))
 
-def export_pdf(docx_bytes):
+def export_pdf(docx_bytes,*,preserve_paragraph_layout=False):
     if importlib.util.find_spec('reportlab') is None:
         worker=os.environ.get('WBS_TEST_PDF_WORKER')
         if not worker:raise RuntimeError('PDF export requires the reportlab dependency listed in requirements.txt.')
-        result=subprocess.run([worker,'-X','utf8',__file__],input=docx_bytes,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=45,check=False)
+        command=[worker,'-X','utf8',__file__]
+        if preserve_paragraph_layout:command.append('--manuscript-spacing')
+        result=subprocess.run(command,input=docx_bytes,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=45,check=False)
         if result.returncode or not result.stdout.startswith(b'%PDF'):raise RuntimeError('Local PDF rendering failed; DOCX remains available.')
         return result.stdout
-    return render(docx_bytes)
+    return render(docx_bytes,preserve_paragraph_layout=preserve_paragraph_layout)
 
 
-def render(payload):
+def render(payload,*,preserve_paragraph_layout=False):
     from docx import Document
     from docx.oxml.ns import qn
     from docx.text.paragraph import Paragraph as WordParagraph
@@ -107,14 +109,15 @@ def render(payload):
         if node.tag==qn('w:p'):
             if node.xpath('.//w:br[@w:type="page"]'):groups.append([])
             p=WordParagraph(node,doc)
-            if not p.text and not node.xpath('.//w:drawing'):continue
+            if not preserve_paragraph_layout and not p.text and not node.xpath('.//w:drawing'):continue
             if node.xpath('.//w:pict'):continue
             groups[-1].append(p)
     def draw_page(canvas,document):
         canvas.saveState();canvas.setFont('Times-Roman',10)
         footer=any(p._p.xpath('.//w:fldChar') for p in section.footer.paragraphs)
         if footer:canvas.drawCentredString(width/2,bottom/2,str(document.page))
-        else:canvas.drawRightString(width-right,height-top/2,str(document.page))
+        elif not preserve_paragraph_layout or any(p._p.xpath('.//w:fldChar') for p in section.header.paragraphs):
+            canvas.drawRightString(width-right,height-top/2,str(document.page))
         canvas.restoreState()
     story=[]
     for index,paragraphs in enumerate(groups):
@@ -146,6 +149,23 @@ def render(payload):
                 pf=p.paragraph_format;sf=p.style.paragraph_format
                 align=pf.alignment if pf.alignment is not None else sf.alignment
                 style=ParagraphStyle('body',fontName=chosen,fontSize=size,leading=size*1.25,alignment={1:1,2:2}.get(int(align or 0),0),spaceAfter=4,leftIndent=(pf.left_indent or sf.left_indent).pt if (pf.left_indent or sf.left_indent) else 0,rightIndent=(pf.right_indent or sf.right_indent).pt if (pf.right_indent or sf.right_indent) else 0,firstLineIndent=(pf.first_line_indent or sf.first_line_indent).pt if (pf.first_line_indent or sf.first_line_indent) else 0)
+                if preserve_paragraph_layout:
+                    # Word properties inherit through paragraph styles. Explicit
+                    # zero spacing/indent must not be mistaken for a missing value.
+                    chain=[pf];parent=p.style
+                    while parent is not None:
+                        chain.append(parent.paragraph_format);parent=parent.base_style
+                    def property_value(key,default=None):
+                        return next((getattr(value,key) for value in chain if getattr(value,key) is not None),default)
+                    line=property_value('line_spacing',1.0)
+                    style.leading=line.pt if hasattr(line,'pt') else size*1.2*float(line)
+                    style.spaceBefore=(property_value('space_before').pt if property_value('space_before') is not None else 0)
+                    style.spaceAfter=(property_value('space_after').pt if property_value('space_after') is not None else 0)
+                    for attr,key in (('leftIndent','left_indent'),('rightIndent','right_indent'),('firstLineIndent','first_line_indent')):
+                        value=property_value(key);setattr(style,attr,value.pt if value is not None else 0)
+                    style.keepWithNext=bool(property_value('keep_with_next',False))
+                    if property_value('page_break_before',False):story.append(PageBreak())
+                    style.allowWidows=0;style.allowOrphans=0
                 text=''.join(('<b>' if r.bold else '')+('<i>' if r.italic else '')+escape(r.text).replace('\n','<br/>')+('</i>' if r.italic else '')+('</b>' if r.bold else '') for r in p.runs)
                 paragraph=Paragraph(text or '&#160;',style)
                 images=[]
@@ -172,11 +192,11 @@ def render(payload):
     return out.getvalue()
 
 
-def download(st,docx_bytes,stem,key):
+def download(st,docx_bytes,stem,key,*,preserve_paragraph_layout=False):
     if available():
-        try:payload=export_pdf(docx_bytes)
+        try:payload=export_pdf(docx_bytes,preserve_paragraph_layout=preserve_paragraph_layout)
         except Exception:st.warning('PDF rendering failed. Your writing and images are preserved; use DOCX while this layout is checked.')
-        else:st.download_button('Download Illustrated PDF',data=payload,file_name=stem+'.pdf',mime='application/pdf',key=key+'_pdf')
+        else:st.download_button('Download Manuscript PDF' if preserve_paragraph_layout else 'Download Illustrated PDF',data=payload,file_name=stem+'.pdf',mime='application/pdf',key=key+'_pdf')
     else:st.caption('PDF export requires the reportlab dependency. DOCX contains the embedded images and wrapping rules.')
 
-if __name__=='__main__':sys.stdout.buffer.write(render(sys.stdin.buffer.read()))
+if __name__=='__main__':sys.stdout.buffer.write(render(sys.stdin.buffer.read(),preserve_paragraph_layout='--manuscript-spacing' in sys.argv))
