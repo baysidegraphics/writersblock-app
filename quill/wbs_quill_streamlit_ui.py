@@ -121,7 +121,15 @@ def _render_quill_logo(st: Any, *, width: int) -> None:
             else:output=image
             buffer=BytesIO();output.save(buffer,format='PNG')
             encoded=base64.b64encode(buffer.getvalue()).decode('ascii')
-            target.markdown('<img alt="Quill owl" src="data:image/png;base64,'+encoded+'" style="width:'+str(int(width))+'px;max-width:100%;height:auto">',unsafe_allow_html=True)
+            image_src='data:image/png;base64,'+encoded
+            target.markdown(
+                '<span style="position:relative;display:inline-block;width:'+str(int(width))+'px;max-width:100%">'
+                '<img alt="Quill owl" src="'+image_src+'" style="width:100%;height:auto">'
+                '<img alt="" aria-hidden="true" src="'+image_src+'" '
+                'style="position:absolute;inset:0;width:100%;height:auto;pointer-events:none;'
+                'clip-path:inset(72% 0 0 0);filter:grayscale(.85) brightness(2.35) contrast(1.08) '
+                'drop-shadow(0 0 1px rgba(235,239,245,.35))">'
+                '</span>',unsafe_allow_html=True)
         def __getattr__(self,name):return getattr(target,name)
     st=EmbeddedTarget()
     for logo_path in QUILL_LOGO_CANDIDATES:
@@ -1032,6 +1040,11 @@ def render_quill_studio_coach(
         .wbs-quill-v18-marker {{ height: 0; overflow: hidden; }}
         .wbs-quill-v18-collapsed-marker {{ height: 0; overflow: hidden; }}
 
+        div[data-testid="stColumn"]:has(.wbs-quill-v18-marker) > div[data-testid="stVerticalBlock"] {{
+            gap: .5rem !important;
+        }}
+
+
         /* Reserve permanent page space for the fixed Quill panel. */
         section.main > div.block-container,
         div[data-testid="stMainBlockContainer"] {{
@@ -1374,39 +1387,37 @@ def render_quill_studio_coach(
             from quill.test_connection import render as render_test_connection
             render_test_connection(st,state)
 
-        # Row 1: full-width capability reference so the complete label is visible.
-        if hasattr(st, "popover"):
-            with st.popover("WHAT CAN QUILL DO?", use_container_width=True):
-                st.markdown(
-                    """
-**Quill — Your Frontline Editor-in-Chief**
-
-**Creative/editorial and complete WBS operational assistance:**
-
-- Plot direction and alternate story paths
-- Character development, motivation, and interaction
-- Conflict, tension, stakes, and scene ideas
-- Dialogue choices and character voice
-- Pacing, structure, and scene order
-- Actual WBS controls, all six stages, saving and revisions
-- Manuscript editing, image insertion, Integrity Review and exports
-- Troubleshooting current project requirements without bypassing approvals
-- Continuity and story logic
-- Tone, atmosphere, and style
-- Twists, reveals, endings, and “what if?” ideas
-- Brainstorming from your current manuscript or plot line
-- Explaining WritersBlock stages and controls
-
-Quill can discuss and suggest freely, but **you decide what becomes part of the project**.
-                    """
-                )
-
-        # Row 3: collapse control centered directly under the speaker.
-        collapse_space, collapse_button = st.columns(
-            [3.63, 1.87],
-            vertical_alignment="center",
+        # Capability reference and collapse control share a single compact row.
+        header_reference, header_toggle = st.columns(
+            [5, 1], gap="small", vertical_alignment="center",
         )
-        with collapse_button:
+        with header_reference:
+            if hasattr(st, "popover"):
+                with st.popover("WHAT CAN QUILL DO?", use_container_width=True):
+                    st.markdown(
+                        """
+    **Quill — Your Frontline Editor-in-Chief**
+
+    **Creative/editorial and complete WBS operational assistance:**
+
+    - Plot direction and alternate story paths
+    - Character development, motivation, and interaction
+    - Conflict, tension, stakes, and scene ideas
+    - Dialogue choices and character voice
+    - Pacing, structure, and scene order
+    - Actual WBS controls, all six stages, saving and revisions
+    - Manuscript editing, image insertion, Integrity Review and exports
+    - Troubleshooting current project requirements without bypassing approvals
+    - Continuity and story logic
+    - Tone, atmosphere, and style
+    - Twists, reveals, endings, and “what if?” ideas
+    - Brainstorming from your current manuscript or plot line
+    - Explaining WritersBlock stages and controls
+
+    Quill can discuss and suggest freely, but **you decide what becomes part of the project**.
+                        """
+                    )
+        with header_toggle:
             if st.button(
                 ">",
                 key="wbs_quill_collapse_v32",
@@ -1416,8 +1427,8 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                 state[COLLAPSED_KEY] = True
                 st.rerun()
         # Row 4: Quill mark left, Ask QUILL centered in the remaining header area.
-        logo_col, title_col, title_space = st.columns(
-            [2.50, 1.20, 1.80],
+        header_left_space, logo_col, title_col, header_right_space = st.columns(
+            [.55, 2.10, 2.25, .55], gap="small",
             vertical_alignment="center",
         )
 
@@ -1426,11 +1437,13 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
 
         with title_col:
             st.markdown(
-                '<div class="wbs-quill-v11-title">Ask QUILL</div>',
+                '<div class="wbs-quill-header-copy" style="transform:translateY(-5px)">'
+                '<div class="wbs-quill-v11-title">Ask QUILL</div>'
+                '<div class="wbs-quill-tagline" style="text-align:center;width:100%;font-size:.85rem;line-height:1.35;color:#CBD2DC;margin:.45rem 0 0">'
+                '<span style="white-space:nowrap">Your Frontline</span><br>'
+                '<span style="white-space:nowrap">Editor-in-Chief</span></div></div>',
                 unsafe_allow_html=True,
             )
-
-        st.caption('Your Frontline Editor-in-Chief')
         st.markdown(
             '<div class="wbs-quill-v11-prompt">What would you like to ask?</div>',
             unsafe_allow_html=True,
@@ -1483,9 +1496,10 @@ Quill can discuss and suggest freely, but **you decide what becomes part of the 
                 key=f"{QUILL_STATE_PREFIX}chat_form",
                 clear_on_submit=True,
             ):
-                question = st.text_input(
+                question = st.text_area(
                     "Message Quill",
-                    placeholder="Type your question here… then press Enter",
+                    placeholder="Type your question here… then select SEND",
+                    height=140,
                     max_chars=4000,
                     label_visibility="collapsed",
                 )
