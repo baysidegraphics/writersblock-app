@@ -7871,6 +7871,198 @@ def wbs_reached_review_level(state):
 _wbs_unlocked = wbs_reached_review_level(st.session_state)
 from core.stage_navigation import ACTIVE_NAV_STYLE
 st.sidebar.markdown(ACTIVE_NAV_STYLE, unsafe_allow_html=True)
+
+def wbs_apply_layout_refresh_css():
+    """Approved presentation refresh only; no backend, database, or workflow logic changes."""
+    st.markdown(
+        """
+        <style>
+        :root {
+            --wbs-sidebar-bg: #191d24;
+            --wbs-sidebar-border: #2d3440;
+            --wbs-main-bg: #303741;
+            --wbs-main-border: #424b59;
+            --wbs-idle: #666666;
+            --wbs-idle-border: #7b7b7b;
+            --wbs-active: #0B84FF;
+            --wbs-active-hover: #2390ff;
+            --wbs-locked: #454d59;
+            --wbs-green: #21864d;
+            --wbs-green-hover: #289a59;
+            --wbs-red: #c84242;
+            --wbs-red-hover: #d85353;
+            --wbs-text: #F6F8FB;
+            --wbs-muted: #CBD2DC;
+            --wbs-input-bg: #1F242C;
+            --wbs-input-border: #4C5665;
+            --wbs-note: #F2E8A3;
+        }
+
+        [data-testid="stAppViewContainer"] {
+            background: #0f1318 !important;
+        }
+
+        section[data-testid="stSidebar"] {
+            background: var(--wbs-sidebar-bg) !important;
+            border-right: 1px solid var(--wbs-sidebar-border) !important;
+        }
+
+        section[data-testid="stSidebar"] > div {
+            background: var(--wbs-sidebar-bg) !important;
+        }
+
+        section[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] {
+            gap: 0.45rem !important;
+        }
+
+        section[data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: rgba(255,255,255,0.03) !important;
+            border: 1px solid #343c47 !important;
+            border-radius: 12px !important;
+        }
+
+        div[data-testid="stMainBlockContainer"] {
+            max-width: 1540px !important;
+            padding-top: 1.05rem !important;
+            padding-right: 1.45rem !important;
+            padding-bottom: 2rem !important;
+            padding-left: 1.45rem !important;
+            background: var(--wbs-main-bg) !important;
+            border: 1px solid var(--wbs-main-border) !important;
+            border-radius: 16px !important;
+            box-sizing: border-box !important;
+        }
+
+        [data-testid="stMainBlockContainer"] h1,
+        [data-testid="stMainBlockContainer"] h2,
+        [data-testid="stMainBlockContainer"] h3,
+        [data-testid="stMainBlockContainer"] h4,
+        [data-testid="stMainBlockContainer"] p,
+        [data-testid="stMainBlockContainer"] label,
+        [data-testid="stMainBlockContainer"] li,
+        [data-testid="stMainBlockContainer"] span,
+        [data-testid="stMainBlockContainer"] div {
+            color: var(--wbs-text);
+        }
+
+        [data-testid="stMainBlockContainer"] .stCaption,
+        [data-testid="stMainBlockContainer"] [data-testid="stMarkdownContainer"] p em {
+            color: var(--wbs-muted) !important;
+        }
+
+        [data-testid="stTextInput"] input,
+        [data-testid="stTextArea"] textarea,
+        [data-baseweb="select"] > div,
+        [data-testid="stNumberInput"] input {
+            background: var(--wbs-input-bg) !important;
+            border: 1px solid var(--wbs-input-border) !important;
+            color: var(--wbs-text) !important;
+        }
+
+        [data-baseweb="select"] * {
+            color: var(--wbs-text) !important;
+        }
+
+        [data-testid="stMainBlockContainer"] .stButton > button,
+        section[data-testid="stSidebar"] .stButton > button {
+            border-radius: 10px !important;
+            font-weight: 700 !important;
+            box-shadow: none !important;
+        }
+
+        [data-testid="stMainBlockContainer"] .stButton > button[kind="primary"] {
+            background: var(--wbs-red) !important;
+            border-color: var(--wbs-red) !important;
+            color: #ffffff !important;
+        }
+
+        [data-testid="stMainBlockContainer"] .stButton > button[kind="primary"]:hover {
+            background: var(--wbs-red-hover) !important;
+            border-color: var(--wbs-red-hover) !important;
+            color: #ffffff !important;
+        }
+
+        section[data-testid="stSidebar"] .stButton > button {
+            min-height: 46px !important;
+            justify-content: flex-start !important;
+            padding-left: 0.95rem !important;
+            background: var(--wbs-idle) !important;
+            border: 1px solid var(--wbs-idle-border) !important;
+            color: #ffffff !important;
+        }
+
+        section[data-testid="stSidebar"] .stButton > button:hover {
+            border-color: var(--wbs-active) !important;
+            color: #ffffff !important;
+        }
+
+        section[data-testid="stSidebar"] .st-key-global_reset button {
+            background: var(--wbs-green) !important;
+            border-color: var(--wbs-green) !important;
+            color: #ffffff !important;
+        }
+        section[data-testid="stSidebar"] .st-key-global_reset button:hover {
+            background: var(--wbs-green-hover) !important;
+            border-color: var(--wbs-green-hover) !important;
+        }
+
+        section[data-testid="stSidebar"] .st-key-nav_intake_active button,
+        section[data-testid="stSidebar"] .st-key-nav_sandbox_active button,
+        section[data-testid="stSidebar"] .st-key-nav_plot_active button,
+        section[data-testid="stSidebar"] .st-key-nav_guard_active button,
+        section[data-testid="stSidebar"] .st-key-nav_publisher_assessment_active button,
+        section[data-testid="stSidebar"] .st-key-nav_export_active button {
+            background: var(--wbs-active) !important;
+            border-color: var(--wbs-active) !important;
+            color: #ffffff !important;
+        }
+
+        section[data-testid="stSidebar"] .st-key-nav_sandbox_locked button,
+        section[data-testid="stSidebar"] .st-key-nav_plot_locked button,
+        section[data-testid="stSidebar"] .st-key-nav_guard_locked button,
+        section[data-testid="stSidebar"] .st-key-nav_publisher_assessment_locked button,
+        section[data-testid="stSidebar"] .st-key-nav_export_locked button {
+            background: var(--wbs-locked) !important;
+            border-color: var(--wbs-locked) !important;
+            color: #d0d6df !important;
+            opacity: 1 !important;
+        }
+
+        [data-testid="stSidebar"] .stAlert {
+            background: rgba(255,255,255,0.04) !important;
+            border: 1px solid #36404d !important;
+        }
+
+        [data-testid="stSidebar"] .stInfo,
+        [data-testid="stSidebar"] .stSuccess,
+        [data-testid="stSidebar"] .stWarning {
+            color: var(--wbs-text) !important;
+        }
+
+        [data-testid="stSidebar"] .stCaption,
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] li,
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] .st-emotion-cache-ue6h4q,
+        section[data-testid="stSidebar"] .st-emotion-cache-1wivap2 {
+            color: var(--wbs-text) !important;
+        }
+
+        .stAlert[data-baseweb="notification"],
+        div[data-testid="stNotification"] {
+            border-radius: 10px !important;
+        }
+
+        [data-testid="stMarkdownContainer"] .wbs-note,
+        [data-testid="stMarkdownContainer"] .wbs-note * {
+            color: var(--wbs-note) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+wbs_apply_layout_refresh_css()
 can_navigate_to_sandbox = _wbs_unlocked >= 2
 can_navigate_to_plot = _wbs_unlocked >= 3
 can_navigate_to_drafting = _wbs_unlocked >= 4
@@ -7886,41 +8078,41 @@ can_use_revision = access_allows("revision")
 can_use_rewrite = access_allows("rewrite")
 
 if st.session_state.project_stage == "Intake":
-    st.sidebar.button("🔵 1. Concept Development (Active)", key="nav_intake_active", use_container_width=True, type="primary")
+    st.sidebar.button("1. Concept Development", key="nav_intake_active", use_container_width=True, type="primary")
 else:
-    if st.sidebar.button("⚪ 1. Concept Development", key="nav_intake", use_container_width=True):
+    if st.sidebar.button("1. Concept Development", key="nav_intake", use_container_width=True):
         wbs_request_stage_change("Intake")
 
 if st.session_state.project_stage == "Sandbox":
-    st.sidebar.button("🔵 2. Plot Architecture (Active)", key="nav_sandbox_active", use_container_width=True, type="primary")
+    st.sidebar.button("2. Plot Architecture", key="nav_sandbox_active", use_container_width=True, type="primary")
 elif can_navigate_to_sandbox:
-    if st.sidebar.button("⚪ 2. Plot Architecture", key="nav_sandbox", use_container_width=True):
+    if st.sidebar.button("2. Plot Architecture", key="nav_sandbox", use_container_width=True):
         wbs_request_stage_change("Sandbox")
 else:
-    st.sidebar.button("🔒 2. Plot Architecture (Locked)", key="nav_sandbox_locked", disabled=True, use_container_width=True)
+    st.sidebar.button("2. Plot Architecture", key="nav_sandbox_locked", disabled=True, use_container_width=True)
 
 if st.session_state.project_stage == "Plot Architect":
-    st.sidebar.button("🔵 3. Scene Scripting (Active)", key="nav_plot_active", use_container_width=True, type="primary")
+    st.sidebar.button("3. Scene Scripting", key="nav_plot_active", use_container_width=True, type="primary")
 elif can_navigate_to_plot:
-    if st.sidebar.button("⚪ 3. Scene Scripting", key="nav_plot", use_container_width=True):
+    if st.sidebar.button("3. Scene Scripting", key="nav_plot", use_container_width=True):
         wbs_request_stage_change("Plot Architect")
 else:
-    st.sidebar.button("🔒 3. Scene Scripting (Locked)", key="nav_plot_locked", disabled=True, use_container_width=True)
+    st.sidebar.button("3. Scene Scripting", key="nav_plot_locked", disabled=True, use_container_width=True)
 
 # Five-stage navigation: drafting runs internally; editing tools share Stage 4.
 # Legacy internal stages remain loadable for earlier saved projects.
 if st.session_state.project_stage == "Drafting Engine":
-    st.sidebar.info("🔵 Scene Development — Manual Review (Active)")
+    st.sidebar.info("4. Editorial & Publisher Review")
 
 _is_draft_review = (st.session_state.project_stage in {"Isolation Guardrail", "Revision Engine", "Rewrite Engine"}
                     and not (st.session_state.project_stage == "Isolation Guardrail" and st.session_state.get("export_view", False)))
 if _is_draft_review:
-    st.sidebar.button("🔵 4. Editorial & Publisher Review (Active)", key="nav_guard_active", use_container_width=True, type="primary")
+    st.sidebar.button("4. Editorial & Publisher Review", key="nav_guard_active", use_container_width=True, type="primary")
 elif can_navigate_to_guardrail:
-    if st.sidebar.button("⚪ 4. Editorial & Publisher Review", key="nav_guard", use_container_width=True):
+    if st.sidebar.button("4. Editorial & Publisher Review", key="nav_guard", use_container_width=True):
         wbs_request_stage_change("Isolation Guardrail", export_view=False)
 else:
-    st.sidebar.button("🔒 4. Editorial & Publisher Review (Locked)", key="nav_guard_locked", disabled=True, use_container_width=True)
+    st.sidebar.button("4. Editorial & Publisher Review", key="nav_guard_locked", disabled=True, use_container_width=True)
 
 # The original saved internal stage IDs remain unchanged for project/session restoration.
 # New sequence: Stage 4 editorial approval -> Stage 5 optional publisher assessment
@@ -7937,16 +8129,16 @@ _wbs_stage5_passport = (
 )
 _wbs_stage5_visited = st.session_state.get("_wbs_stage5_passport") == _wbs_stage5_passport
 if st.session_state.project_stage == "Publisher Assessment":
-    st.sidebar.button("🔵 5. Publisher & Market Readiness (Active)",
+    st.sidebar.button("5. Publisher & Market Readiness",
                       key="nav_publisher_assessment_active", use_container_width=True, type="primary")
 elif _wbs_stage5_ready:
-    if st.sidebar.button("⚪ 5. Publisher & Market Readiness (Optional)",
+    if st.sidebar.button("5. Publisher & Market Readiness",
                          key="nav_publisher_assessment", use_container_width=True):
         st.session_state.project_stage = "Publisher Assessment"
         st.session_state.export_view = False
         st.rerun()
 else:
-    st.sidebar.button("🔒 5. Publisher & Market Readiness (Locked)",
+    st.sidebar.button("5. Publisher & Market Readiness",
                       key="nav_publisher_assessment_locked", disabled=True,
                       use_container_width=True)
 
@@ -7960,12 +8152,12 @@ _wbs_legacy_final_exists = (
     and wbs_stage4_final_access_ready()
 )
 if st.session_state.project_stage == "Isolation Guardrail" and st.session_state.get("export_view", False):
-    st.sidebar.button(f"🔵 6. {stage_8_label} (Active)", key="nav_export_active", use_container_width=True, type="primary")
+    st.sidebar.button(f"6. {stage_8_label}", key="nav_export_active", use_container_width=True, type="primary")
 elif _wbs_stage6_ready or _wbs_legacy_final_exists:
-    if st.sidebar.button(f"⚪ 6. {stage_8_label}", key="nav_export", use_container_width=True):
+    if st.sidebar.button(f"6. {stage_8_label}", key="nav_export", use_container_width=True):
         wbs_request_stage_change("Isolation Guardrail", export_view=True)
 else:
-    st.sidebar.button(f"🔒 6. {stage_8_label} (Locked)", key="nav_export_locked", disabled=True, use_container_width=True)
+    st.sidebar.button(f"6. {stage_8_label}", key="nav_export_locked", disabled=True, use_container_width=True)
 
 st.sidebar.markdown("---")
 

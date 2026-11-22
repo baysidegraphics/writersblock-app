@@ -15,7 +15,7 @@ from core.authentication import AuthenticationError, AuthController, public_clie
 
 st.set_page_config(page_title="WBS R2 — Owner Acceptance", page_icon="📚")
 st.title("WritersBlock Studios")
-_show_setup = st.session_state.get('_r2_owner_phase') != 'signed_in'
+_show_setup = False  # Live owner preview does not expose setup diagnostics.
 if _show_setup:
     st.subheader("R2 — Private Owner Acceptance")
     st.info("Private staging only. Saving, deletion, payments and AI requests remain disabled.")
@@ -258,7 +258,7 @@ def render_owner_registration():
     st.session_state["_r2_owner_configured_email"] = owner_email
     if not auth.subject:
         st.subheader("Owner access")
-        st.caption("Register → Confirm Email → Signed In. No legacy account link or entitlement change is performed.")
+        st.caption("Sign in with your existing owner account. New registration is disabled in this private preview.")
     if auth.subject:
         try:
             auth.verify()
@@ -283,7 +283,7 @@ def render_owner_registration():
             st.warning("Your Auth session is unavailable or expired. Sign in again; it will not be bypassed.")
 
     receipt = Path.home() / ".cache" / "wbs" / "owner-acceptance" / "single-owner-registration-20261116.json"
-    phase = st.session_state.get("_r2_owner_phase", "confirm" if receipt.exists() else "register")
+    phase = "signin"  # Existing owner only; never repeat registration after a restart.
     if phase == "signed_in":
         phase = "signin"
     if phase == "register":
