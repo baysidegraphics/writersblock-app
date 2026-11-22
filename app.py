@@ -7974,13 +7974,21 @@ def wbs_apply_layout_refresh_css():
             border-radius: 6px !important;
         }
 
-        /* Center the existing narrow form in the area reserved beside Quill. */
+        /* Use the available center width, with 32px separation from both side panels. */
         @media (min-width: 1101px) {
+            div[data-testid="stAppViewContainer"] div[data-testid="stMainBlockContainer"] {
+                max-width: none !important;
+                padding-left: 32px !important;
+                padding-right: 382px !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"] .wbs-concept-form-anchor) {
+                gap: 0 !important;
+            }
             div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"] .wbs-concept-form-anchor) > div[data-testid="stColumn"]:has(.wbs-concept-form-anchor) {
-                flex: 0 1 740px !important;
-                width: min(100%, 740px) !important;
+                flex: 1 1 0 !important;
+                width: 100% !important;
                 min-width: 0 !important;
-                margin-inline: auto !important;
+                margin-inline: 0 !important;
             }
             div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"] .wbs-concept-form-anchor) > div[data-testid="stColumn"]:not(:has(.wbs-concept-form-anchor)) {
                 flex: 0 0 0 !important;
