@@ -381,6 +381,8 @@ def render(context):
                 st.text_area('Replacement Source — Read Only:', value=imported_source_text, height=320, disabled=True, key=f"concept_existing_draft_read_only_preview_{'novel_prose_novella'}")
             else:
                 st.info('Upload a DOCX or TXT source to use it as the replacement starting material.')
+        from core.starting_storyline_preview import render_starting_storyline_preview
+        render_starting_storyline_preview(st)
         _wbs_short_story_stage1 = True
         st.markdown('---')
         _ss_master = wbs_has_saved_master()

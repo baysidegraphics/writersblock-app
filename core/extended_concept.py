@@ -225,6 +225,8 @@ def render_concept(context,fmt,template,render_domain):
         render_domain(context)
         _shared_controls(context,fmt)
         _starting_source(context,fmt,template)
+        from core.starting_storyline_preview import render_starting_storyline_preview
+        render_starting_storyline_preview(st)
         _checkpoint_controls(context,fmt)
     with quill:
         st.markdown('<div class="wbs-writer-quill-sticky-anchor"></div>',unsafe_allow_html=True)
