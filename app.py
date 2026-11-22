@@ -7935,8 +7935,17 @@ def wbs_apply_layout_refresh_css():
 
         /* Reference styling scoped to center workspace; sidebar and Quill retained. */
         div[data-testid="stMainBlockContainer"] {
+            background: #0f1318 !important;
+            border: 0 !important;
+            border-radius: 0 !important;
+        }
+        div[data-testid="stColumn"]:has(.wbs-concept-form-anchor):not(:has(.wbs-quill-v18-marker)) {
             background: linear-gradient(135deg, #666666, #565656) !important;
-            border-color: #808080 !important;
+            border: 1px solid #969696 !important;
+            border-radius: 14px !important;
+            padding: 1rem !important;
+            box-sizing: border-box !important;
+            align-self: flex-start !important;
         }
         .st-key-wbs_center_project_basics, .st-key-wbs_center_relationship,
         .st-key-wbs_center_development, .st-key-wbs_center_starting_point {
