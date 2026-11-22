@@ -7923,7 +7923,7 @@ def wbs_apply_layout_refresh_css():
 
         div[data-testid="stMainBlockContainer"] {
             max-width: 1540px !important;
-            padding-top: 1.05rem !important;
+            padding-top: 5.5rem !important;
             padding-right: 1.45rem !important;
             padding-bottom: 2rem !important;
             padding-left: 1.45rem !important;
@@ -7931,6 +7931,56 @@ def wbs_apply_layout_refresh_css():
             border: 1px solid var(--wbs-main-border) !important;
             border-radius: 16px !important;
             box-sizing: border-box !important;
+        }
+
+        /* Reference styling scoped to center workspace; sidebar and Quill retained. */
+        div[data-testid="stMainBlockContainer"] {
+            background: linear-gradient(135deg, #666666, #565656) !important;
+            border-color: #808080 !important;
+        }
+        .st-key-wbs_center_project_basics, .st-key-wbs_center_relationship,
+        .st-key-wbs_center_development, .st-key-wbs_center_starting_point {
+            background: linear-gradient(135deg, #484a4b, #3c3e3f) !important;
+            border: 1px solid #a0a0a0 !important;
+            border-radius: 12px !important;
+            padding: .85rem 1rem !important;
+            margin-bottom: .45rem !important;
+        }
+        div[data-testid="stColumn"]:has(.wbs-concept-form-anchor):not(:has(.wbs-quill-v18-marker)) h2 {
+            font-size: 1.8rem !important;
+            margin-bottom: .35rem !important;
+        }
+        div[data-testid="stColumn"]:has(.wbs-concept-form-anchor):not(:has(.wbs-quill-v18-marker)) h3 {
+            font-size: 1.2rem !important;
+            padding-block: .1rem .35rem !important;
+        }
+        div[data-testid="stColumn"]:has(.wbs-concept-form-anchor):not(:has(.wbs-quill-v18-marker)) [data-testid="stVerticalBlock"] {
+            gap: .65rem !important;
+        }
+        div[data-testid="stColumn"]:has(.wbs-concept-form-anchor):not(:has(.wbs-quill-v18-marker)) [data-testid="stTextInput"] input,
+        div[data-testid="stColumn"]:has(.wbs-concept-form-anchor):not(:has(.wbs-quill-v18-marker)) [data-testid="stTextArea"] textarea,
+        div[data-testid="stColumn"]:has(.wbs-concept-form-anchor):not(:has(.wbs-quill-v18-marker)) [data-baseweb="select"] > div {
+            background: #202122 !important;
+            border: 1px solid #929292 !important;
+            border-radius: 6px !important;
+        }
+
+        /* Center the existing narrow form in the area reserved beside Quill. */
+        @media (min-width: 1101px) {
+            div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"] .wbs-concept-form-anchor) > div[data-testid="stColumn"]:has(.wbs-concept-form-anchor) {
+                flex: 0 1 740px !important;
+                width: min(100%, 740px) !important;
+                min-width: 0 !important;
+                margin-inline: auto !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"] .wbs-concept-form-anchor) > div[data-testid="stColumn"]:not(:has(.wbs-concept-form-anchor)) {
+                flex: 0 0 0 !important;
+                width: 0 !important;
+                min-width: 0 !important;
+            }
+        }
+        div[data-testid="stAppViewContainer"] div[data-testid="stMainBlockContainer"] {
+            padding-top: 5.5rem !important;
         }
 
         [data-testid="stMainBlockContainer"] h1,

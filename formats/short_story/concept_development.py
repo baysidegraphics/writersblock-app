@@ -61,326 +61,331 @@ def render(context):
     st.markdown('\n        <style>\n        /* Keep Quill inside its actual right column so every middle-panel field\n           is physically constrained and can never run underneath it. */\n        div[data-testid="stColumn"]:has(.wbs-writer-quill-sticky-anchor),\n        div[data-testid="column"]:has(.wbs-writer-quill-sticky-anchor) {\n            position: sticky !important;\n            top: 0.75rem !important;\n            align-self: flex-start !important;\n            max-height: calc(100vh - 1.5rem) !important;\n            overflow-y: auto !important;\n            z-index: 20 !important;\n            background: var(--background-color, transparent);\n        }\n\n        /* Primary Writer navigation and format-selector hierarchy. */\n        [data-testid="stMain"] div[data-testid="stHorizontalBlock"]:first-of-type button p {\n            font-weight: 700 !important;\n            font-size: 1.02rem !important;\n        }\n        .wbs-format-selector-title {\n            font-size: 1.08rem !important;\n            font-weight: 700 !important;\n            line-height: 1.2 !important;\n            margin: 0 0 0.35rem 0 !important;\n        }\n\n        /* Raise the complete Writer workspace to recover vertical real estate. */\n        [data-testid="stMainBlockContainer"] {\n            padding-top: 1.0rem !important;\n        }\n\n        @media (max-width: 1100px) {\n            div[data-testid="stColumn"]:has(.wbs-writer-quill-sticky-anchor),\n            div[data-testid="column"]:has(.wbs-writer-quill-sticky-anchor) {\n                position: static !important;\n                max-height: none !important;\n                overflow: visible !important;\n            }\n        }\n        </style>\n        ', unsafe_allow_html=True)
     writer_main_col, writer_quill_col = st.columns([2.65, 1.15], gap='large')
     with writer_main_col:
+        st.markdown('<span class="wbs-concept-form-anchor"></span>', unsafe_allow_html=True)
         st.header('🗺️ Step 1: Concept Development')
         current_format_id = 'short_story'
         if current_format_id not in WBS_FORMAT_IDS:
             current_format_id = 'novel_prose_novella'
-        st.markdown(f'### Writing Format — {get_wbs_format_display_name(current_format_id)}')
-        if 'wbs_format_template_selector' not in st.session_state:
-            st.session_state['wbs_format_template_selector'] = current_format_id
-        _format_control_col, _format_spacer_col = st.columns([1.6, 1.25], gap='small')
-        with _format_control_col:
+        with st.container(border=True, key='wbs_center_project_basics'):
+            concept_ui = get_active_concept_ui()
+            _format_title_prefix = next((name for format_id, name in WBS_FORMAT_OPTIONS if format_id == 'short_story'), 'Project')
+            _project_title_label = f'{_format_title_prefix} / Project Title/Revision'
             if get_active_project_id():
-                st.markdown(f'**{get_wbs_format_display_name(current_format_id)}**')
-                selected_format_id = current_format_id
+                st.caption('Loaded saved project — saved Concept Development choices are restored where recorded.')
+                if st.session_state.get('_wbs_saved_concept_missing_fields'):
+                    with st.expander('Historical Development Setup details', expanded=False):
+                        st.caption("Some settings were not included in this saved project's historical records. Those fields show current template defaults, not verified original choices. Loading is read-only.")
+                if st.session_state.get('_wbs_series_conflict_for_review'):
+                    st.caption('Historical series positions differed. Current Book order is managed separately in Series Library; saved stories were not changed.')
+                elif st.session_state.get('_wbs_series_recovered_for_review'):
+                    st.info("Series relationship recovered from this project's saved records; no changes were written to the database.")
+                _active_title_project_id = str(get_active_project_id() or '')
+                _title_anchor = str(st.session_state.get('_wbs_loaded_project_title') or '').strip() if str(st.session_state.get('_wbs_loaded_project_id') or '') == _active_title_project_id else ''
+                if _title_anchor and st.session_state.get('project_title') != _title_anchor:
+                    st.session_state.project_title = _title_anchor
+                _display_master_title = _title_anchor or get_project_title()
+                _active_saved_row_id = str(st.session_state.get('_wbs_loaded_saved_session_id') or '')
+                _active_manuscript_row_id = str(st.session_state.get('_wbs_loaded_manuscript_version_id') or '')
+                _active_project_key = str(get_active_project_id() or '')
+                for _saved_entry in get_saved_projects_versions_dropdown_items():
+                    _saved_row = _saved_entry.get('row') or {}
+                    if str(_saved_row.get('project_id') or '') != _active_project_key:
+                        continue
+                    _is_active = _saved_entry.get('type') == 'project_session' and _active_saved_row_id and (str(_saved_row.get('id') or '') == _active_saved_row_id) or (_saved_entry.get('type') == 'manuscript_version' and _active_manuscript_row_id and (str(_saved_row.get('id') or '') == _active_manuscript_row_id))
+                    if _is_active:
+                        _version_match = re.search(' — (V-\\d+[A-Z]*) — ', str(_saved_entry.get('label') or ''))
+                        if _version_match:
+                            _display_master_title += ' — ' + _version_match.group(1)
+                        break
+                st.markdown(f'**{_project_title_label}**')
+                st.markdown('<div style="background:#262730;color:#ffffff;padding:0.65rem 0.8rem;border:1px solid #41444f;border-radius:0.45rem;min-height:2.4rem;">' + html.escape(_display_master_title) + '</div>', unsafe_allow_html=True)
+                render_save_open_project_to_series()
             else:
-                selected_format_id = st.selectbox('Choose Writing Format', options=WBS_FORMAT_IDS, index=WBS_FORMAT_IDS.index(current_format_id), format_func=get_wbs_format_display_name, key='wbs_format_template_selector', label_visibility='collapsed')
-        if selected_format_id != 'short_story' and get_active_project_id():
-            st.session_state['wbs_format_template_selector'] = 'short_story'
-            st.warning('Saved project formats are protected. Start a new project to use a different writing format.')
-            st.rerun()
-        if selected_format_id != 'short_story':
-            st.session_state.active_format_id = selected_format_id
-            st.session_state.active_format_template = get_wbs_format_template(selected_format_id)
-            st.session_state.quill_format_instructions = get_wbs_quill_instructions(selected_format_id)
-            st.session_state.quill_format_name = get_wbs_format_display_name(selected_format_id)
-            st.session_state.format_type = WBS_LEGACY_FORMAT_BY_TEMPLATE_ID.get(selected_format_id, 'Novel / Prose')
-            st.rerun()
-        concept_ui = get_active_concept_ui()
-        st.markdown(f"##### {concept_ui.get('step_subtitle') or 'Build the foundation for your project.'}")
-        _format_title_prefix = next((name for format_id, name in WBS_FORMAT_OPTIONS if format_id == 'short_story'), 'Project')
-        _project_title_label = f'{_format_title_prefix} / Project Title/Revision'
-        if get_active_project_id():
-            st.caption('Loaded saved project — saved Concept Development choices are restored where recorded.')
-            if st.session_state.get('_wbs_saved_concept_missing_fields'):
-                with st.expander('Historical Development Setup details', expanded=False):
-                    st.caption("Some settings were not included in this saved project's historical records. Those fields show current template defaults, not verified original choices. Loading is read-only.")
-            if st.session_state.get('_wbs_series_conflict_for_review'):
-                st.caption('Historical series positions differed. Current Book order is managed separately in Series Library; saved stories were not changed.')
-            elif st.session_state.get('_wbs_series_recovered_for_review'):
-                st.info("Series relationship recovered from this project's saved records; no changes were written to the database.")
-            _active_title_project_id = str(get_active_project_id() or '')
-            _title_anchor = str(st.session_state.get('_wbs_loaded_project_title') or '').strip() if str(st.session_state.get('_wbs_loaded_project_id') or '') == _active_title_project_id else ''
-            if _title_anchor and st.session_state.get('project_title') != _title_anchor:
-                st.session_state.project_title = _title_anchor
-            _display_master_title = _title_anchor or get_project_title()
-            _active_saved_row_id = str(st.session_state.get('_wbs_loaded_saved_session_id') or '')
-            _active_manuscript_row_id = str(st.session_state.get('_wbs_loaded_manuscript_version_id') or '')
-            _active_project_key = str(get_active_project_id() or '')
-            for _saved_entry in get_saved_projects_versions_dropdown_items():
-                _saved_row = _saved_entry.get('row') or {}
-                if str(_saved_row.get('project_id') or '') != _active_project_key:
-                    continue
-                _is_active = _saved_entry.get('type') == 'project_session' and _active_saved_row_id and (str(_saved_row.get('id') or '') == _active_saved_row_id) or (_saved_entry.get('type') == 'manuscript_version' and _active_manuscript_row_id and (str(_saved_row.get('id') or '') == _active_manuscript_row_id))
-                if _is_active:
-                    _version_match = re.search(' — (V-\\d+[A-Z]*) — ', str(_saved_entry.get('label') or ''))
-                    if _version_match:
-                        _display_master_title += ' — ' + _version_match.group(1)
-                    break
-            st.markdown(f'**{_project_title_label}**')
-            st.markdown('<div style="background:#262730;color:#ffffff;padding:0.65rem 0.8rem;border:1px solid #41444f;border-radius:0.45rem;min-height:2.4rem;">' + html.escape(_display_master_title) + '</div>', unsafe_allow_html=True)
-            render_save_open_project_to_series()
-        else:
-            st.session_state.project_title = st.text_input(_project_title_label, value=st.session_state.get('project_title', ''), placeholder="Example: It's Not Safe", key='project_title_input').strip()
-        st.markdown('### ' + str(concept_ui.get('project_connection_heading') or 'Project Relationship'))
-        project_scope_options = ['Standalone Book', 'Book in a Series']
-        current_project_id = str(get_active_project_id() or '')
-        membership = get_series_metadata_by_project() if get_current_user_id() else {}
-        current_member = membership.get(current_project_id) or {}
-        registered_series = str(current_member.get('series_name') or '').strip()
-        saved_scope = 'Book in a Series' if registered_series else 'Standalone Book'
-        selected_scope_default = saved_scope if current_project_id else str(st.session_state.get('project_scope') or 'Standalone Book')
-        context = f"{current_project_id or 'new'}:{registered_series}"
-        if st.session_state.get('_wbs_simple_series_context') != context:
-            st.session_state['_wbs_simple_series_context'] = context
-            st.session_state['project_scope_selector'] = selected_scope_default
-            st.session_state['wbs_confirm_series_link'] = False
-            st.session_state['wbs_confirm_series_removal'] = False
-            st.session_state.pop('wbs_simple_series_choice', None)
-            st.session_state.pop('wbs_simple_series_new_name', None)
-        project_scope_labels = concept_ui.get('scope_labels') or {}
-        chosen_scope = st.radio('Project Type:', project_scope_options, horizontal=True, key='project_scope_selector', format_func=lambda v: project_scope_labels.get(v, v))
-        if current_project_id:
-            st.session_state.project_scope = saved_scope
-            st.session_state.series_name = registered_series
-            st.session_state.series_key = make_series_key(registered_series)
-            if registered_series:
-                st.session_state.series_book_number = int(current_member.get('series_book_number') or 1)
-        else:
-            st.session_state.project_scope = chosen_scope
-        if chosen_scope == 'Book in a Series':
-            known_series = get_existing_series_names()
-            choice_options = list(known_series) + ['Create New Series']
-            existing_name = registered_series if current_project_id else str(st.session_state.get('series_name') or '').strip()
-            if 'wbs_simple_series_choice' not in st.session_state:
-                st.session_state['wbs_simple_series_choice'] = existing_name if existing_name in known_series else 'Create New Series'
-            with st.columns([1, 1], gap='small')[0]:
-                selected_choice = st.selectbox('Select Series:', choice_options, key='wbs_simple_series_choice')
-                if selected_choice == 'Create New Series':
-                    selected_series = st.text_input('New Series Name:', key='wbs_simple_series_new_name', max_chars=80).strip()
+                st.session_state.project_title = st.text_input(_project_title_label, value=st.session_state.get('project_title', ''), placeholder="Example: It's Not Safe", key='project_title_input').strip()
+            st.markdown(f'### Writing Format — {get_wbs_format_display_name(current_format_id)}')
+            if 'wbs_format_template_selector' not in st.session_state:
+                st.session_state['wbs_format_template_selector'] = current_format_id
+            _format_control_col, _format_spacer_col = st.columns([1.6, 1.25], gap='small')
+            with _format_control_col:
+                if get_active_project_id():
+                    st.selectbox('Choose Writing Format', options=WBS_FORMAT_IDS, index=WBS_FORMAT_IDS.index(current_format_id), format_func=get_wbs_format_display_name, disabled=True, key='wbs_saved_format_display', label_visibility='collapsed')
+                    selected_format_id = current_format_id
                 else:
-                    selected_series = selected_choice
-            if not current_project_id:
-                st.session_state.series_name = selected_series
-                st.session_state.series_key = make_series_key(selected_series)
+                    selected_format_id = st.selectbox('Choose Writing Format', options=WBS_FORMAT_IDS, index=WBS_FORMAT_IDS.index(current_format_id), format_func=get_wbs_format_display_name, key='wbs_format_template_selector', label_visibility='collapsed')
+            if selected_format_id != 'short_story' and get_active_project_id():
+                st.session_state['wbs_format_template_selector'] = 'short_story'
+                st.warning('Saved project formats are protected. Start a new project to use a different writing format.')
+                st.rerun()
+            if selected_format_id != 'short_story':
+                st.session_state.active_format_id = selected_format_id
+                st.session_state.active_format_template = get_wbs_format_template(selected_format_id)
+                st.session_state.quill_format_instructions = get_wbs_quill_instructions(selected_format_id)
+                st.session_state.quill_format_name = get_wbs_format_display_name(selected_format_id)
+                st.session_state.format_type = WBS_LEGACY_FORMAT_BY_TEMPLATE_ID.get(selected_format_id, 'Novel / Prose')
+                st.rerun()
+            st.markdown(f"##### {concept_ui.get('step_subtitle') or 'Build the foundation for your project.'}")
+        with st.container(border=True, key='wbs_center_relationship'):
+            st.markdown('### ' + str(concept_ui.get('project_connection_heading') or 'Project Relationship'))
+            project_scope_options = ['Standalone Book', 'Book in a Series']
+            current_project_id = str(get_active_project_id() or '')
+            membership = get_series_metadata_by_project() if get_current_user_id() else {}
+            current_member = membership.get(current_project_id) or {}
+            registered_series = str(current_member.get('series_name') or '').strip()
+            saved_scope = 'Book in a Series' if registered_series else 'Standalone Book'
+            selected_scope_default = saved_scope if current_project_id else str(st.session_state.get('project_scope') or 'Standalone Book')
+            context = f"{current_project_id or 'new'}:{registered_series}"
+            if st.session_state.get('_wbs_simple_series_context') != context:
+                st.session_state['_wbs_simple_series_context'] = context
+                st.session_state['project_scope_selector'] = selected_scope_default
+                st.session_state['wbs_confirm_series_link'] = False
+                st.session_state['wbs_confirm_series_removal'] = False
+                st.session_state.pop('wbs_simple_series_choice', None)
+                st.session_state.pop('wbs_simple_series_new_name', None)
+            project_scope_labels = concept_ui.get('scope_labels') or {}
+            chosen_scope = st.radio('Project Type:', project_scope_options, horizontal=True, key='project_scope_selector', format_func=lambda v: project_scope_labels.get(v, v))
+            if current_project_id:
+                st.session_state.project_scope = saved_scope
+                st.session_state.series_name = registered_series
+                st.session_state.series_key = make_series_key(registered_series)
+                if registered_series:
+                    st.session_state.series_book_number = int(current_member.get('series_book_number') or 1)
+            else:
+                st.session_state.project_scope = chosen_scope
+            if chosen_scope == 'Book in a Series':
+                known_series = get_existing_series_names()
+                choice_options = list(known_series) + ['Create New Series']
+                existing_name = registered_series if current_project_id else str(st.session_state.get('series_name') or '').strip()
+                if 'wbs_simple_series_choice' not in st.session_state:
+                    st.session_state['wbs_simple_series_choice'] = existing_name if existing_name in known_series else 'Create New Series'
+                with st.columns([1, 1], gap='small')[0]:
+                    selected_choice = st.selectbox('Select Series:', choice_options, key='wbs_simple_series_choice')
+                    if selected_choice == 'Create New Series':
+                        selected_series = st.text_input('New Series Name:', key='wbs_simple_series_new_name', max_chars=80).strip()
+                    else:
+                        selected_series = selected_choice
+                if not current_project_id:
+                    st.session_state.series_name = selected_series
+                    st.session_state.series_key = make_series_key(selected_series)
+                    st.session_state.series_continuity_mode = 'Strict'
+                    if selected_series:
+                        st.session_state.series_book_number = get_next_series_book_number(selected_series)
+                        st.caption('This new project will join the selected series when you save its master project.')
+                    else:
+                        st.caption('Enter a series name before saving the project.')
+                else:
+                    pass
+            elif not current_project_id:
+                st.session_state.series_name = ''
+                st.session_state.series_key = ''
+            else:
+                st.session_state.series_name = ''
+                st.session_state.series_key = ''
+            if st.session_state.project_scope == 'Book in a Series' and st.session_state.get('series_name'):
                 st.session_state.series_continuity_mode = 'Strict'
-                if selected_series:
-                    st.session_state.series_book_number = get_next_series_book_number(selected_series)
-                    st.caption('This new project will join the selected series when you save its master project.')
-                else:
-                    st.caption('Enter a series name before saving the project.')
+                candidates = get_series_reference_candidates()
+                project_ids = get_unambiguous_series_project_ids(st.session_state.series_key, before_number=st.session_state.get('series_book_number') or 1)
+                st.session_state.series_reference_ids = [c['id'] for c in candidates if str(c.get('project_id')) in project_ids]
+                st.session_state.series_selection_signature = f"{st.session_state.series_key}:{st.session_state.get('series_book_number') or 1}"
             else:
-                pass
-        elif not current_project_id:
-            st.session_state.series_name = ''
-            st.session_state.series_key = ''
-        else:
-            st.session_state.series_name = ''
-            st.session_state.series_key = ''
-        if st.session_state.project_scope == 'Book in a Series' and st.session_state.get('series_name'):
-            st.session_state.series_continuity_mode = 'Strict'
-            candidates = get_series_reference_candidates()
-            project_ids = get_unambiguous_series_project_ids(st.session_state.series_key, before_number=st.session_state.get('series_book_number') or 1)
-            st.session_state.series_reference_ids = [c['id'] for c in candidates if str(c.get('project_id')) in project_ids]
-            st.session_state.series_selection_signature = f"{st.session_state.series_key}:{st.session_state.get('series_book_number') or 1}"
-        else:
-            st.session_state.series_reference_ids = []
-        render_active_format_development_fields()
-        tone_options = list(concept_ui.get('tone_options') or ['Professional', 'Warm', 'Serious', 'Humorous', 'Suspenseful', 'Cinematic'])
-        if 'Vivid & Descriptive' not in tone_options:
-            tone_options.append('Vivid & Descriptive')
-        tone_label = str(concept_ui.get('tone_label') or 'Tone / Aesthetic:')
-        current_tone = str(st.session_state.get('tone_style') or '')
-        if current_tone and current_tone not in tone_options:
-            tone_options.append(current_tone)
-        default_tone_index = tone_options.index(current_tone) if current_tone in tone_options else 0
-        _wbs_tone_widget_key = get_active_format_widget_key('concept_prose_tone')
-        if _wbs_tone_widget_key not in st.session_state:
-            st.session_state[_wbs_tone_widget_key] = tone_options[default_tone_index]
-        _tone_col, _tone_spacer = st.columns([3.0, 1.2])
-        with _tone_col:
-            st.session_state.tone_style = st.selectbox(tone_label, tone_options, key=_wbs_tone_widget_key)
-        _wbs_premise_mode = str(st.session_state.get('version_source_mode') or st.session_state.get('starting_source_mode') or 'Custom Plot Line')
-        _wbs_premise_editable = _wbs_premise_mode in ('Custom Plot Line', 'Story Idea')
-        _wbs_premise_current = str(st.session_state.get('story_seed') or st.session_state.get('wbs_project_original_concept') or '')
-        _wbs_premise_widget_key = get_active_format_widget_key('concept_story_premise')
-        if _wbs_premise_widget_key not in st.session_state or not _wbs_premise_editable:
-            st.session_state[_wbs_premise_widget_key] = _wbs_premise_current
-        st.markdown('#### Story Premise')
-        _wbs_premise_text = st.text_area('Story Premise:', height=210, key=_wbs_premise_widget_key, disabled=not _wbs_premise_editable, help="The author's story blueprint. Used with Central Conflict and Subplots to develop Plot A, B and C.")
-        if _wbs_premise_editable:
-            st.session_state.story_seed = _wbs_premise_text
-            _wbs_premise_words = count_words(_wbs_premise_text)
-            st.caption(f'{_wbs_premise_words:,} / 1,000 words')
-            if _wbs_premise_words > 1000:
-                st.warning('This entry exceeds the 1,000-word Concept Development limit.')
-        else:
-            st.caption('Select the Enter Your Own Premise starting source below to edit this field.')
-        dialogue_style_options = DIALOGUE_STYLE_OPTIONS
-        current_dialogue_style = get_dialogue_style()
-        _podcast_episode_format = str(get_active_format_template_values().get('episode_format') or '')
-        _show_dialogue_control = True
-        if _show_dialogue_control:
-            _dialogue_col, _dialogue_spacer = st.columns([3.0, 1.2])
-            with _dialogue_col:
-                st.session_state.dialogue_style = st.selectbox(concept_ui.get('dialogue_label') or 'Dialogue Style:', dialogue_style_options, index=dialogue_style_options.index(current_dialogue_style), key='dialogue_style_selector', format_func=get_dialogue_style_display, help='Percentages are approximate targets for the share of finished words that are spoken dialogue. Story-Driven / Automatic has no fixed percentage. The selected project type still controls how dialogue is formatted.')
-        st.markdown('---')
-        st.markdown(f"### {concept_ui.get('source_heading') or 'Choose a Starting Point'}")
-        current_saved_option = '-- Use Current Saved Manuscript / Storyline --'
-        custom_plot_option = str(concept_ui.get('custom_option') or '-- Enter Your Own Story / Premise --')
-        quill_start_option = '-- Quill-Assisted Starting Point --'
-        replacement_draft_option = '-- Upload / Replace with Different Draft / Manuscript --'
-        seed_options = [current_saved_option, custom_plot_option, quill_start_option, replacement_draft_option]
-        current_seed = str(st.session_state.get('story_seed') or '')
-        current_source_mode = str(st.session_state.get('version_source_mode') or st.session_state.get('starting_source_mode') or 'Custom Plot Line')
-        if str(st.session_state.get('saved_quill_concept') or '').strip() and str(st.session_state.get('version_source_mode') or '') == 'Quill Assisted':
-            default_seed_index = seed_options.index(quill_start_option)
-        elif current_source_mode == 'Saved Manuscript':
-            default_seed_index = seed_options.index(current_saved_option)
-        elif current_source_mode in {'Replacement Draft / Manuscript', 'Existing Draft / Manuscript'}:
-            default_seed_index = seed_options.index(replacement_draft_option)
-        elif current_source_mode == 'Quill Assisted':
-            default_seed_index = seed_options.index(quill_start_option)
-        else:
-            default_seed_index = seed_options.index(custom_plot_option)
-        saved_version_source_text = str(st.session_state.get('saved_version_source_text') or '').strip()
-        if saved_version_source_text:
-            saved_source_name = str(st.session_state.get('saved_version_source_name') or get_current_project_version_name() or 'Saved Version').strip()
-            st.info(f'Saved Version Source: {saved_source_name} — {count_words(saved_version_source_text):,} words. This manuscript is retained and can be selected as the transformation source.')
-        selected_seed = st.radio(str(concept_ui.get('source_label') or 'Starting Source:'), seed_options, index=default_seed_index, key=f"starting_source_{'short_story'}")
-        if selected_seed == current_saved_option:
-            st.session_state.version_source_mode = 'Saved Manuscript'
-            st.session_state.starting_source_mode = 'Saved Manuscript'
-            saved_source = str(st.session_state.get('saved_version_source_text') or '').strip()
-            if saved_source:
-                st.success(f'Using Current Saved Manuscript / Storyline — {count_words(saved_source):,} words')
-                st.caption('The loaded manuscript remains the story source. Any Concept Development changes above will be used to transform it into the new version.')
-                _src_id = get_text_signature(saved_source)[:12]
-                _edit_key = f"wbs_saved_source_edit_{'short_story'}_{_src_id}"
-                st.markdown("**Editable Saved Manuscript — paste Quill's revised text here:**")
-                _revised_source = st.text_area('Editable Saved Manuscript:', value=saved_source, height=330, key=_edit_key, label_visibility='collapsed')
-                st.caption('Edit or paste a revision. The original remains unchanged until you save a NEW version.')
-                if st.button('💾 Save Edited Manuscript As New Version', key=f'wbs_save_edited_source_{_src_id}', type='primary', use_container_width=True, disabled=bool(st.session_state.get('demo_mode'))):
-                    if not _revised_source.strip():
-                        st.error('The manuscript cannot be empty.')
-                    elif _revised_source == saved_source:
-                        st.info('No text changes to save.')
+                st.session_state.series_reference_ids = []
+        with st.container(border=True, key='wbs_center_development'):
+            render_active_format_development_fields()
+            tone_options = list(concept_ui.get('tone_options') or ['Professional', 'Warm', 'Serious', 'Humorous', 'Suspenseful', 'Cinematic'])
+            if 'Vivid & Descriptive' not in tone_options:
+                tone_options.append('Vivid & Descriptive')
+            tone_label = str(concept_ui.get('tone_label') or 'Tone / Aesthetic:')
+            current_tone = str(st.session_state.get('tone_style') or '')
+            if current_tone and current_tone not in tone_options:
+                tone_options.append(current_tone)
+            default_tone_index = tone_options.index(current_tone) if current_tone in tone_options else 0
+            _wbs_tone_widget_key = get_active_format_widget_key('concept_prose_tone')
+            if _wbs_tone_widget_key not in st.session_state:
+                st.session_state[_wbs_tone_widget_key] = tone_options[default_tone_index]
+            _tone_col, _tone_spacer = st.columns([3.0, 1.2])
+            with _tone_col:
+                st.session_state.tone_style = st.selectbox(tone_label, tone_options, key=_wbs_tone_widget_key)
+            _wbs_premise_mode = str(st.session_state.get('version_source_mode') or st.session_state.get('starting_source_mode') or 'Custom Plot Line')
+            _wbs_premise_editable = _wbs_premise_mode in ('Custom Plot Line', 'Story Idea')
+            _wbs_premise_current = str(st.session_state.get('story_seed') or st.session_state.get('wbs_project_original_concept') or '')
+            _wbs_premise_widget_key = get_active_format_widget_key('concept_story_premise')
+            if _wbs_premise_widget_key not in st.session_state or not _wbs_premise_editable:
+                st.session_state[_wbs_premise_widget_key] = _wbs_premise_current
+            st.markdown('#### Story Premise')
+            _wbs_premise_text = st.text_area('Story Premise:', height=210, key=_wbs_premise_widget_key, disabled=not _wbs_premise_editable, help="The author's story blueprint. Used with Central Conflict and Subplots to develop Plot A, B and C.")
+            if _wbs_premise_editable:
+                st.session_state.story_seed = _wbs_premise_text
+                _wbs_premise_words = count_words(_wbs_premise_text)
+                st.caption(f'{_wbs_premise_words:,} / 1,000 words')
+                if _wbs_premise_words > 1000:
+                    st.warning('This entry exceeds the 1,000-word Concept Development limit.')
+            else:
+                st.caption('Select the Enter Your Own Premise starting source below to edit this field.')
+            dialogue_style_options = DIALOGUE_STYLE_OPTIONS
+            current_dialogue_style = get_dialogue_style()
+            _podcast_episode_format = str(get_active_format_template_values().get('episode_format') or '')
+            _show_dialogue_control = True
+            if _show_dialogue_control:
+                _dialogue_col, _dialogue_spacer = st.columns([3.0, 1.2])
+                with _dialogue_col:
+                    st.session_state.dialogue_style = st.selectbox(concept_ui.get('dialogue_label') or 'Dialogue Style:', dialogue_style_options, index=dialogue_style_options.index(current_dialogue_style), key='dialogue_style_selector', format_func=get_dialogue_style_display, help='Percentages are approximate targets for the share of finished words that are spoken dialogue. Story-Driven / Automatic has no fixed percentage. The selected project type still controls how dialogue is formatted.')
+            st.markdown('---')
+        with st.container(border=True, key='wbs_center_starting_point'):
+            st.markdown(f"### {concept_ui.get('source_heading') or 'Choose a Starting Point'}")
+            current_saved_option = '-- Use Current Saved Manuscript / Storyline --'
+            custom_plot_option = str(concept_ui.get('custom_option') or '-- Enter Your Own Story / Premise --')
+            quill_start_option = '-- Quill-Assisted Starting Point --'
+            replacement_draft_option = '-- Upload / Replace with Different Draft / Manuscript --'
+            seed_options = [current_saved_option, custom_plot_option, quill_start_option, replacement_draft_option]
+            current_seed = str(st.session_state.get('story_seed') or '')
+            current_source_mode = str(st.session_state.get('version_source_mode') or st.session_state.get('starting_source_mode') or 'Custom Plot Line')
+            if str(st.session_state.get('saved_quill_concept') or '').strip() and str(st.session_state.get('version_source_mode') or '') == 'Quill Assisted':
+                default_seed_index = seed_options.index(quill_start_option)
+            elif current_source_mode == 'Saved Manuscript':
+                default_seed_index = seed_options.index(current_saved_option)
+            elif current_source_mode in {'Replacement Draft / Manuscript', 'Existing Draft / Manuscript'}:
+                default_seed_index = seed_options.index(replacement_draft_option)
+            elif current_source_mode == 'Quill Assisted':
+                default_seed_index = seed_options.index(quill_start_option)
+            else:
+                default_seed_index = seed_options.index(custom_plot_option)
+            saved_version_source_text = str(st.session_state.get('saved_version_source_text') or '').strip()
+            if saved_version_source_text:
+                saved_source_name = str(st.session_state.get('saved_version_source_name') or get_current_project_version_name() or 'Saved Version').strip()
+                st.info(f'Saved Version Source: {saved_source_name} — {count_words(saved_version_source_text):,} words. This manuscript is retained and can be selected as the transformation source.')
+            selected_seed = st.radio(str(concept_ui.get('source_label') or 'Starting Source:'), seed_options, index=default_seed_index, key=f"starting_source_{'short_story'}")
+            if selected_seed == current_saved_option:
+                st.session_state.version_source_mode = 'Saved Manuscript'
+                st.session_state.starting_source_mode = 'Saved Manuscript'
+                saved_source = str(st.session_state.get('saved_version_source_text') or '').strip()
+                if saved_source:
+                    st.success(f'Using Current Saved Manuscript / Storyline — {count_words(saved_source):,} words')
+                    st.caption('The loaded manuscript remains the story source. Any Concept Development changes above will be used to transform it into the new version.')
+                    _src_id = get_text_signature(saved_source)[:12]
+                    _edit_key = f"wbs_saved_source_edit_{'short_story'}_{_src_id}"
+                    st.markdown("**Editable Saved Manuscript — paste Quill's revised text here:**")
+                    _revised_source = st.text_area('Editable Saved Manuscript:', value=saved_source, height=330, key=_edit_key, label_visibility='collapsed')
+                    st.caption('Edit or paste a revision. The original remains unchanged until you save a NEW version.')
+                    if st.button('💾 Save Edited Manuscript As New Version', key=f'wbs_save_edited_source_{_src_id}', type='primary', use_container_width=True, disabled=bool(st.session_state.get('demo_mode'))):
+                        if not _revised_source.strip():
+                            st.error('The manuscript cannot be empty.')
+                        elif _revised_source == saved_source:
+                            st.info('No text changes to save.')
+                        else:
+                            _prev_source = saved_source
+                            _prev_draft = st.session_state.get('current_draft_output', '')
+                            _prev_name = st.session_state.get('project_version_name', 'Original')
+                            _new_name = f'Edited {datetime.now():%m-%d %H%M}'
+                            st.session_state.saved_version_source_text = _revised_source
+                            st.session_state.saved_version_source_word_count = count_words(_revised_source)
+                            st.session_state.saved_version_source_name = _new_name
+                            st.session_state.current_draft_output = _revised_source
+                            st.session_state.project_version_name = _new_name
+                            try:
+                                _save_result = save_current_project_session_to_supabase(version_name=_new_name, save_as_new_version=True)
+                                if not _save_result:
+                                    raise RuntimeError('Database did not confirm the save')
+                            except Exception as _exc:
+                                st.session_state.saved_version_source_text = _prev_source
+                                st.session_state.saved_version_source_word_count = count_words(_prev_source)
+                                st.session_state.current_draft_output = _prev_draft
+                                st.session_state.project_version_name = _prev_name
+                                st.error(f'Save failed; original restored: {_exc}')
+                            else:
+                                st.success('New editable manuscript version saved. The original is preserved.')
+                                st.rerun()
+                else:
+                    st.warning('No saved manuscript is loaded. Choose another starting source or load a saved version first.')
+            elif selected_seed == custom_plot_option:
+                st.session_state.version_source_mode = 'Custom Plot Line'
+                st.session_state.starting_source_mode = 'Custom Plot Line'
+                st.caption('The Story Premise field is above, alongside the other Stage 1 development information.')
+            elif selected_seed == quill_start_option:
+                st.session_state.version_source_mode = 'Quill Assisted'
+                st.session_state.starting_source_mode = 'Quill Assisted'
+                format_name = str((st.session_state.get('active_format_template') or {}).get('display_name') or st.session_state.get('quill_format_name') or 'Writing Project')
+                st.caption(f'Quill uses your {format_name} Development Setup above to propose a starting concept. You can edit it or request another suggestion before continuing.')
+                st.session_state.quill_starting_direction = ''
+                quill_key = f"wbs_quill_starting_concept_{'short_story'}"
+                pending_key = f"_wbs_quill_pending_concept_{'short_story'}"
+                pending_concept = st.session_state.pop(pending_key, None)
+                if pending_concept is not None:
+                    st.session_state[quill_key] = str(pending_concept)
+                    st.session_state.story_seed = str(pending_concept)
+                if quill_key not in st.session_state:
+                    st.session_state[quill_key] = str(st.session_state.get('saved_quill_concept') or st.session_state.get('story_seed') or '')
+                elif not str(st.session_state.get(quill_key) or '').strip() and str(st.session_state.get('saved_quill_concept') or '').strip():
+                    st.session_state[quill_key] = str(st.session_state['saved_quill_concept'])
+                guided_col, original_col = st.columns(2, gap='small')
+                with guided_col:
+                    guided_generation = st.button('Create Story From My Development Setup', key=f"wbs_quill_generate_guided_{'short_story'}", use_container_width=True)
+                with original_col:
+                    original_generation = st.button('Let Quill Suggest a Story', key=f"wbs_quill_generate_original_{'short_story'}", use_container_width=True)
+                if guided_generation or original_generation:
+                    require_product_access('sandbox')
+                    backend = st.session_state.get('backend')
+                    client = getattr(backend, 'client', None)
+                    model_name = getattr(backend, 'model_name', None)
+                    if client is None or not model_name:
+                        st.error("Quill's writing service is unavailable. Please try again later.")
                     else:
-                        _prev_source = saved_source
-                        _prev_draft = st.session_state.get('current_draft_output', '')
-                        _prev_name = st.session_state.get('project_version_name', 'Original')
-                        _new_name = f'Edited {datetime.now():%m-%d %H%M}'
-                        st.session_state.saved_version_source_text = _revised_source
-                        st.session_state.saved_version_source_word_count = count_words(_revised_source)
-                        st.session_state.saved_version_source_name = _new_name
-                        st.session_state.current_draft_output = _revised_source
-                        st.session_state.project_version_name = _new_name
+                        development_context = get_active_format_development_context()
+                        creative_direction = "Build the story around the writer's specified theme, takeaway, and creative instructions in Development Setup. Honor those choices closely." if guided_generation else 'Invent a fresh, original storyline. Honor the format, age range, genre, and required production constraints, but freely invent characters, conflict, and events rather than relying on a writer-specified theme or takeaway.'
+                        prompt = f"You are Quill, writing an original STORY CONCEPT that a writer can edit. Write 100–180 words for {format_name}. Deliver a vivid, self-contained account of WHAT HAPPENS: name the protagonist, establish the situation, show the inciting event, describe concrete choices and consequences, and end with a plausible change or unresolved question. Write paragraphs of story-facing prose, not a lesson, evaluation, outline, creative brief, or discussion of theme. Keep it at concept/synopsis length, not a finished manuscript. Respect relevant development requirements without calling attention to these requirements. NEVER use meta-commentary such as 'this story explores', 'the central idea', 'the narrative should', 'the story will', 'from a first-person perspective', 'the writer', or 'the reader'. Do not add a heading. Begin immediately with the character or unfolding event.\n\nGENERATION DIRECTION: {creative_direction}\n\nDEVELOPMENT SETUP:\n{development_context}\nTone: {st.session_state.get('tone_style', '')}\nDialogue: {get_dialogue_style_display()}\nFormat guidance: {st.session_state.get('quill_format_instructions', '')}"
                         try:
-                            _save_result = save_current_project_session_to_supabase(version_name=_new_name, save_as_new_version=True)
-                            if not _save_result:
-                                raise RuntimeError('Database did not confirm the save')
-                        except Exception as _exc:
-                            st.session_state.saved_version_source_text = _prev_source
-                            st.session_state.saved_version_source_word_count = count_words(_prev_source)
-                            st.session_state.current_draft_output = _prev_draft
-                            st.session_state.project_version_name = _prev_name
-                            st.error(f'Save failed; original restored: {_exc}')
-                        else:
-                            st.success('New editable manuscript version saved. The original is preserved.')
-                            st.rerun()
-            else:
-                st.warning('No saved manuscript is loaded. Choose another starting source or load a saved version first.')
-        elif selected_seed == custom_plot_option:
-            st.session_state.version_source_mode = 'Custom Plot Line'
-            st.session_state.starting_source_mode = 'Custom Plot Line'
-            st.caption('The Story Premise field is above, alongside the other Stage 1 development information.')
-        elif selected_seed == quill_start_option:
-            st.session_state.version_source_mode = 'Quill Assisted'
-            st.session_state.starting_source_mode = 'Quill Assisted'
-            format_name = str((st.session_state.get('active_format_template') or {}).get('display_name') or st.session_state.get('quill_format_name') or 'Writing Project')
-            st.caption(f'Quill uses your {format_name} Development Setup above to propose a starting concept. You can edit it or request another suggestion before continuing.')
-            st.session_state.quill_starting_direction = ''
-            quill_key = f"wbs_quill_starting_concept_{'short_story'}"
-            pending_key = f"_wbs_quill_pending_concept_{'short_story'}"
-            pending_concept = st.session_state.pop(pending_key, None)
-            if pending_concept is not None:
-                st.session_state[quill_key] = str(pending_concept)
-                st.session_state.story_seed = str(pending_concept)
-            if quill_key not in st.session_state:
-                st.session_state[quill_key] = str(st.session_state.get('saved_quill_concept') or st.session_state.get('story_seed') or '')
-            elif not str(st.session_state.get(quill_key) or '').strip() and str(st.session_state.get('saved_quill_concept') or '').strip():
-                st.session_state[quill_key] = str(st.session_state['saved_quill_concept'])
-            guided_col, original_col = st.columns(2, gap='small')
-            with guided_col:
-                guided_generation = st.button('Create Story From My Development Setup', key=f"wbs_quill_generate_guided_{'short_story'}", use_container_width=True)
-            with original_col:
-                original_generation = st.button('Let Quill Suggest a Story', key=f"wbs_quill_generate_original_{'short_story'}", use_container_width=True)
-            if guided_generation or original_generation:
-                require_product_access('sandbox')
-                backend = st.session_state.get('backend')
-                client = getattr(backend, 'client', None)
-                model_name = getattr(backend, 'model_name', None)
-                if client is None or not model_name:
-                    st.error("Quill's writing service is unavailable. Please try again later.")
-                else:
-                    development_context = get_active_format_development_context()
-                    creative_direction = "Build the story around the writer's specified theme, takeaway, and creative instructions in Development Setup. Honor those choices closely." if guided_generation else 'Invent a fresh, original storyline. Honor the format, age range, genre, and required production constraints, but freely invent characters, conflict, and events rather than relying on a writer-specified theme or takeaway.'
-                    prompt = f"You are Quill, writing an original STORY CONCEPT that a writer can edit. Write 100–180 words for {format_name}. Deliver a vivid, self-contained account of WHAT HAPPENS: name the protagonist, establish the situation, show the inciting event, describe concrete choices and consequences, and end with a plausible change or unresolved question. Write paragraphs of story-facing prose, not a lesson, evaluation, outline, creative brief, or discussion of theme. Keep it at concept/synopsis length, not a finished manuscript. Respect relevant development requirements without calling attention to these requirements. NEVER use meta-commentary such as 'this story explores', 'the central idea', 'the narrative should', 'the story will', 'from a first-person perspective', 'the writer', or 'the reader'. Do not add a heading. Begin immediately with the character or unfolding event.\n\nGENERATION DIRECTION: {creative_direction}\n\nDEVELOPMENT SETUP:\n{development_context}\nTone: {st.session_state.get('tone_style', '')}\nDialogue: {get_dialogue_style_display()}\nFormat guidance: {st.session_state.get('quill_format_instructions', '')}"
+                            with st.spinner('Quill is preparing a starting concept...'):
+                                suggestion = client.models.generate_content(model=model_name, contents=prompt)
+                                concept = str(getattr(suggestion, 'text', '') or '').strip()
+                                if concept and wbs_concept_contains_editorial_commentary(concept):
+                                    rewrite_prompt = f"Rewrite the following draft as a STORY SYNOPSIS, not commentary about a story. Keep its protagonist, events, conflict, and outcome intact, but express them only as things that happen in the fictional world. Use 100–180 words of fluent prose. Remove references to themes, writing, narrative structure, the reader, genre, viewpoint, and any phrases beginning 'this story', 'the central idea', or 'the narrative'. Return the revised synopsis only, without a heading.\n\nDRAFT:\n{concept}"
+                                    rewritten = client.models.generate_content(model=model_name, contents=rewrite_prompt)
+                                    concept = str(getattr(rewritten, 'text', '') or '').strip()
+                            if not concept or not ai_output_is_usable(concept) or wbs_concept_contains_editorial_commentary(concept):
+                                st.error('Quill could not produce a clean story concept. Please try again.')
+                            else:
+                                st.session_state[quill_key] = concept
+                                st.session_state.story_seed = concept
+                                st.session_state.version_source_mode = 'Quill Assisted'
+                                st.session_state.starting_source_mode = 'Quill Assisted'
+                                st.rerun()
+                        except Exception as exc:
+                            st.error(f'Quill could not generate a starting concept: {exc}')
+                st.session_state.story_seed = st.text_area('Saved / Suggested Story Concept — Edit Before Continuing:', key=quill_key, height=180, placeholder="Choose one of the two buttons above, then edit Quill's suggestion here.")
+                st.caption(f'{count_words(st.session_state.story_seed):,} / 1,000 words')
+                if count_words(st.session_state.story_seed) > 1000:
+                    st.warning('Reduce the starting concept to 1,000 words or fewer.')
+            elif selected_seed == replacement_draft_option:
+                st.session_state.version_source_mode = 'Replacement Draft / Manuscript'
+                st.session_state.starting_source_mode = 'Replacement Draft / Manuscript'
+                st.warning('Large documents may result in higher API usage during processing.')
+                st.markdown('\n                <style>\n                [data-testid="stFileUploaderDropzoneInstructions"] {\n                    display: none !important;\n                }\n                </style>\n                ', unsafe_allow_html=True)
+                uploaded_existing_draft = st.file_uploader('Upload / Replace with Different Draft / Manuscript:', type=['docx', 'txt'], key=f"concept_existing_draft_upload_{'short_story'}", help='Use a DOCX or TXT as the authoritative replacement source for this new version.')
+                st.caption('Maximum 120,000 words • DOCX, TXT')
+                if uploaded_existing_draft is not None:
                     try:
-                        with st.spinner('Quill is preparing a starting concept...'):
-                            suggestion = client.models.generate_content(model=model_name, contents=prompt)
-                            concept = str(getattr(suggestion, 'text', '') or '').strip()
-                            if concept and wbs_concept_contains_editorial_commentary(concept):
-                                rewrite_prompt = f"Rewrite the following draft as a STORY SYNOPSIS, not commentary about a story. Keep its protagonist, events, conflict, and outcome intact, but express them only as things that happen in the fictional world. Use 100–180 words of fluent prose. Remove references to themes, writing, narrative structure, the reader, genre, viewpoint, and any phrases beginning 'this story', 'the central idea', or 'the narrative'. Return the revised synopsis only, without a heading.\n\nDRAFT:\n{concept}"
-                                rewritten = client.models.generate_content(model=model_name, contents=rewrite_prompt)
-                                concept = str(getattr(rewritten, 'text', '') or '').strip()
-                        if not concept or not ai_output_is_usable(concept) or wbs_concept_contains_editorial_commentary(concept):
-                            st.error('Quill could not produce a clean story concept. Please try again.')
+                        extracted_existing_draft = extract_uploaded_manuscript_text(uploaded_existing_draft)
+                    except Exception as source_error:
+                        st.error(f'The document could not be read: {source_error}')
+                        extracted_existing_draft = ''
+                    if extracted_existing_draft.strip():
+                        extracted_word_count = count_words(extracted_existing_draft)
+                        if extracted_word_count > 120000:
+                            st.session_state.imported_source_text = ''
+                            st.session_state.imported_source_name = ''
+                            st.session_state.imported_source_word_count = 0
+                            st.error(f'Document contains {extracted_word_count:,} words. WritersBlock accepts existing drafts up to 120,000 words.')
                         else:
-                            st.session_state[quill_key] = concept
-                            st.session_state.story_seed = concept
-                            st.session_state.version_source_mode = 'Quill Assisted'
-                            st.session_state.starting_source_mode = 'Quill Assisted'
-                            st.rerun()
-                    except Exception as exc:
-                        st.error(f'Quill could not generate a starting concept: {exc}')
-            st.session_state.story_seed = st.text_area('Saved / Suggested Story Concept — Edit Before Continuing:', key=quill_key, height=180, placeholder="Choose one of the two buttons above, then edit Quill's suggestion here.")
-            st.caption(f'{count_words(st.session_state.story_seed):,} / 1,000 words')
-            if count_words(st.session_state.story_seed) > 1000:
-                st.warning('Reduce the starting concept to 1,000 words or fewer.')
-        elif selected_seed == replacement_draft_option:
-            st.session_state.version_source_mode = 'Replacement Draft / Manuscript'
-            st.session_state.starting_source_mode = 'Replacement Draft / Manuscript'
-            st.warning('Large documents may result in higher API usage during processing.')
-            st.markdown('\n                <style>\n                [data-testid="stFileUploaderDropzoneInstructions"] {\n                    display: none !important;\n                }\n                </style>\n                ', unsafe_allow_html=True)
-            uploaded_existing_draft = st.file_uploader('Upload / Replace with Different Draft / Manuscript:', type=['docx', 'txt'], key=f"concept_existing_draft_upload_{'short_story'}", help='Use a DOCX or TXT as the authoritative replacement source for this new version.')
-            st.caption('Maximum 120,000 words • DOCX, TXT')
-            if uploaded_existing_draft is not None:
-                try:
-                    extracted_existing_draft = extract_uploaded_manuscript_text(uploaded_existing_draft)
-                except Exception as source_error:
-                    st.error(f'The document could not be read: {source_error}')
-                    extracted_existing_draft = ''
-                if extracted_existing_draft.strip():
-                    extracted_word_count = count_words(extracted_existing_draft)
-                    if extracted_word_count > 120000:
-                        st.session_state.imported_source_text = ''
-                        st.session_state.imported_source_name = ''
-                        st.session_state.imported_source_word_count = 0
-                        st.error(f'Document contains {extracted_word_count:,} words. WritersBlock accepts existing drafts up to 120,000 words.')
-                    else:
-                        st.session_state.imported_source_text = extracted_existing_draft.strip()
-                        st.session_state.imported_source_name = str(getattr(uploaded_existing_draft, 'name', 'Existing Draft') or 'Existing Draft')
-                        st.session_state.imported_source_word_count = extracted_word_count
-                        st.session_state.story_seed = st.session_state.imported_source_text
-            imported_source_text = str(st.session_state.get('imported_source_text') or '').strip()
-            imported_source_name = str(st.session_state.get('imported_source_name') or '').strip()
-            if imported_source_text:
-                st.success(f"Replacement Source Loaded: {imported_source_name or 'Uploaded Document'} — {count_words(imported_source_text):,} words")
-                st.caption('This source is read-only in Concept Development. WritersBlock will use it as protected starting material while the selected format and its development rules control the project.')
-                st.text_area('Replacement Source — Read Only:', value=imported_source_text, height=320, disabled=True, key=f"concept_existing_draft_read_only_preview_{'short_story'}")
-            else:
-                st.info('Upload a DOCX or TXT source to use it as the replacement starting material.')
+                            st.session_state.imported_source_text = extracted_existing_draft.strip()
+                            st.session_state.imported_source_name = str(getattr(uploaded_existing_draft, 'name', 'Existing Draft') or 'Existing Draft')
+                            st.session_state.imported_source_word_count = extracted_word_count
+                            st.session_state.story_seed = st.session_state.imported_source_text
+                imported_source_text = str(st.session_state.get('imported_source_text') or '').strip()
+                imported_source_name = str(st.session_state.get('imported_source_name') or '').strip()
+                if imported_source_text:
+                    st.success(f"Replacement Source Loaded: {imported_source_name or 'Uploaded Document'} — {count_words(imported_source_text):,} words")
+                    st.caption('This source is read-only in Concept Development. WritersBlock will use it as protected starting material while the selected format and its development rules control the project.')
+                    st.text_area('Replacement Source — Read Only:', value=imported_source_text, height=320, disabled=True, key=f"concept_existing_draft_read_only_preview_{'short_story'}")
+                else:
+                    st.info('Upload a DOCX or TXT source to use it as the replacement starting material.')
         _wbs_short_story_stage1 = True
         st.markdown('---')
         _ss_master = wbs_has_saved_master()
