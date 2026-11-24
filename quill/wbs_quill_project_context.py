@@ -74,6 +74,8 @@ def project_title(state: Mapping[str, Any]) -> str:
     )
 
 def current_manuscript(state: Mapping[str, Any]) -> str:
+    from .modular_context import modular,saved
+    if modular(state):return str(saved(state).get("current_draft_output") or "").strip()
     for key in (
         "rewritten_manuscript",
         "current_draft_output",
@@ -87,6 +89,8 @@ def current_manuscript(state: Mapping[str, Any]) -> str:
     return ""
 
 def current_step(state: Mapping[str, Any]) -> tuple[int, str]:
+    from .modular_context import modular,stage,STAGES
+    if modular(state):return stage(state),STAGES[stage(state)-1]
     if WBSProjectSnapshot is not None:
         try:
             snap = WBSProjectSnapshot.from_mapping(state)
@@ -126,6 +130,14 @@ def has_loaded_project(state: Mapping[str, Any]) -> bool:
     return False
 
 def build_context(state: Mapping[str, Any]) -> dict[str, Any]:
+    from .modular_context import modular,build
+    if modular(state):
+        packet=build(state);i=packet['identity'];ctx=dict(state)
+        from sidebar.summary import from_session
+        report=from_session(state)
+        ctx.update(project_title=i['title'],wbs_current_step=i['stage_number'],wbs_current_stage_name=i['stage'],current_manuscript=packet['manuscript'],current_manuscript_word_count=report.completed_words,quill_plot_beats={},quill_scene_blocks={int(n):v for n,v in packet['units'].items()},quill_active_work_object=i['stage'].lower().replace(' ','_'),quill_modular_context=packet)
+        ctx['quill_project_reference']={**i,'title':i['title'],'step':i['stage_number'],'stage':i['stage'],'active_work_object':ctx['quill_active_work_object'],'format_type':i['format'],'format_id':i['format_id'],'current_project_id':i['project_id'],'manuscript_version':i['revision'],'scene_blocks':ctx['quill_scene_blocks'],'manuscript_word_count':report.completed_words,'chosen_option':packet['plot_choice'],'chosen_option_text':packet['approved_plot'],'plot_outline':packet['plot_outline']}
+        return ctx
     try:
         ctx = dict(state)
     except Exception:
@@ -487,6 +499,8 @@ def _clip(value: Any, limit: int) -> str:
     return text[:head] + "\n...[middle omitted for context size]...\n" + text[-tail:]
 
 def build_ai_prompt(state: Mapping[str, Any], user_text: str) -> str:
+    from .modular_context import modular,ai_prompt
+    if modular(state):return ai_prompt(state,user_text)
     ctx = build_context(state)
     ref = ctx["quill_project_reference"]
     manuscript_context = _clip(ctx.get("current_manuscript", ""), 50000)

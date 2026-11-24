@@ -1,0 +1,7 @@
+ca-certificates
+espeak-ng
+espeak-ng-data
+libespeak-ng1
+libgomp1
+libstdc++6
+fonts-liberation2

@@ -108,11 +108,10 @@ def render_quill_for_current_stage(
         # Keep the main app alive, but expose a real Quill failure.
         try:
             st_module.session_state["_wbs_quill_hook_error"] = (
-                f"{type(exc).__name__}: {exc}"
+                type(exc).__name__
             )
             st_module.error(
-                "Quill error: "
-                + st_module.session_state["_wbs_quill_hook_error"]
+                "Quill is temporarily unavailable. Your saved writing is unchanged."
             )
         except Exception:
             pass

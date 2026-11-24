@@ -118,7 +118,7 @@ NEXT_REQUEST_PATTERNS = (
 
 
 QUILL_PRELUDE = (
-    "I’m Quill, your WritersBlock Studio Coach. I keep guidance brief and pointed, "
+    "I’m Quill, Your Frontline Editor-in-Chief. I keep guidance brief and pointed, "
     "tell you what matters now, and recommend the next move. If you want the reasoning "
     "or a deeper discussion, just ask me to explain."
 )
@@ -129,7 +129,7 @@ def quill_prelude(display_name: str = "") -> str:
     if not name:
         return QUILL_PRELUDE
     return (
-        f"I’m Quill, your WritersBlock Studio Coach, {name}. I keep guidance brief and "
+        f"I’m Quill, Your Frontline Editor-in-Chief, {name}. I keep guidance brief and "
         "pointed, tell you what matters now, and recommend the next move. If you want "
         "the reasoning or a deeper discussion, just ask me to explain."
     )

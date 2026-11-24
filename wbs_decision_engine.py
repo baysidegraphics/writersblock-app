@@ -470,6 +470,8 @@ def _action_blockers(
 
 
 def _next_best_action(snapshot: WBSProjectSnapshot) -> str:
+    if snapshot.project_stage == "Publisher Assessment":
+        return "Review the optional publisher assessment, or continue to Final Manuscript without generating a report."
     if snapshot.step == 1:
         if not snapshot.project_title:
             return "Name the project."

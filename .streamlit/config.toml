@@ -1,0 +1,11 @@
+[client]
+showErrorDetails = "none"
+toolbarMode = "minimal"
+
+[server]
+headless = true
+enableXsrfProtection = true
+enableCORS = true
+
+[browser]
+gatherUsageStats = false
